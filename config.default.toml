@@ -1,0 +1,27 @@
+[giva]
+data_dir = "~/.local/share/giva"
+log_level = "INFO"
+
+[mail]
+# Mailboxes to sync (Apple Mail mailbox names)
+mailboxes = ["INBOX", "Sent"]
+# Max messages to fetch per sync via AppleScript
+batch_size = 50
+# Sync interval in minutes (for background scheduler)
+sync_interval_minutes = 15
+
+[calendar]
+# Sync window
+sync_window_past_days = 7
+sync_window_future_days = 30
+sync_interval_minutes = 15
+
+[llm]
+# Assistant model (large) — used for answering user queries
+model = "mlx-community/Qwen3-30B-A3B-4bit"
+# Filter model (small, fast) — used during sync to classify emails as keep/skip
+filter_model = "mlx-community/Qwen3-8B-4bit"
+max_tokens = 2048
+temperature = 0.7
+top_p = 0.9
+context_budget_tokens = 8000
