@@ -354,6 +354,26 @@ async def resume_after_model_selection(app) -> None:
     await run_bootstrap(app)
 
 
+def _cleanup_stale_incomplete(model_id: str) -> None:
+    """Remove .incomplete files left from a previous interrupted download.
+
+    HF's xet downloader can leave sparse ``.incomplete`` files that block
+    a fresh ``snapshot_download()`` from making progress.  Removing them
+    lets the next call re-create them cleanly.
+    """
+    cache_root = Path.home() / ".cache" / "huggingface" / "hub"
+    blobs_dir = cache_root / ("models--" + model_id.replace("/", "--")) / "blobs"
+    if not blobs_dir.is_dir():
+        return
+    for f in blobs_dir.iterdir():
+        if f.is_file() and f.name.endswith(".incomplete"):
+            try:
+                f.unlink()
+                log.info("Cleaned stale incomplete: %s", f.name[:16])
+            except OSError:
+                pass
+
+
 async def _download_model_with_progress(
     model_id: str,
     state: BootstrapState,
@@ -370,6 +390,10 @@ async def _download_model_with_progress(
         state.save()
         notifier.notify()
         return
+
+    # Clean up stale .incomplete files from previous interrupted downloads.
+    # The xet downloader can leave sparse files that block new downloads.
+    await loop.run_in_executor(None, _cleanup_stale_incomplete, model_id)
 
     # Get total size
     total_bytes = await loop.run_in_executor(None, get_model_total_bytes, model_id)
