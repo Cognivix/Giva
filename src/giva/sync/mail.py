@@ -71,14 +71,15 @@ def _mailbox_accessor(mailbox_name: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _classify_chunk(messages: list[dict], config: GivaConfig) -> list[dict]:
+def _classify_chunk(messages: list[dict], config: GivaConfig, store: Store) -> list[dict]:
     """Classify a chunk of email headers using the filter LLM.
 
     Returns only the messages classified as KEEP.
     On any LLM error, defaults to keeping all messages (fail-safe).
+    Uses a personalized filter prompt when the user has completed onboarding.
     """
     from giva.llm.engine import manager
-    from giva.llm.prompts import EMAIL_FILTER_SYSTEM, EMAIL_FILTER_USER
+    from giva.llm.prompts import EMAIL_FILTER_USER, build_filter_prompt
 
     if not messages:
         return messages
@@ -95,8 +96,10 @@ def _classify_chunk(messages: list[dict], config: GivaConfig) -> list[dict]:
 
     emails_block = "\n".join(lines)
 
+    filter_system = build_filter_prompt(store)
+
     prompt_messages = [
-        {"role": "system", "content": EMAIL_FILTER_SYSTEM},
+        {"role": "system", "content": filter_system},
         {"role": "user", "content": EMAIL_FILTER_USER.format(emails_block=emails_block)},
     ]
 
@@ -221,7 +224,7 @@ def _sync_mailbox_headers(
 
         # LLM-based filtering (if config provided)
         if config is not None:
-            kept = _classify_chunk(messages, config)
+            kept = _classify_chunk(messages, config, store)
             filtered += len(messages) - len(kept)
         else:
             kept = messages

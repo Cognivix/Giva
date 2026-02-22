@@ -19,6 +19,8 @@
 		A100000A /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A200000A /* Assets.xcassets */; };
 		A100000B /* BootstrapManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200000D /* BootstrapManager.swift */; };
 		A100000C /* BootstrapView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200000E /* BootstrapView.swift */; };
+		A100000D /* AudioPlaybackService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200000F /* AudioPlaybackService.swift */; };
+		A100000E /* ModelSetupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000010 /* ModelSetupView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -36,6 +38,8 @@
 		A200000C /* GivaApp.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = GivaApp.entitlements; sourceTree = "<group>"; };
 		A200000D /* BootstrapManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BootstrapManager.swift; sourceTree = "<group>"; };
 		A200000E /* BootstrapView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BootstrapView.swift; sourceTree = "<group>"; };
+		A200000F /* AudioPlaybackService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioPlaybackService.swift; sourceTree = "<group>"; };
+		A2000010 /* ModelSetupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelSetupView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -83,6 +87,7 @@
 			isa = PBXGroup;
 			children = (
 				A2000003 /* APIService.swift */,
+				A200000F /* AudioPlaybackService.swift */,
 				A200000D /* BootstrapManager.swift */,
 				A2000004 /* ServerManager.swift */,
 			);
@@ -105,6 +110,7 @@
 				A2000007 /* ChatView.swift */,
 				A2000008 /* QuickActionsView.swift */,
 				A2000009 /* TaskListView.swift */,
+				A2000010 /* ModelSetupView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -197,6 +203,8 @@
 				A1000007 /* ChatView.swift in Sources */,
 				A1000008 /* QuickActionsView.swift in Sources */,
 				A1000009 /* TaskListView.swift in Sources */,
+				A100000D /* AudioPlaybackService.swift in Sources */,
+				A100000E /* ModelSetupView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

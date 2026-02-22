@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
@@ -493,6 +494,41 @@ class Store:
                 """,
                 row,
             )
+
+    def update_profile_data(self, data: dict) -> None:
+        """Merge new keys into the profile_data JSON without touching analytics fields."""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT profile_data FROM user_profile WHERE id = 1"
+            ).fetchone()
+            if row:
+                existing = json.loads(row["profile_data"] or "{}")
+                existing.update(data)
+                conn.execute(
+                    "UPDATE user_profile SET profile_data = ?, updated_at = datetime('now') "
+                    "WHERE id = 1",
+                    (json.dumps(existing),),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO user_profile (id, profile_data) VALUES (1, ?)",
+                    (json.dumps(data),),
+                )
+
+    # --- Reset ---
+
+    def reset_all_data(self) -> None:
+        """Clear all user data for a full reset. Preserves the schema."""
+        with self._conn() as conn:
+            conn.execute("DELETE FROM emails")
+            conn.execute("DELETE FROM events")
+            conn.execute("DELETE FROM tasks")
+            conn.execute("DELETE FROM conversations")
+            conn.execute("DELETE FROM task_extraction_log")
+            conn.execute("DELETE FROM sync_state")
+            conn.execute("DELETE FROM user_profile")
+            # Rebuild FTS index after clearing emails
+            conn.execute("INSERT INTO emails_fts(emails_fts) VALUES('rebuild')")
 
     # --- Stats ---
 

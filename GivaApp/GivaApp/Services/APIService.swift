@@ -79,14 +79,77 @@ class APIService {
 
     // MARK: - SSE Streaming
 
-    func streamChat(query: String) -> AsyncThrowingStream<SSEEvent, Error> {
+    func streamChat(query: String, voice: Bool = false) -> AsyncThrowingStream<SSEEvent, Error> {
         let url = baseURL.appendingPathComponent("api/chat")
-        return sseStream(url: url, method: "POST", body: ChatRequest(query: query))
+        return sseStream(url: url, method: "POST", body: ChatRequest(query: query, voice: voice))
+    }
+
+    func transcribe(audioData: Data, filename: String = "recording.wav") async throws -> String {
+        let url = baseURL.appendingPathComponent("api/transcribe")
+        let boundary = UUID().uuidString
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+
+        var body = Data()
+        body.append("--\(boundary)\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"file\"; filename=\"\(filename)\"\r\n".data(using: .utf8)!)
+        body.append("Content-Type: audio/wav\r\n\r\n".data(using: .utf8)!)
+        body.append(audioData)
+        body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
+        request.httpBody = body
+
+        let (data, response) = try await session.data(for: request)
+        try checkResponse(response, data: data)
+        let result = try decoder.decode(TranscribeResponse.self, from: data)
+        return result.text
+    }
+
+    // MARK: - Onboarding & Reset
+
+    func getOnboardingStatus() async throws -> OnboardingStatusResponse {
+        return try await get("/api/onboarding/status")
+    }
+
+    func streamOnboardingStart() -> AsyncThrowingStream<SSEEvent, Error> {
+        let url = baseURL.appendingPathComponent("api/onboarding/start")
+        return sseStream(url: url, method: "POST")
+    }
+
+    func streamOnboardingRespond(response: String) -> AsyncThrowingStream<SSEEvent, Error> {
+        let url = baseURL.appendingPathComponent("api/onboarding/respond")
+        return sseStream(url: url, method: "POST", body: OnboardingRequest(response: response))
+    }
+
+    func triggerReset() async throws -> ResetResponse {
+        return try await postNoBody("api/reset")
     }
 
     func streamSuggest() -> AsyncThrowingStream<SSEEvent, Error> {
         let url = baseURL.appendingPathComponent("api/suggest")
         return sseStream(url: url, method: "GET")
+    }
+
+    // MARK: - Model Management
+
+    func getModelStatus() async throws -> ModelStatusResponse {
+        return try await get("/api/models/status")
+    }
+
+    func getAvailableModels() async throws -> AvailableModelsResponse {
+        return try await get("/api/models/available")
+    }
+
+    func selectModels(assistant: String, filter: String) async throws -> ModelSelectResponse {
+        return try await post("api/models/select", body: ModelSelectRequest(
+            assistantModel: assistant,
+            filterModel: filter
+        ))
+    }
+
+    func streamModelDownload(modelId: String) -> AsyncThrowingStream<SSEEvent, Error> {
+        let url = baseURL.appendingPathComponent("api/models/download")
+        return sseStream(url: url, method: "POST", body: ModelDownloadRequest(modelId: modelId))
     }
 
     // MARK: - SSE Parser

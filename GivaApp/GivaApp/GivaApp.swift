@@ -17,13 +17,19 @@ struct GivaApp: App {
                      : "circle.dotted") {
             Group {
                 if bootstrap.isComplete {
-                    MainPanelView()
-                        .environmentObject(viewModel)
+                    if viewModel.isModelSetupNeeded {
+                        ModelSetupView(viewModel: viewModel)
+                    } else {
+                        MainPanelView()
+                            .environmentObject(viewModel)
+                    }
                 } else {
                     BootstrapView(bootstrap: bootstrap)
                 }
             }
             .task {
+                // Give the ViewModel a reference to the bootstrap manager
+                viewModel.bootstrapManager = bootstrap
                 await bootstrap.start()
             }
             .onChange(of: bootstrap.isComplete) { _, complete in

@@ -25,3 +25,33 @@ class ExtractedTask(BaseModel):
 class TaskExtractionResult(BaseModel):
     tasks: list[ExtractedTask] = Field(default_factory=list)
     has_actionable_items: bool = False
+
+
+# --- Onboarding profile models ---
+
+
+class PriorityRules(BaseModel):
+    high_priority: list[str] = Field(default_factory=list)
+    low_priority: list[str] = Field(default_factory=list)
+    ignore: list[str] = Field(default_factory=list)
+
+
+class WorkSchedule(BaseModel):
+    start_hour: Optional[int] = None
+    end_hour: Optional[int] = None
+    timezone: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class OnboardingProfileUpdate(BaseModel):
+    role: Optional[str] = None
+    job_title: Optional[str] = None
+    department: Optional[str] = None
+    company: Optional[str] = None
+    personality_notes: Optional[str] = None
+    communication_style: Optional[str] = None
+    priority_rules: Optional[PriorityRules] = None
+    work_schedule: Optional[WorkSchedule] = None
+    preferences: list[str] = Field(default_factory=list)
+    continue_interview: bool = True
+    interview_complete: bool = False

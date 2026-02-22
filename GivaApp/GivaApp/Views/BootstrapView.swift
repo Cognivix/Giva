@@ -137,6 +137,7 @@ struct BootstrapView: View {
         case .findingPython: return "magnifyingglass"
         case .creatingVenv: return "shippingbox"
         case .installingDeps: return "arrow.down.circle"
+        case .downloadingDefaultModel: return "brain"
         case .installingDaemon: return "gearshape.2"
         case .startingServer: return "bolt.fill"
         case .done: return "checkmark.circle.fill"

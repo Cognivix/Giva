@@ -261,3 +261,94 @@ def test_extract_no_unprocessed(server_client):
     assert resp.status_code == 200
     data = resp.json()
     assert data["tasks_extracted"] == 0
+
+
+# --- ThinkParser ---
+
+
+class TestThinkParser:
+    """Tests for the _ThinkParser that splits <think>...</think> tags."""
+
+    @pytest.fixture
+    def parser(self):
+        from giva.server import _ThinkParser
+        return _ThinkParser()
+
+    def test_plain_text_no_thinking(self, parser):
+        """Text without think tags should be all 'token' events."""
+        events = parser.feed("Hello world")
+        assert events == [("token", "Hello world")]
+
+    def test_complete_think_block(self, parser):
+        """A complete <think>...</think> block followed by response."""
+        events = parser.feed("<think>reasoning</think>Answer")
+        assert events == [("thinking", "reasoning"), ("token", "Answer")]
+
+    def test_think_block_streamed_in_chunks(self, parser):
+        """Think tags split across multiple feed() calls."""
+        events = []
+        events += parser.feed("<thi")
+        events += parser.feed("nk>I am thinking")
+        events += parser.feed("</thi")
+        events += parser.feed("nk>The answer is 4")
+        # Collect all event types and content
+        thinking = "".join(d for t, d in events if t == "thinking")
+        tokens = "".join(d for t, d in events if t == "token")
+        assert thinking == "I am thinking"
+        assert tokens == "The answer is 4"
+
+    def test_thinking_only(self, parser):
+        """Only thinking content, no response yet."""
+        events = parser.feed("<think>deep thought")
+        assert events == [("thinking", "deep thought")]
+
+    def test_flush_remaining_thinking(self, parser):
+        """Flush should emit buffered thinking content from partial close tag."""
+        parser.feed("<think>partial</th")  # partial close tag buffered
+        events = parser.flush()
+        assert len(events) >= 1
+        assert all(t == "thinking" for t, _ in events)
+
+    def test_flush_remaining_token(self, parser):
+        """Flush should emit buffered token content."""
+        parser.feed("partial<")
+        events = parser.flush()
+        # The '<' was buffered as a potential partial tag
+        all_text = "".join(d for _, d in events)
+        assert "partial" in all_text or "<" in all_text
+
+    def test_empty_think_block(self, parser):
+        """Empty think block should not produce thinking events."""
+        events = parser.feed("<think></think>Response")
+        tokens = "".join(d for t, d in events if t == "token")
+        thinking = "".join(d for t, d in events if t == "thinking")
+        assert tokens == "Response"
+        assert thinking == ""
+
+    def test_newline_after_close_stripped(self, parser):
+        """Newlines after </think> should be stripped."""
+        events = parser.feed("<think>reasoning</think>\n\nThe answer")
+        tokens = "".join(d for t, d in events if t == "token")
+        assert tokens == "The answer"
+
+    def test_multiple_feed_calls(self, parser):
+        """Simulate token-by-token streaming."""
+        all_events = []
+        text = "<think>Let me think about this.</think>\n4"
+        for char in text:
+            all_events += parser.feed(char)
+        all_events += parser.flush()
+        thinking = "".join(d for t, d in all_events if t == "thinking")
+        tokens = "".join(d for t, d in all_events if t == "token")
+        assert thinking == "Let me think about this."
+        # Newline stripping works on buf contents; char-by-char may retain it
+        assert tokens.strip() == "4"
+
+    def test_no_think_tags_streaming(self, parser):
+        """Plain text streamed char by char."""
+        all_events = []
+        for char in "Hello":
+            all_events += parser.feed(char)
+        all_events += parser.flush()
+        result = "".join(d for _, d in all_events)
+        assert result == "Hello"

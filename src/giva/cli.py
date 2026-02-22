@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import threading
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
@@ -25,6 +26,43 @@ from giva.sync.mail import sync_mail_jxa
 
 console = Console()
 log = logging.getLogger(__name__)
+
+# --- Voice state (module-level, toggled by /voice command) ---
+_voice_enabled = False
+_tts_engine = None
+_stt_engine = None
+_audio_player = None
+_voice_lock = threading.Lock()  # Serializes TTS/STT model access
+
+
+def _get_tts(config: GivaConfig):
+    """Lazy-initialize TTS engine."""
+    global _tts_engine
+    if _tts_engine is None:
+        from giva.audio.tts import TTSEngine
+
+        _tts_engine = TTSEngine(config.voice)
+    return _tts_engine
+
+
+def _get_stt(config: GivaConfig):
+    """Lazy-initialize STT engine."""
+    global _stt_engine
+    if _stt_engine is None:
+        from giva.audio.stt import STTEngine
+
+        _stt_engine = STTEngine(config.voice)
+    return _stt_engine
+
+
+def _get_player():
+    """Lazy-initialize audio player."""
+    global _audio_player
+    if _audio_player is None:
+        from giva.audio.player import AudioPlayer
+
+        _audio_player = AudioPlayer()
+    return _audio_player
 
 
 def main():
@@ -141,6 +179,18 @@ def _handle_command(cmd: str, store: Store, config: GivaConfig):
     elif command == "/profile":
         _cmd_profile(store, config)
 
+    elif command == "/onboard":
+        _cmd_onboard(store, config)
+
+    elif command == "/reset":
+        _cmd_reset(store)
+
+    elif command == "/voice":
+        _cmd_voice(args, config)
+
+    elif command == "/listen":
+        _cmd_listen(store, config)
+
     elif command == "/setup":
         _cmd_setup()
 
@@ -193,6 +243,17 @@ def _cmd_sync(store: Store, config: GivaConfig):
             console.print(f"  Profile update error: {e}", style="yellow")
 
     console.print("Sync complete.", style="bold green")
+
+    # Auto-trigger onboarding if needed
+    from giva.intelligence.onboarding import is_onboarding_needed
+
+    if is_onboarding_needed(store):
+        console.print()
+        console.print(
+            "I'd like to ask you a few questions to personalize your experience.",
+            style="bold cyan",
+        )
+        _cmd_onboard(store, config)
 
 
 def _cmd_status(store: Store, config: GivaConfig):
@@ -384,6 +445,103 @@ def _cmd_profile(store: Store, config: GivaConfig):
         console.print("Profile is empty — not enough email data.", style="dim")
 
 
+def _cmd_onboard(store: Store, config: GivaConfig):
+    """Run the onboarding interview (multi-turn LLM conversation)."""
+    from giva.intelligence.onboarding import (
+        continue_onboarding,
+        is_onboarding_needed,
+        start_onboarding,
+    )
+
+    if not is_onboarding_needed(store):
+        console.print("Onboarding already completed.", style="dim")
+        try:
+            answer = input("Run again? [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return
+        if answer not in ("y", "yes"):
+            return
+        # Reset onboarding state to re-run
+        store.update_profile_data({
+            "onboarding_completed": False,
+            "onboarding_step": 0,
+            "onboarding_history": [],
+        })
+
+    console.print()
+
+    # Stream the first question
+    full_text = []
+    try:
+        with Live(console=console, refresh_per_second=8) as live:
+            for token in start_onboarding(store, config):
+                full_text.append(token)
+                live.update(Markdown("".join(full_text)))
+    except Exception as e:
+        console.print(f"Onboarding error: {e}", style="red")
+        log.exception("Onboarding start failed")
+        return
+    console.print()
+
+    # Multi-turn conversation loop
+    while True:
+        try:
+            user_input = input("Answer> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            console.print("\nOnboarding paused. Resume with /onboard.", style="dim")
+            return
+
+        if not user_input:
+            continue
+
+        full_text = []
+        try:
+            with Live(console=console, refresh_per_second=8) as live:
+                for token in continue_onboarding(user_input, store, config):
+                    full_text.append(token)
+                    live.update(Markdown("".join(full_text)))
+        except Exception as e:
+            console.print(f"Onboarding error: {e}", style="red")
+            log.exception("Onboarding continue failed")
+            return
+        console.print()
+
+        # Check if onboarding is complete
+        profile = store.get_profile()
+        if profile and profile.profile_data.get("onboarding_completed"):
+            console.print(
+                "Onboarding complete! Your preferences have been saved.",
+                style="bold green",
+            )
+            console.print("Run /profile to see your full profile.", style="dim")
+            return
+
+
+def _cmd_reset(store: Store):
+    """Reset all Giva data and start fresh."""
+    console.print(
+        "[bold red]Warning:[/bold red] This will delete ALL synced data "
+        "(emails, events, tasks, conversations, profile).",
+    )
+    try:
+        answer = input("Are you sure? [y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        console.print("Cancelled.", style="dim")
+        return
+
+    if answer not in ("y", "yes"):
+        console.print("Cancelled.", style="dim")
+        return
+
+    try:
+        store.reset_all_data()
+        console.print("All data cleared.", style="green")
+        console.print("Run /sync to re-sync and start onboarding.", style="dim")
+    except Exception as e:
+        console.print(f"Reset error: {e}", style="red")
+        log.exception("Reset failed")
+
+
 def _cmd_setup():
     """Run one-time setup for optional permissions."""
     console.print("\n[bold]Giva Setup[/bold]", style="blue")
@@ -424,6 +582,57 @@ def _cmd_setup():
     console.print()
 
 
+def _cmd_voice(args: str, config: GivaConfig):
+    """Toggle voice mode or set it explicitly."""
+    global _voice_enabled
+    arg = args.strip().lower()
+
+    if arg == "on":
+        _voice_enabled = True
+    elif arg == "off":
+        _voice_enabled = False
+        # Stop any playing audio
+        if _audio_player is not None:
+            _audio_player.stop()
+    else:
+        _voice_enabled = not _voice_enabled
+
+    status = "ON" if _voice_enabled else "OFF"
+    style = "bold green" if _voice_enabled else "dim"
+    console.print(f"Voice mode: {status}", style=style)
+    if _voice_enabled:
+        console.print(
+            f"  TTS: {config.voice.tts_model.split('/')[-1]} | "
+            f"STT: {config.voice.stt_model}",
+            style="dim",
+        )
+        console.print("  Use /listen to speak a query via microphone.", style="dim")
+
+
+def _cmd_listen(store: Store, config: GivaConfig):
+    """Record from microphone, transcribe, and handle as a query."""
+    console.print("Listening... (speak now, pause to stop)", style="bold cyan")
+    try:
+        stt = _get_stt(config)
+        with _voice_lock:
+            text = stt.record_until_silence()
+        if not text:
+            console.print("No speech detected. Try again.", style="yellow")
+            return
+        console.print(f"You said: [bold cyan]{text}[/bold cyan]")
+        console.print()
+        _handle_query(text, store, config)
+    except ImportError as e:
+        console.print(
+            f"Voice dependencies not installed: {e}\n"
+            "  Install with: pip install mlx-audio lightning-whisper-mlx sounddevice soundfile",
+            style="red",
+        )
+    except Exception as e:
+        console.print(f"Listen error: {e}", style="red")
+        log.exception("Listen failed")
+
+
 def _cmd_help():
     """Show help."""
     help_text = """
@@ -439,6 +648,11 @@ def _cmd_help():
 | `/tasks all` | Show all tasks (including done/dismissed) |
 | `/suggest` | Get proactive AI-powered priority suggestions |
 | `/profile` | Show your auto-detected user profile |
+| `/onboard` | Run (or re-run) the personalization interview |
+| `/reset` | Clear all data and start fresh |
+| `/voice` | Toggle voice mode (TTS on responses) |
+| `/voice on\\|off` | Explicitly enable/disable voice mode |
+| `/listen` | Record from mic, transcribe, and query |
 | `/setup` | One-time setup for optional permissions (EventKit) |
 | `/status` | Show database stats, model status, sync times |
 | `/history` | Show recent conversation history |
@@ -455,7 +669,11 @@ def _cmd_help():
 
 
 def _handle_query(query: str, store: Store, config: GivaConfig):
-    """Handle a natural language query via the LLM."""
+    """Handle a natural language query via the LLM.
+
+    When voice mode is enabled, streams tokens to the console AND simultaneously
+    synthesizes TTS audio per sentence in a background thread.
+    """
     stats = store.get_stats()
     if stats["emails"] == 0 and stats["events"] == 0:
         console.print(
@@ -466,14 +684,76 @@ def _handle_query(query: str, store: Store, config: GivaConfig):
 
     console.print()
     full_text = []
-    try:
-        with Live(console=console, refresh_per_second=8) as live:
-            for token in handle_query(query, store, config):
-                full_text.append(token)
-                live.update(Markdown("".join(full_text)))
-    except Exception as e:
-        console.print(f"Error: {e}", style="red")
-        log.exception("Query failed")
+
+    if not _voice_enabled:
+        # Standard text-only streaming
+        try:
+            with Live(console=console, refresh_per_second=8) as live:
+                for token in handle_query(query, store, config):
+                    full_text.append(token)
+                    live.update(Markdown("".join(full_text)))
+        except Exception as e:
+            console.print(f"Error: {e}", style="red")
+            log.exception("Query failed")
+    else:
+        # Voice mode: stream text + synthesize audio per sentence in background
+        try:
+            from giva.audio.tts import split_sentences
+
+            player = _get_player()
+            tts = _get_tts(config)
+            sentence_buffer = ""
+
+            def _synth_and_enqueue(text: str):
+                """Synthesize a sentence and enqueue for playback (runs in thread)."""
+                try:
+                    with _voice_lock:
+                        audio, sr = tts.synthesize(text)
+                    if len(audio) > 0:
+                        player.enqueue(audio, sr)
+                except Exception as e:
+                    log.warning("TTS synthesis error: %s", e)
+
+            with Live(console=console, refresh_per_second=8) as live:
+                for token in handle_query(query, store, config):
+                    full_text.append(token)
+                    live.update(Markdown("".join(full_text)))
+
+                    # Buffer tokens into sentences for TTS
+                    sentence_buffer += token
+                    sentences = split_sentences(sentence_buffer)
+                    if len(sentences) > 1:
+                        for sentence in sentences[:-1]:
+                            sentence = sentence.strip()
+                            if sentence:
+                                # Synthesize in background thread
+                                t = threading.Thread(
+                                    target=_synth_and_enqueue,
+                                    args=(sentence,),
+                                    daemon=True,
+                                )
+                                t.start()
+                        sentence_buffer = sentences[-1]
+
+            # Synthesize any remaining text
+            remainder = sentence_buffer.strip()
+            if remainder:
+                _synth_and_enqueue(remainder)
+
+            # Wait for all audio to finish playing
+            player.wait()
+
+        except ImportError as e:
+            console.print(
+                f"Voice dependencies not installed: {e}\n"
+                "  Install with: pip install mlx-audio lightning-whisper-mlx "
+                "sounddevice soundfile",
+                style="red",
+            )
+        except Exception as e:
+            console.print(f"Error: {e}", style="red")
+            log.exception("Query with voice failed")
+
     console.print()
 
 

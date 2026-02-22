@@ -6,6 +6,7 @@ enum BootstrapPhase: String {
     case findingPython = "Looking for Python..."
     case creatingVenv = "Creating virtual environment..."
     case installingDeps = "Installing dependencies (this may take a minute)..."
+    case downloadingDefaultModel = "Downloading base AI model (~4 GB)..."
     case installingDaemon = "Setting up background service..."
     case startingServer = "Starting Giva server..."
     case done = "Ready!"
@@ -38,8 +39,17 @@ class BootstrapManager: ObservableObject {
     /// the project root is the repo. We store it at first bootstrap and reuse.
     static let projectRootKey = "GivaProjectRoot"
 
+    /// Dirty flag key — set at start of bootstrap, cleared on success.
+    /// If the app launches and this is true, the previous bootstrap failed
+    /// partway through, so we must redo it from scratch.
+    private static let dirtyKey = "GivaBootstrapDirty"
+
     var isBootstrapped: Bool {
-        FileManager.default.isExecutableFile(atPath: Self.venvPython.path)
+        // If a previous bootstrap was interrupted or failed, treat as not bootstrapped.
+        if UserDefaults.standard.bool(forKey: Self.dirtyKey) {
+            return false
+        }
+        return FileManager.default.isExecutableFile(atPath: Self.venvPython.path)
     }
 
     // MARK: - Auto-start (called from .task on the view)
@@ -47,6 +57,13 @@ class BootstrapManager: ObservableObject {
     /// Decide whether to do a full bootstrap or just reconnect to an existing daemon.
     func start() async {
         guard !isComplete && phase != .failed else { return }
+
+        // If a previous bootstrap was interrupted, clean up before retrying.
+        if UserDefaults.standard.bool(forKey: Self.dirtyKey) {
+            log("Previous setup was incomplete — starting fresh...")
+            cleanVenv()
+        }
+
         if isBootstrapped {
             // Fast path: venv already exists from a previous run.
             phase = .startingServer
@@ -58,6 +75,15 @@ class BootstrapManager: ObservableObject {
                 try? ensureDaemonRunning()
                 _ = await checkHealth()
             }
+
+            // Check if the source code has changed since last install.
+            // If the git commit doesn't match, reinstall to pick up changes.
+            if await shouldUpgradeForNewCommit() {
+                log("Source code updated — reinstalling...")
+                await upgrade()
+                return
+            }
+
             phase = .done
             isComplete = true
         } else {
@@ -65,9 +91,68 @@ class BootstrapManager: ObservableObject {
         }
     }
 
+    /// Compare the server's installed commit against the current source repo commit.
+    /// Returns true if the source has changed and the server needs a reinstall.
+    private func shouldUpgradeForNewCommit() async -> Bool {
+        guard let projectRoot = UserDefaults.standard.string(forKey: Self.projectRootKey) else {
+            return false
+        }
+
+        let localCommit = getLocalGitCommit(projectRoot: projectRoot)
+        guard !localCommit.isEmpty, localCommit != "unknown" else { return false }
+
+        let serverCommit = await getServerCommit()
+        guard !serverCommit.isEmpty, serverCommit != "unknown" else { return false }
+
+        if localCommit != serverCommit {
+            log("Version mismatch: server=\(serverCommit.prefix(8)), local=\(localCommit.prefix(8))")
+            return true
+        }
+        return false
+    }
+
+    /// Get the current git HEAD commit from the local source checkout.
+    private func getLocalGitCommit(projectRoot: String) -> String {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        proc.arguments = ["rev-parse", "HEAD"]
+        proc.currentDirectoryURL = URL(fileURLWithPath: projectRoot)
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = FileHandle.nullDevice
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            return String(data: data, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        } catch {
+            return ""
+        }
+    }
+
+    /// Query the running server's /api/health endpoint for its commit hash.
+    private func getServerCommit() async -> String {
+        let url = URL(string: "http://127.0.0.1:7483/api/health")!
+        do {
+            let (data, response) = try await URLSession.shared.data(from: url)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+                return ""
+            }
+            let health = try JSONDecoder().decode(HealthResponse.self, from: data)
+            return health.commit
+        } catch {
+            return ""
+        }
+    }
+
     // MARK: - Main Entry
 
     func runBootstrap() async {
+        // Mark as dirty — only cleared on full success.
+        // If the app is killed or bootstrap fails, the next launch will redo from scratch.
+        UserDefaults.standard.set(true, forKey: Self.dirtyKey)
+
         do {
             // Step 1: Find system python3
             phase = .findingPython
@@ -88,12 +173,17 @@ class BootstrapManager: ObservableObject {
             try await installPackage(projectRoot: projectRoot)
             log("Dependencies installed")
 
-            // Step 5: Install launchd daemon
+            // Step 5: Pre-download default AI model into HuggingFace cache
+            phase = .downloadingDefaultModel
+            try await downloadDefaultModel()
+            log("Default model ready")
+
+            // Step 6: Install launchd daemon
             phase = .installingDaemon
             try installLaunchdAgent()
             log("Background service installed")
 
-            // Step 6: Start the daemon
+            // Step 7: Start the daemon
             phase = .startingServer
             try startLaunchdAgent()
             log("Server starting...")
@@ -108,10 +198,13 @@ class BootstrapManager: ObservableObject {
 
             phase = .done
             isComplete = true
+            // Bootstrap succeeded — clear the dirty flag.
+            UserDefaults.standard.set(false, forKey: Self.dirtyKey)
         } catch {
             phase = .failed
             errorMessage = error.localizedDescription
             log("ERROR: \(error.localizedDescription)")
+            // Dirty flag stays true — next launch will redo from scratch.
         }
     }
 
@@ -248,18 +341,45 @@ class BootstrapManager: ObservableObject {
     // MARK: - Step 4: Install Package
 
     private func installPackage(projectRoot: String) async throws {
-        // pip install -e /path/to/project[dev] into the venv
+        // Step 1: Upgrade pip itself
         try await runProcess(
             executable: Self.venvPip.path,
             arguments: ["install", "--upgrade", "pip"]
         )
+        // Step 2: Install the project editable with voice extras
+        // pip requires the extras in the same argument as the path: ".[voice]"
+        // We use "." as the path and set the working directory via the project root.
         try await runProcess(
             executable: Self.venvPip.path,
-            arguments: ["install", "-e", projectRoot]
+            arguments: ["install", "-e", ".\(Self.voiceExtras)"],
+            workingDirectory: projectRoot
         )
     }
 
-    // MARK: - Step 5: Install launchd Agent
+    /// Extras specifier for pip install. Includes voice dependencies.
+    private static let voiceExtras = "[voice]"
+
+    // MARK: - Step 5: Download Default Model
+
+    /// Default model ID that fits any M-series Mac (~4.5GB).
+    /// Also serves as the filter model and bootstrap advisor.
+    private static let defaultModelId = "mlx-community/Qwen3-8B-4bit"
+
+    private func downloadDefaultModel() async throws {
+        // Use the venv python to download via huggingface_hub (installed as mlx-lm dep)
+        // snapshot_download will skip if already cached.
+        let script = """
+        from huggingface_hub import snapshot_download
+        snapshot_download('\(Self.defaultModelId)')
+        print('Model downloaded successfully')
+        """
+        try await runProcess(
+            executable: Self.venvPython.path,
+            arguments: ["-c", script]
+        )
+    }
+
+    // MARK: - Step 6: Install launchd Agent
 
     private func installLaunchdAgent() throws {
         let plistDir = Self.launchdPlistURL.deletingLastPathComponent()
@@ -285,7 +405,7 @@ class BootstrapManager: ObservableObject {
             "StandardOutPath": logDir.appendingPathComponent("server.log").path,
             "StandardErrorPath": logDir.appendingPathComponent("server.err").path,
             "EnvironmentVariables": [
-                "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+                "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin",
                 "HOME": FileManager.default.homeDirectoryForCurrentUser.path,
             ],
             "ProcessType": "Interactive",
@@ -298,6 +418,48 @@ class BootstrapManager: ObservableObject {
         )
         try data.write(to: Self.launchdPlistURL)
         log("Wrote plist to \(Self.launchdPlistURL.path)")
+    }
+
+    // MARK: - Upgrade (delete venv, reinstall from scratch)
+
+    /// Full upgrade: stop daemon, delete venv, reinstall everything (including voice).
+    func upgrade() async {
+        // Reset state so the UI switches back to the bootstrap view
+        isComplete = false
+        errorMessage = nil
+        logLines = []
+        phase = .findingPython
+        log("Starting upgrade — stopping server...")
+
+        // Stop the launchd daemon
+        stopDaemon()
+
+        // Delete the entire venv directory
+        log("Removing virtual environment...")
+        cleanVenv()
+
+        // Re-run the full bootstrap (which will recreate venv, install with voice, etc.)
+        await runBootstrap()
+    }
+
+    /// Remove the venv directory so the next bootstrap starts fresh.
+    private func cleanVenv() {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: Self.venvDir.path) {
+            try? fm.removeItem(at: Self.venvDir)
+            log("Removed stale virtual environment")
+        }
+    }
+
+    /// Stop the launchd daemon (bootout). Ignores errors if not running.
+    private func stopDaemon() {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        proc.arguments = ["bootout", "gui/\(getuid())/\(Self.launchdLabel)"]
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+        try? proc.run()
+        proc.waitUntilExit()
     }
 
     // MARK: - Public Helpers (used by GivaApp for reconnect)
@@ -369,12 +531,16 @@ class BootstrapManager: ObservableObject {
 
     // MARK: - Process Runner
 
-    private func runProcess(executable: String, arguments: [String]) async throws {
+    private func runProcess(executable: String, arguments: [String], workingDirectory: String? = nil) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             DispatchQueue.global(qos: .userInitiated).async {
                 let proc = Process()
                 proc.executableURL = URL(fileURLWithPath: executable)
                 proc.arguments = arguments
+
+                if let wd = workingDirectory {
+                    proc.currentDirectoryURL = URL(fileURLWithPath: wd)
+                }
 
                 // Minimal PATH so pip/python can find system tools
                 var env = ProcessInfo.processInfo.environment

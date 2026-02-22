@@ -38,16 +38,35 @@ class LLMConfig:
 
 
 @dataclass(frozen=True)
+class VoiceConfig:
+    enabled: bool = False
+    tts_model: str = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-4bit"
+    tts_voice: str = "af_heart"
+    stt_model: str = "distil-medium.en"
+    sample_rate: int = 24000
+
+
+@dataclass(frozen=True)
 class GivaConfig:
     data_dir: Path = field(default_factory=lambda: Path("~/.local/share/giva").expanduser())
     log_level: str = "INFO"
     mail: MailConfig = field(default_factory=MailConfig)
     calendar: CalendarConfig = field(default_factory=CalendarConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
+    voice: VoiceConfig = field(default_factory=VoiceConfig)
 
     @property
     def db_path(self) -> Path:
         return self.data_dir / "giva.db"
+
+
+def _to_bool(val) -> bool:
+    """Convert a config value to bool (handles TOML bools + string env vars)."""
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, str):
+        return val.lower() in ("true", "1", "yes")
+    return bool(val)
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -72,6 +91,9 @@ def _apply_env(raw: dict) -> dict:
         "GIVA_LLM_FILTER_MODEL": ("llm", "filter_model"),
         "GIVA_LLM_MAX_TOKENS": ("llm", "max_tokens"),
         "GIVA_LLM_TEMPERATURE": ("llm", "temperature"),
+        "GIVA_VOICE_ENABLED": ("voice", "enabled"),
+        "GIVA_VOICE_TTS_MODEL": ("voice", "tts_model"),
+        "GIVA_VOICE_STT_MODEL": ("voice", "stt_model"),
     }
     for env_key, path in env_map.items():
         val = os.environ.get(env_key)
@@ -81,6 +103,65 @@ def _apply_env(raw: dict) -> dict:
                 raw[section] = {}
             raw[section][key] = val
     return raw
+
+
+def save_llm_config(model: str, filter_model: str) -> None:
+    """Persist LLM model choices to the user config file.
+
+    Creates or updates ~/.config/giva/config.toml with the [llm] section.
+    Next load_config() call will pick up the changes.
+    """
+    _USER_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+
+    # Read existing config or start fresh
+    raw: dict = {}
+    if _USER_CONFIG.exists():
+        with open(_USER_CONFIG, "rb") as f:
+            raw = tomllib.load(f)
+
+    # Update llm section
+    if "llm" not in raw:
+        raw["llm"] = {}
+    raw["llm"]["model"] = model
+    raw["llm"]["filter_model"] = filter_model
+
+    # Write back as TOML
+    _write_toml(_USER_CONFIG, raw)
+
+
+def _write_toml(path: Path, data: dict) -> None:
+    """Write a dict as TOML to a file (simple serializer for flat/nested dicts)."""
+    lines = []
+    # Write top-level non-dict keys first
+    for key, val in data.items():
+        if not isinstance(val, dict):
+            lines.append(f"{key} = {_toml_value(val)}")
+    if lines:
+        lines.append("")
+
+    # Write sections
+    for key, val in data.items():
+        if isinstance(val, dict):
+            lines.append(f"[{key}]")
+            for k, v in val.items():
+                lines.append(f"{k} = {_toml_value(v)}")
+            lines.append("")
+
+    path.write_text("\n".join(lines))
+
+
+def _toml_value(val) -> str:
+    """Format a Python value as a TOML value string."""
+    if isinstance(val, str):
+        return f'"{val}"'
+    if isinstance(val, bool):
+        return "true" if val else "false"
+    if isinstance(val, (int, float)):
+        return str(val)
+    if isinstance(val, list):
+        items = ", ".join(_toml_value(v) for v in val)
+        return f"[{items}]"
+    return f'"{val}"'
 
 
 def load_config() -> GivaConfig:
@@ -123,5 +204,14 @@ def load_config() -> GivaConfig:
             temperature=float(raw.get("llm", {}).get("temperature", 0.7)),
             top_p=float(raw.get("llm", {}).get("top_p", 0.9)),
             context_budget_tokens=int(raw.get("llm", {}).get("context_budget_tokens", 8000)),
+        ),
+        voice=VoiceConfig(
+            enabled=_to_bool(raw.get("voice", {}).get("enabled", False)),
+            tts_model=raw.get("voice", {}).get(
+                "tts_model", "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-4bit"
+            ),
+            tts_voice=raw.get("voice", {}).get("tts_voice", "af_heart"),
+            stt_model=raw.get("voice", {}).get("stt_model", "distil-medium.en"),
+            sample_rate=int(raw.get("voice", {}).get("sample_rate", 24000)),
         ),
     )

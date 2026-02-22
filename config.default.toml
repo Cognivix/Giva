@@ -25,3 +25,14 @@ max_tokens = 2048
 temperature = 0.7
 top_p = 0.9
 context_budget_tokens = 8000
+
+[voice]
+# Voice mode: TTS (text-to-speech) and STT (speech-to-text)
+enabled = false
+# Qwen3-TTS model via mlx-audio (runs locally on Apple Silicon)
+tts_model = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-4bit"
+tts_voice = "af_heart"
+# Lightning Whisper MLX model for speech-to-text
+stt_model = "distil-medium.en"
+# Audio sample rate for TTS output
+sample_rate = 24000

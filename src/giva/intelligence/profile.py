@@ -42,6 +42,10 @@ def update_profile(store: Store, config: Optional[GivaConfig] = None) -> UserPro
         except Exception as e:
             log.warning("Topic extraction failed (non-fatal): %s", e)
 
+    # Preserve existing profile_data (onboarding answers, preferences, etc.)
+    existing = store.get_profile()
+    preserved_data = existing.profile_data if existing else {}
+
     profile = UserProfile(
         display_name=display_name,
         email_address=email_addr,
@@ -50,6 +54,7 @@ def update_profile(store: Store, config: Optional[GivaConfig] = None) -> UserPro
         active_hours=active_hours,
         avg_response_time_min=avg_response,
         email_volume_daily=volume,
+        profile_data=preserved_data,
         updated_at=datetime.now(),
     )
 
@@ -102,6 +107,37 @@ def get_profile_summary(store: Store) -> str:
 
     if profile.email_volume_daily > 0:
         lines.append(f"Email volume: ~{profile.email_volume_daily:.1f} emails/day")
+
+    # Rich onboarding data from profile_data
+    pd = profile.profile_data
+    if pd.get("onboarding_completed"):
+        if pd.get("role"):
+            lines.append(f"Role: {pd['role']}")
+        if pd.get("job_title"):
+            lines.append(f"Title: {pd['job_title']}")
+        if pd.get("company"):
+            org = pd["company"]
+            if pd.get("department"):
+                org += f" / {pd['department']}"
+            lines.append(f"Organization: {org}")
+        if pd.get("personality_notes"):
+            lines.append(f"Personality: {pd['personality_notes']}")
+        if pd.get("communication_style"):
+            lines.append(f"Communication style: {pd['communication_style']}")
+        pr = pd.get("priority_rules", {})
+        if pr.get("high_priority"):
+            lines.append(f"High priority: {', '.join(pr['high_priority'])}")
+        if pr.get("low_priority"):
+            lines.append(f"Low priority: {', '.join(pr['low_priority'])}")
+        if pr.get("ignore"):
+            lines.append(f"Ignore: {', '.join(pr['ignore'])}")
+        ws = pd.get("work_schedule", {})
+        if ws.get("start_hour") is not None and ws.get("end_hour") is not None:
+            lines.append(f"Work hours: {ws['start_hour']}:00 - {ws['end_hour']}:00")
+        if ws.get("notes"):
+            lines.append(f"Schedule notes: {ws['notes']}")
+        if pd.get("preferences"):
+            lines.append(f"Preferences: {', '.join(pd['preferences'])}")
 
     return "\n".join(lines)
 

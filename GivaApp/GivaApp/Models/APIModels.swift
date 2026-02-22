@@ -6,6 +6,11 @@ import Foundation
 
 struct ChatRequest: Encodable {
     let query: String
+    var voice: Bool = false
+}
+
+struct TranscribeResponse: Codable {
+    let text: String
 }
 
 struct UpdateTaskStatusRequest: Encodable {
@@ -17,6 +22,7 @@ struct UpdateTaskStatusRequest: Encodable {
 struct HealthResponse: Codable {
     let status: String
     let version: String
+    let commit: String
 }
 
 struct SyncInfoItem: Codable {
@@ -130,13 +136,36 @@ struct SyncResponse: Codable {
     let mailFiltered: Int
     let eventsSynced: Int
     let profileUpdated: Bool
+    let needsOnboarding: Bool
 
     enum CodingKeys: String, CodingKey {
         case mailSynced = "mail_synced"
         case mailFiltered = "mail_filtered"
         case eventsSynced = "events_synced"
         case profileUpdated = "profile_updated"
+        case needsOnboarding = "needs_onboarding"
     }
+}
+
+struct OnboardingStatusResponse: Codable {
+    let needsOnboarding: Bool
+    let onboardingStep: Int
+    let onboardingCompleted: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case needsOnboarding = "needs_onboarding"
+        case onboardingStep = "onboarding_step"
+        case onboardingCompleted = "onboarding_completed"
+    }
+}
+
+struct OnboardingRequest: Encodable {
+    let response: String
+}
+
+struct ResetResponse: Codable {
+    let success: Bool
+    let message: String
 }
 
 struct ExtractResponse: Codable {
@@ -151,10 +180,121 @@ struct ErrorResponse: Codable {
     let detail: String
 }
 
+// MARK: - Model Management
+
+struct HardwareInfo: Codable {
+    let chip: String
+    let ramGb: Int
+    let gpuCores: Int
+
+    enum CodingKeys: String, CodingKey {
+        case chip
+        case ramGb = "ram_gb"
+        case gpuCores = "gpu_cores"
+    }
+}
+
+struct ModelInfo: Codable, Identifiable {
+    var id: String { modelId }
+
+    let modelId: String
+    let sizeGb: Double
+    let params: String
+    let quant: String
+    let downloads: Int
+    let isDownloaded: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case modelId = "model_id"
+        case sizeGb = "size_gb"
+        case isDownloaded = "is_downloaded"
+        case params, quant, downloads
+    }
+
+    /// Human-readable display name (strip "mlx-community/" prefix)
+    var displayName: String {
+        modelId.replacingOccurrences(of: "mlx-community/", with: "")
+    }
+
+    /// Formatted size string
+    var sizeString: String {
+        if sizeGb >= 1.0 {
+            return String(format: "%.1f GB", sizeGb)
+        }
+        return String(format: "%.0f MB", sizeGb * 1024)
+    }
+
+    /// Formatted download count
+    var downloadsString: String {
+        if downloads >= 1_000_000 {
+            return String(format: "%.1fM", Double(downloads) / 1_000_000)
+        }
+        if downloads >= 1_000 {
+            return String(format: "%.1fK", Double(downloads) / 1_000)
+        }
+        return "\(downloads)"
+    }
+}
+
+struct ModelRecommendation: Codable {
+    let assistant: String
+    let filter: String
+    let reasoning: String
+}
+
+struct ModelStatusResponse: Codable {
+    let setupCompleted: Bool
+    let currentAssistant: String
+    let currentFilter: String
+    let hardware: HardwareInfo
+
+    enum CodingKeys: String, CodingKey {
+        case setupCompleted = "setup_completed"
+        case currentAssistant = "current_assistant"
+        case currentFilter = "current_filter"
+        case hardware
+    }
+}
+
+struct AvailableModelsResponse: Codable {
+    let hardware: HardwareInfo
+    let compatibleModels: [ModelInfo]
+    let recommended: ModelRecommendation
+
+    enum CodingKeys: String, CodingKey {
+        case hardware
+        case compatibleModels = "compatible_models"
+        case recommended
+    }
+}
+
+struct ModelSelectRequest: Encodable {
+    let assistantModel: String
+    let filterModel: String
+
+    enum CodingKeys: String, CodingKey {
+        case assistantModel = "assistant_model"
+        case filterModel = "filter_model"
+    }
+}
+
+struct ModelSelectResponse: Codable {
+    let success: Bool
+    let message: String
+}
+
+struct ModelDownloadRequest: Encodable {
+    let modelId: String
+
+    enum CodingKeys: String, CodingKey {
+        case modelId = "model_id"
+    }
+}
+
 // MARK: - SSE Event
 
 struct SSEEvent {
-    let event: String   // "token", "done", "error"
+    let event: String   // "token", "thinking", "done", "error", "audio_chunk"
     let data: String
 }
 
@@ -164,12 +304,16 @@ struct ChatMessage: Identifiable {
     let id = UUID()
     let role: String       // "user" or "assistant" or "system"
     var content: String
+    var thinkingContent: String
+    var isThinking: Bool
     let timestamp: Date
     var isStreaming: Bool
 
     init(role: String, content: String, timestamp: Date = Date(), isStreaming: Bool = false) {
         self.role = role
         self.content = content
+        self.thinkingContent = ""
+        self.isThinking = false
         self.timestamp = timestamp
         self.isStreaming = isStreaming
     }

@@ -26,6 +26,22 @@ SKIP: automated digest notifications (CI/CD, Dependabot, monitoring alerts), mar
 
 When in doubt, KEEP. It is better to keep a borderline email than to lose an important one."""
 
+EMAIL_FILTER_SYSTEM_PERSONALIZED = """You are an email classifier. Your job is to decide which emails are worth keeping for the user and which are noise.
+
+{user_context}
+
+KEEP (high priority — always keep): {high_priority}
+
+KEEP (normal): personal emails, work conversations, meeting-related, legitimate business inquiries, actionable notifications, anything requiring a human response or decision.
+
+SKIP (low priority — only keep if clearly relevant): {low_priority}
+
+SKIP (ignore — always filter out): {ignore}
+
+SKIP (general noise): automated digest notifications (CI/CD, Dependabot, monitoring alerts), social media notification digests, automated system alerts with no action needed, pure spam.
+
+When in doubt, KEEP. It is better to keep a borderline email than to lose an important one."""
+
 EMAIL_FILTER_USER = """Classify each email below as KEEP or SKIP.
 
 {emails_block}
@@ -66,6 +82,62 @@ Respond with ONLY a JSON object matching this schema:
   "has_actionable_items": true/false
 }} /no_think"""
 
+ONBOARDING_SYSTEM = """You are Giva, conducting a brief onboarding interview to understand your new user. \
+You have already analyzed their email inbox and calendar. Here are your observations:
+
+{observations}
+
+Your goal: Learn enough about the user to personalize their experience. Ask 3-5 concise questions covering:
+1. Their role, job title, and company/team
+2. What types of emails/contacts are high priority vs. can be ignored
+3. Their typical work schedule and communication preferences
+4. Any special preferences for how Giva should help them
+
+Guidelines:
+- Be warm but efficient. This is not a form — it's a conversation.
+- Reference specific observations to make questions contextual (e.g., "I see you email Sarah Chen frequently — is she on your core team?").
+- One question at a time. Keep it natural.
+- After each user response, output a <profile_update> JSON block with any fields you can now fill.
+- When you have enough information (after 3-5 questions), set "interview_complete": true in the JSON block.
+
+Profile update JSON schema (include only fields you have information for):
+<profile_update>
+{{
+  "role": "string or null",
+  "job_title": "string or null",
+  "department": "string or null",
+  "company": "string or null",
+  "personality_notes": "string or null",
+  "communication_style": "string or null",
+  "priority_rules": {{
+    "high_priority": ["description of what is high priority"],
+    "low_priority": ["description of what is low priority"],
+    "ignore": ["description of what can be ignored"]
+  }},
+  "work_schedule": {{
+    "start_hour": null,
+    "end_hour": null,
+    "timezone": "string or null",
+    "notes": "string or null"
+  }},
+  "preferences": ["any special preferences"],
+  "continue_interview": true,
+  "interview_complete": false
+}}
+</profile_update>"""
+
+ONBOARDING_START_USER = (
+    "This is the start of the onboarding interview. "
+    "Introduce yourself briefly and ask your first question "
+    "based on the observations above. /no_think"
+)
+
+ONBOARDING_CONTINUE_USER = (
+    "The user responded. Continue the interview — update the profile "
+    "with any new information and either ask the next question or "
+    "wrap up if you have enough. /no_think"
+)
+
 QUERY_WITH_CONTEXT = """Here is relevant context from the user's email and calendar:
 
 {context}
@@ -83,6 +155,60 @@ def build_system_prompt(profile_summary: str = "") -> str:
     return SYSTEM_PROMPT.format(
         now=datetime.now().strftime("%A, %B %d, %Y at %I:%M %p"),
         profile_section=profile_section,
+    )
+
+
+def build_filter_prompt(store) -> str:
+    """Build a personalized email filter system prompt from the user profile.
+
+    Returns EMAIL_FILTER_SYSTEM if no profile or onboarding data exists.
+    """
+    profile = store.get_profile()
+    if not profile:
+        return EMAIL_FILTER_SYSTEM
+
+    pd = profile.profile_data
+    if not pd.get("onboarding_completed"):
+        return EMAIL_FILTER_SYSTEM
+
+    pr = pd.get("priority_rules", {})
+    high = pr.get("high_priority", [])
+    low = pr.get("low_priority", [])
+    ignore = pr.get("ignore", [])
+
+    # Build user context
+    context_parts = []
+    title = pd.get("job_title") or pd.get("role")
+    if title:
+        if pd.get("company"):
+            context_parts.append(f"The user is a {title} at {pd['company']}.")
+        else:
+            context_parts.append(f"The user is a {title}.")
+
+    if profile.top_contacts:
+        names = [c.get("name", c.get("addr", "")) for c in profile.top_contacts[:5]]
+        context_parts.append(f"Key contacts (always keep): {', '.join(names)}.")
+
+    user_context = " ".join(context_parts) if context_parts else "A busy professional."
+
+    high_str = (
+        ", ".join(high) if high
+        else "client communications, direct requests, meeting-related, recruiter outreach"
+    )
+    low_str = (
+        ", ".join(low) if low
+        else "marketing newsletters, commercial offers"
+    )
+    ignore_str = (
+        ", ".join(ignore) if ignore
+        else "mass promotional blasts, bulk unsubscribe-style senders"
+    )
+
+    return EMAIL_FILTER_SYSTEM_PERSONALIZED.format(
+        user_context=user_context,
+        high_priority=high_str,
+        low_priority=low_str,
+        ignore=ignore_str,
     )
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timedelta
 from typing import Generator
 
@@ -53,8 +54,10 @@ def handle_query(
         full_response.append(token)
         yield token
 
-    # Save the assistant's response
-    store.add_message("assistant", "".join(full_response))
+    # Save the assistant's response (strip <think>...</think> from conversation history)
+    raw = "".join(full_response)
+    clean = re.sub(r"<think>.*?</think>\s*", "", raw, flags=re.DOTALL)
+    store.add_message("assistant", clean)
 
 
 def _retrieve_context(query: str, store: Store) -> str:
