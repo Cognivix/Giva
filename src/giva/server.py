@@ -977,60 +977,90 @@ async def models_select(req: ModelSelectRequest, request: Request) -> ModelSelec
 
 @app.post("/api/models/download")
 async def models_download(req: ModelDownloadRequest, request: Request):
-    """Download a model with progress reporting via SSE."""
-    from giva.models import is_model_downloaded
+    """Download a model with progress reporting via SSE.
+
+    Polls the HuggingFace cache directory every 2 seconds to report
+    real download progress instead of jumping from 0% to 100%.
+    """
+    import json as _json
+
+    from giva.models import get_model_size_gb, is_model_downloaded
 
     if is_model_downloaded(req.model_id):
         async def already_done():
-            yield {"event": "progress", "data": '{"percent": 100, "status": "already_downloaded"}'}
+            yield {
+                "event": "progress",
+                "data": '{"percent": 100, "status": "already_downloaded"}',
+            }
             yield {"event": "done", "data": ""}
         return EventSourceResponse(already_done())
 
     loop = asyncio.get_event_loop()
-    queue: asyncio.Queue[dict] = asyncio.Queue()
+    done_event = asyncio.Event()
+    download_error: list[str] = []  # mutable container for error from thread
+
+    total_gb = get_model_size_gb(req.model_id)
+    total_bytes = int(total_gb * 1024 * 1024 * 1024) if total_gb else 0
 
     def _run_download():
-        import json as _json
-
-        from giva.models import download_model, get_model_size_gb
-
-        total_gb = get_model_size_gb(req.model_id)
-        total_mb = total_gb * 1024
-
-        # Signal start
-        loop.call_soon_threadsafe(
-            queue.put_nowait,
-            {"event": "progress", "data": _json.dumps({
-                "percent": 0, "downloaded_mb": 0, "total_mb": round(total_mb, 1),
-            })},
-        )
+        from giva.models import download_model
 
         try:
             download_model(req.model_id)
-            loop.call_soon_threadsafe(
-                queue.put_nowait,
-                {"event": "progress", "data": _json.dumps({
-                    "percent": 100, "downloaded_mb": round(total_mb, 1),
-                    "total_mb": round(total_mb, 1),
-                })},
-            )
-            loop.call_soon_threadsafe(
-                queue.put_nowait, {"event": "done", "data": ""},
-            )
         except Exception as e:
-            loop.call_soon_threadsafe(
-                queue.put_nowait, {"event": "error", "data": str(e)},
-            )
+            download_error.append(str(e))
+        finally:
+            loop.call_soon_threadsafe(done_event.set)
 
-    future = loop.run_in_executor(None, _run_download)
+    loop.run_in_executor(None, _run_download)
+
+    def _get_cache_size() -> int:
+        """Get current size on disk for this model's cache repo."""
+        try:
+            from huggingface_hub import scan_cache_dir
+
+            cache = scan_cache_dir()
+            for repo in cache.repos:
+                if repo.repo_id == req.model_id:
+                    return repo.size_on_disk
+        except Exception:
+            pass
+        return 0
 
     async def event_generator():
-        while True:
-            item = await queue.get()
-            yield item
-            if item["event"] in ("done", "error"):
-                break
-        await future
+        total_mb = total_bytes / (1024 ** 2) if total_bytes else 0
+
+        while not done_event.is_set():
+            cached = await loop.run_in_executor(None, _get_cache_size)
+            if total_bytes > 0:
+                pct = min(round(cached / total_bytes * 100, 1), 99.9)
+                dl_mb = round(cached / (1024 ** 2), 1)
+            else:
+                pct = 0
+                dl_mb = round(cached / (1024 ** 2), 1)
+            yield {
+                "event": "progress",
+                "data": _json.dumps({
+                    "percent": pct, "downloaded_mb": dl_mb,
+                    "total_mb": round(total_mb, 1),
+                }),
+            }
+            try:
+                await asyncio.wait_for(done_event.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                pass  # poll again
+
+        if download_error:
+            yield {"event": "error", "data": download_error[0]}
+        else:
+            yield {
+                "event": "progress",
+                "data": _json.dumps({
+                    "percent": 100, "downloaded_mb": round(total_mb, 1),
+                    "total_mb": round(total_mb, 1),
+                }),
+            }
+            yield {"event": "done", "data": ""}
 
     return EventSourceResponse(event_generator())
 
