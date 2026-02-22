@@ -1015,17 +1015,24 @@ async def models_download(req: ModelDownloadRequest, request: Request):
     loop.run_in_executor(None, _run_download)
 
     def _get_cache_size() -> int:
-        """Get current size on disk for this model's cache repo."""
-        try:
-            from huggingface_hub import scan_cache_dir
+        """Get actual bytes on disk for this model, including incomplete downloads.
 
-            cache = scan_cache_dir()
-            for repo in cache.repos:
-                if repo.repo_id == req.model_id:
-                    return repo.size_on_disk
+        ``scan_cache_dir()`` only counts *committed* blobs, which stays at 0
+        until each multi-GB shard finishes.  We measure the real directory
+        size instead so the progress bar moves during the download.
+        """
+        try:
+            from pathlib import Path
+
+            cache_root = Path.home() / ".cache" / "huggingface" / "hub"
+            # HF Hub stores repos as models--<org>--<name>
+            dir_name = "models--" + req.model_id.replace("/", "--")
+            model_dir = cache_root / dir_name
+            if not model_dir.is_dir():
+                return 0
+            return sum(f.stat().st_size for f in model_dir.rglob("*") if f.is_file())
         except Exception:
-            pass
-        return 0
+            return 0
 
     async def event_generator():
         total_mb = total_bytes / (1024 ** 2) if total_bytes else 0
