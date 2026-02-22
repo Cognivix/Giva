@@ -203,17 +203,24 @@ struct ModelInfo: Codable, Identifiable {
     let quant: String
     let downloads: Int
     let isDownloaded: Bool
+    let downloadStatus: String  // complete | partial | not_downloaded
 
     enum CodingKeys: String, CodingKey {
         case modelId = "model_id"
         case sizeGb = "size_gb"
         case isDownloaded = "is_downloaded"
+        case downloadStatus = "download_status"
         case params, quant, downloads
     }
 
     /// Human-readable display name (strip "mlx-community/" prefix)
     var displayName: String {
         modelId.replacingOccurrences(of: "mlx-community/", with: "")
+    }
+
+    /// True if download was interrupted and can be resumed
+    var isPartiallyDownloaded: Bool {
+        downloadStatus == "partial"
     }
 
     /// Formatted size string

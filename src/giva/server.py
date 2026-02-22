@@ -178,6 +178,7 @@ class ModelInfoResponse(BaseModel):
     quant: str
     downloads: int
     is_downloaded: bool = False
+    download_status: str = "not_downloaded"  # complete | partial | not_downloaded
 
 
 class ModelRecommendationResponse(BaseModel):
@@ -911,7 +912,7 @@ async def models_available(request: Request) -> AvailableModelsResponse:
         from giva.models import (
             discover_benchmark_keywords,
             filter_compatible_models,
-            get_downloaded_model_ids,
+            get_all_cached_model_ids,
             list_mlx_models,
             recommend_models,
             refine_model_search,
@@ -942,17 +943,19 @@ async def models_available(request: Request) -> AvailableModelsResponse:
 
         compatible = filter_compatible_models(all_models, max_size)
 
-        # Check which models are already downloaded
-        downloaded_ids = get_downloaded_model_ids()
+        # Check download status for all cached models
+        cached_statuses = get_all_cached_model_ids()
 
         # Phase 4: Ask LLM to pick from size-appropriate candidates
         with _llm_lock:
             rec = recommend_models(hw, compatible, config)
 
-        return hw, compatible, rec, downloaded_ids
+        return hw, compatible, rec, cached_statuses
 
     loop = asyncio.get_event_loop()
-    hw, compatible, rec, downloaded_ids = await loop.run_in_executor(None, _run)
+    hw, compatible, rec, cached_statuses = await loop.run_in_executor(
+        None, _run
+    )
 
     return AvailableModelsResponse(
         hardware=HardwareInfoResponse(
@@ -967,7 +970,10 @@ async def models_available(request: Request) -> AvailableModelsResponse:
                 params=m["params"],
                 quant=m["quant"],
                 downloads=m["downloads"],
-                is_downloaded=m["model_id"] in downloaded_ids,
+                is_downloaded=cached_statuses.get(m["model_id"]) == "complete",
+                download_status=cached_statuses.get(
+                    m["model_id"], "not_downloaded"
+                ),
             )
             for m in compatible
         ],
@@ -1007,6 +1013,43 @@ async def models_select(req: ModelSelectRequest, request: Request) -> ModelSelec
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save model choices: {e}")
+
+
+class ModelCleanupRequest(BaseModel):
+    model_id: str = Field(..., min_length=1)
+
+
+class ModelCleanupResponse(BaseModel):
+    success: bool
+    freed_mb: float
+    message: str
+
+
+@app.post("/api/models/cleanup")
+async def models_cleanup(req: ModelCleanupRequest) -> ModelCleanupResponse:
+    """Remove incomplete download temp files for a model.
+
+    Use when a partial download cannot be resumed or should be discarded.
+    """
+    from giva.models import cleanup_incomplete_download, get_model_download_status
+
+    status = get_model_download_status(req.model_id)
+    if status == "not_downloaded":
+        return ModelCleanupResponse(
+            success=True, freed_mb=0, message="Model not in cache"
+        )
+    if status == "complete":
+        return ModelCleanupResponse(
+            success=True, freed_mb=0, message="Model is fully downloaded"
+        )
+
+    freed = cleanup_incomplete_download(req.model_id)
+    freed_mb = round(freed / (1024 ** 2), 1)
+    return ModelCleanupResponse(
+        success=True,
+        freed_mb=freed_mb,
+        message=f"Cleaned up {freed_mb} MB of incomplete downloads",
+    )
 
 
 def _get_repo_size_bytes_safe(model_id: str) -> int:

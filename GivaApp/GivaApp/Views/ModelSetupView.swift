@@ -156,7 +156,7 @@ struct ModelSetupView: View {
     }
 
     private func recommendationCard(_ rec: ModelRecommendation, models: AvailableModelsResponse) -> some View {
-        let status = isRecommendedDownloaded(models)
+        let status = recommendedDownloadStatus(models)
         return VStack(alignment: .leading, spacing: 8) {
             Label("Recommended for your Mac", systemImage: "sparkles")
                 .font(.headline)
@@ -174,11 +174,7 @@ struct ModelSetupView: View {
                         Text("Assistant")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        if status.assistant {
-                            Image(systemName: "checkmark.circle.fill")
-                                .font(.caption2)
-                                .foregroundStyle(.green)
-                        }
+                        downloadStatusIcon(status.assistant)
                     }
                     Text(rec.assistant.replacingOccurrences(of: "mlx-community/", with: ""))
                         .font(.callout.bold())
@@ -189,32 +185,58 @@ struct ModelSetupView: View {
                         Text("Filter")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        if status.filter {
-                            Image(systemName: "checkmark.circle.fill")
-                                .font(.caption2)
-                                .foregroundStyle(.green)
-                        }
+                        downloadStatusIcon(status.filter)
                     }
                     Text(rec.filter.replacingOccurrences(of: "mlx-community/", with: ""))
                         .font(.callout.bold())
                 }
             }
 
-            if status.assistant && status.filter {
+            if status.assistant == "complete" && status.filter == "complete" {
                 Label("Both models already downloaded", systemImage: "checkmark.circle")
                     .font(.caption)
                     .foregroundStyle(.green)
+            } else if status.assistant == "partial" || status.filter == "partial" {
+                Label("Interrupted download detected — will resume", systemImage: "arrow.clockwise.circle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
             }
         }
         .padding()
         .background(.fill.tertiary, in: RoundedRectangle(cornerRadius: 10))
     }
 
+    @ViewBuilder
+    private func downloadStatusIcon(_ status: String) -> some View {
+        switch status {
+        case "complete":
+            Image(systemName: "checkmark.circle.fill")
+                .font(.caption2)
+                .foregroundStyle(.green)
+        case "partial":
+            Image(systemName: "exclamationmark.circle.fill")
+                .font(.caption2)
+                .foregroundStyle(.orange)
+        default:
+            EmptyView()
+        }
+    }
+
+    /// Sort priority: complete > partial > not_downloaded
+    private func downloadSortOrder(_ model: ModelInfo) -> Int {
+        switch model.downloadStatus {
+        case "complete": return 0
+        case "partial": return 1
+        default: return 2
+        }
+    }
+
     private func assistantModels(_ models: AvailableModelsResponse) -> [ModelInfo] {
         models.compatibleModels
             .filter { !$0.modelId.lowercased().contains("embedding") }
             .sorted {
-                if $0.isDownloaded != $1.isDownloaded { return $0.isDownloaded }
+                let order0 = downloadSortOrder($0), order1 = downloadSortOrder($1)
+                if order0 != order1 { return order0 < order1 }
                 return $0.sizeGb > $1.sizeGb
             }
     }
@@ -223,7 +245,8 @@ struct ModelSetupView: View {
         models.compatibleModels
             .filter { $0.sizeGb <= 10 && !$0.modelId.lowercased().contains("embedding") }
             .sorted {
-                if $0.isDownloaded != $1.isDownloaded { return $0.isDownloaded }
+                let order0 = downloadSortOrder($0), order1 = downloadSortOrder($1)
+                if order0 != order1 { return order0 < order1 }
                 return $0.sizeGb < $1.sizeGb
             }
     }
@@ -270,18 +293,23 @@ struct ModelSetupView: View {
     }
 
     private func modelPickerLabel(_ model: ModelInfo) -> String {
-        let downloaded = model.isDownloaded ? " [ready]" : ""
-        return "\(model.displayName) (\(model.sizeString))\(downloaded)"
+        let suffix: String
+        switch model.downloadStatus {
+        case "complete": suffix = " [ready]"
+        case "partial": suffix = " [incomplete]"
+        default: suffix = ""
+        }
+        return "\(model.displayName) (\(model.sizeString))\(suffix)"
     }
 
-    private func isRecommendedDownloaded(_ models: AvailableModelsResponse) -> (assistant: Bool, filter: Bool) {
-        let aDownloaded = models.compatibleModels.first {
+    private func recommendedDownloadStatus(_ models: AvailableModelsResponse) -> (assistant: String, filter: String) {
+        let aStatus = models.compatibleModels.first {
             $0.modelId == models.recommended.assistant
-        }?.isDownloaded ?? false
-        let fDownloaded = models.compatibleModels.first {
+        }?.downloadStatus ?? "not_downloaded"
+        let fStatus = models.compatibleModels.first {
             $0.modelId == models.recommended.filter
-        }?.isDownloaded ?? false
-        return (aDownloaded, fDownloaded)
+        }?.downloadStatus ?? "not_downloaded"
+        return (aStatus, fStatus)
     }
 
     // MARK: - Footer

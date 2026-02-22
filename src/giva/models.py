@@ -453,27 +453,109 @@ def download_model(model_id: str, on_progress=None) -> None:
     log.info("Model %s downloaded.", model_id)
 
 
+_WEIGHT_EXTS = (".safetensors", ".bin", ".gguf")
+
+
 def is_model_downloaded(model_id: str) -> bool:
     """Check if a model is fully downloaded in the HuggingFace cache.
 
-    A repo can have metadata files (.json, .jinja) in the cache from a
-    partial download or ``mlx_lm.load()`` probe without the actual
-    weight files (.safetensors).  We require at least one weight file
-    with nonzero size to consider the model "downloaded".
+    A model is considered downloaded only if:
+    1. It has at least one weight file (.safetensors/.bin/.gguf) in the cache
+    2. There are NO ``.incomplete`` temp files (indicating an interrupted download)
+    3. All weight symlinks in the snapshot resolve to real files
+
+    This catches partial downloads that ``scan_cache_dir()`` reports as
+    present because some shards completed before the download was interrupted.
     """
-    return model_id in get_downloaded_model_ids()
+    status = get_model_download_status(model_id)
+    return status == "complete"
 
 
-# Minimum total weight-file size (in bytes) to consider a model downloaded.
-# Metadata-only repos typically have < 1 MB of .safetensors data.
-_MIN_WEIGHT_BYTES = 10 * 1024 * 1024  # 10 MB
+_SHARD_PATTERN = re.compile(r"-(\d+)-of-(\d+)\.")
+
+
+def get_model_download_status(model_id: str) -> str:
+    """Return the download status of a model in the HuggingFace cache.
+
+    Returns one of:
+    - ``"complete"``: all weight files present, no incomplete temps,
+      all shards accounted for in multi-shard models
+    - ``"partial"``: some weight files present but download was interrupted
+      (detected via ``.incomplete`` temps or missing shards)
+    - ``"not_downloaded"``: no weight files in cache
+    """
+    cache_root = Path.home() / ".cache" / "huggingface" / "hub"
+    model_dir = cache_root / ("models--" + model_id.replace("/", "--"))
+
+    if not model_dir.is_dir():
+        return "not_downloaded"
+
+    blobs_dir = model_dir / "blobs"
+    if not blobs_dir.is_dir():
+        return "not_downloaded"
+
+    # Check for .incomplete temp files (download was interrupted mid-shard)
+    has_incomplete = any(
+        f.name.endswith(".incomplete")
+        for f in blobs_dir.iterdir()
+        if f.is_file()
+    )
+
+    # Find the current snapshot (via refs/main)
+    refs_main = model_dir / "refs" / "main"
+    if not refs_main.exists():
+        return "partial" if has_incomplete else "not_downloaded"
+
+    try:
+        commit_hash = refs_main.read_text().strip()
+    except OSError:
+        return "partial" if has_incomplete else "not_downloaded"
+
+    snap_dir = model_dir / "snapshots" / commit_hash
+    if not snap_dir.is_dir():
+        return "partial" if has_incomplete else "not_downloaded"
+
+    # Count weight files in the snapshot that resolve to real blobs
+    weight_files: list[str] = []
+    for f in snap_dir.iterdir():
+        if any(f.name.endswith(ext) for ext in _WEIGHT_EXTS):
+            # Symlink must resolve to a real file (not broken)
+            target = f.resolve()
+            if target.exists() and target.stat().st_size > 0:
+                weight_files.append(f.name)
+
+    if not weight_files:
+        return "not_downloaded"
+
+    if has_incomplete:
+        return "partial"
+
+    # For multi-shard models (e.g. model-00001-of-00017.safetensors),
+    # verify all shards are present.
+    expected_total = 0
+    for name in weight_files:
+        m = _SHARD_PATTERN.search(name)
+        if m:
+            total = int(m.group(2))
+            if total > expected_total:
+                expected_total = total
+
+    if expected_total > 0 and len(weight_files) < expected_total:
+        # Some shards are missing — incomplete download
+        log.debug(
+            "Model %s has %d/%d shards", model_id,
+            len(weight_files), expected_total,
+        )
+        return "partial"
+
+    return "complete"
 
 
 def get_downloaded_model_ids() -> set[str]:
-    """Return the set of model IDs that have actual weight files in the cache.
+    """Return the set of model IDs that are fully downloaded in the cache.
 
-    Filters out repos that only contain metadata (config, tokenizer)
-    but no real weight data.
+    Only includes models where all weight shards are complete (no
+    ``.incomplete`` temp files from interrupted downloads).
     """
     try:
         from huggingface_hub import scan_cache_dir
@@ -481,11 +563,57 @@ def get_downloaded_model_ids() -> set[str]:
         cache = scan_cache_dir()
         ids: set[str] = set()
         for repo in cache.repos:
-            if repo.size_on_disk >= _MIN_WEIGHT_BYTES:
+            if get_model_download_status(repo.repo_id) == "complete":
                 ids.add(repo.repo_id)
         return ids
     except Exception:
         return set()
+
+
+def get_all_cached_model_ids() -> dict[str, str]:
+    """Return all model IDs in the cache with their download status.
+
+    Returns a dict of ``{model_id: status}`` where status is one of
+    ``"complete"``, ``"partial"``, ``"not_downloaded"``.
+    """
+    try:
+        from huggingface_hub import scan_cache_dir
+
+        cache = scan_cache_dir()
+        result: dict[str, str] = {}
+        for repo in cache.repos:
+            status = get_model_download_status(repo.repo_id)
+            if status != "not_downloaded":
+                result[repo.repo_id] = status
+        return result
+    except Exception:
+        return {}
+
+
+def cleanup_incomplete_download(model_id: str) -> int:
+    """Remove .incomplete temp files for a model.
+
+    Returns the number of bytes freed.  Use this when a download cannot
+    be resumed and the partial files are wasting disk space.
+    """
+    cache_root = Path.home() / ".cache" / "huggingface" / "hub"
+    model_dir = cache_root / ("models--" + model_id.replace("/", "--"))
+    blobs_dir = model_dir / "blobs"
+
+    if not blobs_dir.is_dir():
+        return 0
+
+    freed = 0
+    for f in blobs_dir.iterdir():
+        if f.is_file() and f.name.endswith(".incomplete"):
+            try:
+                freed += f.stat().st_size
+                f.unlink()
+                log.info("Removed incomplete blob: %s (%d MB)",
+                         f.name[:16], freed // (1024 ** 2))
+            except OSError as e:
+                log.warning("Failed to remove %s: %s", f.name, e)
+    return freed
 
 
 def get_model_size_gb(model_id: str) -> float:
