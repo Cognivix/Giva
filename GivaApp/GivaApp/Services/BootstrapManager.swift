@@ -430,32 +430,39 @@ class BootstrapManager: ObservableObject {
         guard let api = apiService else { return }
 
         observeTask = Task {
-            let stream = api.streamBootstrapStatus()
-            do {
-                for try await event in stream {
-                    guard !Task.isCancelled else { break }
+            var retryDelay: UInt64 = 2_000_000_000  // Start at 2s
 
-                    if let data = event.data.data(using: .utf8),
-                       let status = try? JSONDecoder().decode(BootstrapStatusResponse.self, from: data) {
-                        applyServerStatus(status)
-                    }
+            while !Task.isCancelled && !isReady {
+                do {
+                    let stream = api.streamBootstrapStatus()
+                    retryDelay = 2_000_000_000  // Reset on successful connection
 
-                    if event.event == "ready" || event.event == "error" {
-                        break
-                    }
-                }
-            } catch {
-                if !Task.isCancelled {
-                    // Connection lost — try to reconnect after delay
-                    try? await Task.sleep(nanoseconds: 2_000_000_000)
-                    if !Task.isCancelled && !isReady {
-                        // Refresh status via REST
-                        if let status = try? await api.getBootstrapStatus() {
+                    for try await event in stream {
+                        guard !Task.isCancelled else { return }
+
+                        if let data = event.data.data(using: .utf8),
+                           let status = try? JSONDecoder().decode(BootstrapStatusResponse.self, from: data) {
                             applyServerStatus(status)
-                            if !status.ready {
-                                observeBootstrapStream()
-                            }
                         }
+
+                        if event.event == "ready" || event.event == "error" {
+                            return
+                        }
+                    }
+                    // Stream ended normally (server closed it) — reconnect
+                } catch {
+                    if Task.isCancelled { return }
+                }
+
+                // Reconnect after delay (with backoff up to 10s)
+                try? await Task.sleep(nanoseconds: retryDelay)
+                retryDelay = min(retryDelay + 1_000_000_000, 10_000_000_000)
+
+                // Refresh status via REST in case we missed updates
+                if !Task.isCancelled, !isReady {
+                    if let status = try? await api.getBootstrapStatus() {
+                        applyServerStatus(status)
+                        if status.ready { return }
                     }
                 }
             }

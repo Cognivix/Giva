@@ -25,6 +25,8 @@ enum APIError: LocalizedError {
 class APIService {
     let baseURL: URL
     private let session: URLSession
+    /// Dedicated session for SSE streams — long/no timeout so downloads can report for hours.
+    private let sseSession: URLSession
     private let decoder = JSONDecoder()
     private let encoder = JSONEncoder()
 
@@ -34,6 +36,11 @@ class APIService {
         config.timeoutIntervalForRequest = 300   // 5 min for sync/extract
         config.timeoutIntervalForResource = 600
         self.session = URLSession(configuration: config)
+
+        let sseConfig = URLSessionConfiguration.default
+        sseConfig.timeoutIntervalForRequest = 86400   // 24h — SSE events arrive every ~2s
+        sseConfig.timeoutIntervalForResource = 86400  // 24h — downloads can take hours
+        self.sseSession = URLSession(configuration: sseConfig)
     }
 
     // MARK: - JSON Endpoints
@@ -190,7 +197,7 @@ class APIService {
                 }
 
                 do {
-                    let (bytes, response) = try await session.bytes(for: request)
+                    let (bytes, response) = try await sseSession.bytes(for: request)
 
                     guard let httpResponse = response as? HTTPURLResponse,
                           httpResponse.statusCode == 200 else {
