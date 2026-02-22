@@ -53,6 +53,9 @@ class BootstrapManager: ObservableObject {
     /// SSE observation task
     private var observeTask: Task<Void, Never>?
 
+    /// Polling fallback task — ensures progress updates even if SSE drops
+    private var pollTask: Task<Void, Never>?
+
     // --- Paths ---
 
     static let dataDir = FileManager.default.homeDirectoryForCurrentUser
@@ -109,8 +112,9 @@ class BootstrapManager: ObservableObject {
             // Server is healthy but bootstrap endpoint failed — still observe
         }
 
-        // Phase 5: Observe server bootstrap state via SSE
+        // Phase 5: Observe server bootstrap state via SSE + REST polling fallback
         observeBootstrapStream()
+        startProgressPolling()
     }
 
     /// Retry: if setup script failed, re-run it.  If server bootstrap failed, tell server.
@@ -134,6 +138,7 @@ class BootstrapManager: ObservableObject {
             let status = try await api.retryBootstrap()
             applyServerStatus(status)
             observeBootstrapStream()
+            startProgressPolling()
         } catch {
             errorMessage = "Retry failed: \(error.localizedDescription)"
         }
@@ -164,6 +169,7 @@ class BootstrapManager: ObservableObject {
                     applyServerStatus(status)
                     if !status.ready {
                         observeBootstrapStream()
+                        startProgressPolling()
                     }
                 } else {
                     errorMessage = "Server didn't restart after upgrade"
@@ -402,7 +408,7 @@ class BootstrapManager: ObservableObject {
 
     // MARK: - Phase 4+5: Observe Server Bootstrap
 
-    private func applyServerStatus(_ status: BootstrapStatusResponse) {
+    private func applyServerStatus(_ status: BootstrapStatusResponse, source: String = "unknown") {
         serverStatus = status
         isReady = status.ready
         displayMessage = status.displayMessage
@@ -422,36 +428,62 @@ class BootstrapManager: ObservableObject {
         }
         if !newProgress.isEmpty {
             downloadProgress = newProgress
+            // Debug: log every progress update
+            for (modelId, info) in newProgress {
+                let short = modelId.replacingOccurrences(of: "mlx-community/", with: "")
+                print("[Bootstrap:\(source)] \(short): \(String(format: "%.1f", info.percent))% (\(Int(info.downloadedMb ?? 0)) MB)")
+            }
         }
     }
 
     private func observeBootstrapStream() {
         observeTask?.cancel()
-        guard let api = apiService else { return }
+        guard let api = apiService else {
+            print("[Bootstrap:SSE] No apiService — cannot observe")
+            return
+        }
 
+        print("[Bootstrap:SSE] Starting SSE observation")
         observeTask = Task {
             var retryDelay: UInt64 = 2_000_000_000  // Start at 2s
+            var connectionCount = 0
 
             while !Task.isCancelled && !isReady {
+                connectionCount += 1
+                print("[Bootstrap:SSE] Connecting (attempt \(connectionCount))...")
                 do {
                     let stream = api.streamBootstrapStatus()
                     retryDelay = 2_000_000_000  // Reset on successful connection
+                    var eventCount = 0
 
                     for try await event in stream {
-                        guard !Task.isCancelled else { return }
+                        guard !Task.isCancelled else {
+                            print("[Bootstrap:SSE] Task cancelled during stream")
+                            return
+                        }
+                        eventCount += 1
 
                         if let data = event.data.data(using: .utf8),
                            let status = try? JSONDecoder().decode(BootstrapStatusResponse.self, from: data) {
-                            applyServerStatus(status)
+                            applyServerStatus(status, source: "SSE")
+                        } else {
+                            print("[Bootstrap:SSE] Failed to decode event #\(eventCount): \(event.event)")
                         }
 
                         if event.event == "ready" || event.event == "error" {
+                            print("[Bootstrap:SSE] Terminal event: \(event.event)")
+                            pollTask?.cancel()
                             return
                         }
                     }
                     // Stream ended normally (server closed it) — reconnect
+                    print("[Bootstrap:SSE] Stream ended after \(eventCount) events — reconnecting")
                 } catch {
-                    if Task.isCancelled { return }
+                    if Task.isCancelled {
+                        print("[Bootstrap:SSE] Task cancelled during error handling")
+                        return
+                    }
+                    print("[Bootstrap:SSE] Error: \(error.localizedDescription) — reconnecting")
                 }
 
                 // Reconnect after delay (with backoff up to 10s)
@@ -461,11 +493,42 @@ class BootstrapManager: ObservableObject {
                 // Refresh status via REST in case we missed updates
                 if !Task.isCancelled, !isReady {
                     if let status = try? await api.getBootstrapStatus() {
-                        applyServerStatus(status)
-                        if status.ready { return }
+                        print("[Bootstrap:SSE] REST fallback during reconnect")
+                        applyServerStatus(status, source: "SSE-REST")
+                        if status.ready {
+                            pollTask?.cancel()
+                            return
+                        }
                     }
                 }
             }
+            print("[Bootstrap:SSE] Exited loop (cancelled=\(Task.isCancelled) ready=\(isReady))")
+        }
+    }
+
+    /// Polls server status via REST every 3s as a safety net.
+    /// Ensures progress updates even if the SSE stream drops.
+    private func startProgressPolling() {
+        pollTask?.cancel()
+        guard let api = apiService else { return }
+
+        print("[Bootstrap:Poll] Starting REST polling fallback")
+        pollTask = Task {
+            while !Task.isCancelled && !isReady {
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                guard !Task.isCancelled && !isReady else { break }
+
+                if let status = try? await api.getBootstrapStatus() {
+                    applyServerStatus(status, source: "Poll")
+                    if status.ready {
+                        print("[Bootstrap:Poll] Server ready — stopping poll")
+                        break
+                    }
+                } else {
+                    print("[Bootstrap:Poll] REST fetch failed")
+                }
+            }
+            print("[Bootstrap:Poll] Exited (cancelled=\(Task.isCancelled) ready=\(isReady))")
         }
     }
 
