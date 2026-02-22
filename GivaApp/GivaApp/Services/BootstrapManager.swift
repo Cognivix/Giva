@@ -307,21 +307,55 @@ class BootstrapManager: ObservableObject {
 
     // MARK: - Phase 2: Launchctl
 
+    /// Check if the launchd service is currently loaded.
+    private func isServiceLoaded() -> Bool {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        proc.arguments = ["print", "gui/\(getuid())/\(Self.launchdLabel)"]
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+        try? proc.run()
+        proc.waitUntilExit()
+        return proc.terminationStatus == 0
+    }
+
+    /// Bootout the service only if it is currently loaded.
+    /// Returns true if the service was booted out (or wasn't loaded).
+    private func bootoutIfLoaded() -> Bool {
+        guard isServiceLoaded() else { return true }
+
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        proc.arguments = ["bootout", "gui/\(getuid())/\(Self.launchdLabel)"]
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+        try? proc.run()
+        proc.waitUntilExit()
+
+        // Give launchd a moment to clean up
+        Thread.sleep(forTimeInterval: 0.5)
+
+        return proc.terminationStatus == 0
+    }
+
     private func ensureLaunchdLoaded() {
         guard FileManager.default.fileExists(atPath: Self.launchdPlistURL.path) else {
             return
         }
 
-        // Bootout first (ignore errors)
-        let unload = Process()
-        unload.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        unload.arguments = ["bootout", "gui/\(getuid())/\(Self.launchdLabel)"]
-        unload.standardOutput = FileHandle.nullDevice
-        unload.standardError = FileHandle.nullDevice
-        try? unload.run()
-        unload.waitUntilExit()
+        // If already loaded, we're done — kickstart to ensure it's running
+        if isServiceLoaded() {
+            let kick = Process()
+            kick.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+            kick.arguments = ["kickstart", "gui/\(getuid())/\(Self.launchdLabel)"]
+            kick.standardOutput = FileHandle.nullDevice
+            kick.standardError = FileHandle.nullDevice
+            try? kick.run()
+            kick.waitUntilExit()
+            return
+        }
 
-        // Bootstrap
+        // Not loaded — bootstrap it
         let load = Process()
         load.executableURL = URL(fileURLWithPath: "/bin/launchctl")
         load.arguments = ["bootstrap", "gui/\(getuid())", Self.launchdPlistURL.path]
@@ -331,27 +365,18 @@ class BootstrapManager: ObservableObject {
         try? load.run()
         load.waitUntilExit()
 
-        // Error 37 = already loaded, that's fine
-        if load.terminationStatus != 0 && load.terminationStatus != 37 {
+        if load.terminationStatus != 0 {
             let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
             let errStr = String(data: errData, encoding: .utf8) ?? ""
-            if !errStr.contains("37") {
+            // 37 = already loaded (race), that's fine
+            if !errStr.contains("37") && load.terminationStatus != 37 {
                 logLines.append("Warning: launchctl error: \(errStr)")
             }
         }
     }
 
     private func restartDaemon() {
-        // Bootout
-        let unload = Process()
-        unload.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        unload.arguments = ["bootout", "gui/\(getuid())/\(Self.launchdLabel)"]
-        unload.standardOutput = FileHandle.nullDevice
-        unload.standardError = FileHandle.nullDevice
-        try? unload.run()
-        unload.waitUntilExit()
-
-        // Re-bootstrap
+        _ = bootoutIfLoaded()
         ensureLaunchdLoaded()
     }
 
