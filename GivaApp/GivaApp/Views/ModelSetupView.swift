@@ -135,14 +135,7 @@ struct ModelSetupView: View {
             }
 
             if viewModel.isDownloadingModels {
-                VStack(spacing: 8) {
-                    ProgressView()
-                    Text("Setting up models...")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .padding()
-                .background(.fill.tertiary, in: RoundedRectangle(cornerRadius: 10))
+                downloadProgressCard
             }
 
             if !viewModel.isDownloadingModels {
@@ -219,6 +212,83 @@ struct ModelSetupView: View {
                 .foregroundStyle(.orange)
         default:
             EmptyView()
+        }
+    }
+
+    // MARK: - Download Progress
+
+    private var downloadProgressCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("Downloading models", systemImage: "arrow.down.circle")
+                .font(.headline)
+
+            if bootstrap.downloadProgress.isEmpty {
+                // Server hasn't started reporting yet
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Preparing download...")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                ForEach(
+                    bootstrap.downloadProgress.sorted(by: { $0.key < $1.key }),
+                    id: \.key
+                ) { modelId, progress in
+                    modelDownloadRow(modelId: modelId, progress: progress)
+                }
+            }
+        }
+        .padding()
+        .background(.fill.tertiary, in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func modelDownloadRow(modelId: String, progress: BootstrapStepProgress) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(modelId.replacingOccurrences(of: "mlx-community/", with: ""))
+                .font(.caption.bold())
+
+            if progress.percent >= 100 {
+                HStack(spacing: 4) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                        .font(.caption2)
+                    Text("Complete")
+                        .font(.caption)
+                        .foregroundStyle(.green)
+                }
+            } else if progress.percent < 0 {
+                // Indeterminate — total size unknown
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    if let dlMb = progress.downloadedMb {
+                        Text(String(format: "%.0f MB downloaded", dlMb))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            } else {
+                ProgressView(value: progress.percent, total: 100)
+                    .tint(.blue)
+
+                HStack {
+                    Text(String(format: "%.1f%%", progress.percent))
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    if let dlMb = progress.downloadedMb,
+                       let totalMb = progress.totalMb, totalMb > 0 {
+                        Text(String(
+                            format: "%.1f / %.1f GB",
+                            dlMb / 1024, totalMb / 1024
+                        ))
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                    }
+                }
+            }
         }
     }
 
