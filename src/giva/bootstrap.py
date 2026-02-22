@@ -217,22 +217,48 @@ class BootstrapNotifier:
 
 
 def get_cache_size(model_id: str) -> int:
-    """Get bytes of weight files on disk for a model (including .incomplete)."""
+    """Get bytes of weight files on disk for a model (including .incomplete).
+
+    HuggingFace blobs use content hashes as filenames (no original extension),
+    so we match:
+    - Committed blobs ≥10 MB = weight data (hash-named, no extension)
+    - ``.incomplete`` temp files = in-progress downloads
+
+    For ``.incomplete`` files we use ``st_blocks * 512`` (actual disk usage)
+    instead of ``st_size`` because HF's xet downloader pre-allocates sparse
+    files at the full target size while writing data into them randomly.
+    Using ``st_size`` would over-report progress.
+    """
     cache_root = Path.home() / ".cache" / "huggingface" / "hub"
     model_dir = cache_root / ("models--" + model_id.replace("/", "--"))
     if not model_dir.is_dir():
         return 0
+
+    blobs_dir = model_dir / "blobs"
+    if not blobs_dir.is_dir():
+        return 0
+
     total = 0
-    for f in model_dir.rglob("*"):
+    seen_inodes: set[int] = set()  # avoid double-counting via symlinks
+
+    for f in blobs_dir.iterdir():
         if not f.is_file():
             continue
-        name = f.name
-        if any(name.endswith(ext) or name.endswith(ext + ".incomplete")
-               for ext in _WEIGHT_EXTS):
-            try:
-                total += f.stat().st_size
-            except OSError:
-                pass
+        try:
+            st = f.stat()
+            if st.st_ino in seen_inodes:
+                continue
+            seen_inodes.add(st.st_ino)
+
+            if f.name.endswith(".incomplete"):
+                # Sparse file — use actual blocks on disk
+                total += st.st_blocks * 512
+            elif st.st_size >= 10 * 1024 * 1024:
+                # Committed weight blob
+                total += st.st_size
+        except OSError:
+            pass
+
     return total
 
 

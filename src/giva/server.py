@@ -1103,30 +1103,13 @@ async def models_download(req: ModelDownloadRequest, request: Request):
     def _get_cache_size() -> int:
         """Get actual bytes of weight files on disk, including incomplete downloads.
 
-        Only counts .safetensors/.bin/.gguf files (and their .incomplete temps)
-        to match the total from ``_get_repo_size_bytes()``.
+        HuggingFace blobs use content hashes as filenames (not original
+        extensions), so we count all large blobs (>10 MB = weight data)
+        and all ``.incomplete`` temp files (in-progress downloads).
         """
         try:
-            from pathlib import Path
-
-            cache_root = Path.home() / ".cache" / "huggingface" / "hub"
-            dir_name = "models--" + req.model_id.replace("/", "--")
-            model_dir = cache_root / dir_name
-            if not model_dir.is_dir():
-                return 0
-            weight_exts = (".safetensors", ".bin", ".gguf")
-            total = 0
-            for f in model_dir.rglob("*"):
-                if not f.is_file():
-                    continue
-                name = f.name
-                if any(name.endswith(ext) or name.endswith(ext + ".incomplete")
-                       for ext in weight_exts):
-                    try:
-                        total += f.stat().st_size
-                    except OSError:
-                        pass
-            return total
+            from giva.bootstrap import get_cache_size
+            return get_cache_size(req.model_id)
         except Exception:
             return 0
 
