@@ -30,15 +30,39 @@ class ModelManager:
         self._models: dict[str, tuple] = {}  # model_id -> (model, tokenizer)
 
     def ensure_loaded(self, model_id: str):
-        """Load a model if not already loaded."""
+        """Load a model if not already loaded.
+
+        Checks the HuggingFace cache first — if the model hasn't been
+        downloaded yet, raises ``RuntimeError`` immediately instead of
+        silently downloading a multi-GB model during inference.
+        """
         if model_id in self._models:
             return
+
+        # Guard: refuse to auto-download large models during inference.
+        # The /api/models/download endpoint handles explicit downloads.
+        if not self._is_in_cache(model_id):
+            raise RuntimeError(
+                f"Model {model_id} is not downloaded. "
+                "Use the model setup UI or /api/models/download to download it first."
+            )
+
         log.info("Loading model %s ...", model_id)
         from mlx_lm import load
 
         model, tokenizer = load(model_id)
         self._models[model_id] = (model, tokenizer)
         log.info("Model %s loaded.", model_id)
+
+    @staticmethod
+    def _is_in_cache(model_id: str) -> bool:
+        """Check if a model's weight files are present in the HuggingFace cache."""
+        try:
+            from giva.models import is_model_downloaded
+
+            return is_model_downloaded(model_id)
+        except Exception:
+            return True  # Fail open — let mlx_lm.load decide
 
     def _get(self, model_id: str) -> tuple:
         """Get a loaded model and tokenizer."""

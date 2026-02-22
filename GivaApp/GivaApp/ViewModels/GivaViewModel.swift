@@ -444,13 +444,16 @@ class GivaViewModel: ObservableObject {
             isDownloadingModels = false
             isModelSetupNeeded = false
 
-            // Reload config on server side
-            await refreshStatus()
+            // After model setup, trigger initial sync which auto-starts
+            // onboarding when needed (via result.needsOnboarding)
+            await triggerSync()
         }
     }
 
     func skipModelSetup() {
         isModelSetupNeeded = false
+        // Even when skipping, trigger sync so onboarding can start
+        Task { await triggerSync() }
     }
 
     // MARK: - Upgrade

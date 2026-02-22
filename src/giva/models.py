@@ -454,17 +454,36 @@ def download_model(model_id: str, on_progress=None) -> None:
 
 
 def is_model_downloaded(model_id: str) -> bool:
-    """Check if a model is already in the HuggingFace cache."""
+    """Check if a model is fully downloaded in the HuggingFace cache.
+
+    A repo can have metadata files (.json, .jinja) in the cache from a
+    partial download or ``mlx_lm.load()`` probe without the actual
+    weight files (.safetensors).  We require at least one weight file
+    with nonzero size to consider the model "downloaded".
+    """
     return model_id in get_downloaded_model_ids()
 
 
+# Minimum total weight-file size (in bytes) to consider a model downloaded.
+# Metadata-only repos typically have < 1 MB of .safetensors data.
+_MIN_WEIGHT_BYTES = 10 * 1024 * 1024  # 10 MB
+
+
 def get_downloaded_model_ids() -> set[str]:
-    """Return the set of all model IDs present in the HuggingFace cache."""
+    """Return the set of model IDs that have actual weight files in the cache.
+
+    Filters out repos that only contain metadata (config, tokenizer)
+    but no real weight data.
+    """
     try:
         from huggingface_hub import scan_cache_dir
 
         cache = scan_cache_dir()
-        return {repo.repo_id for repo in cache.repos}
+        ids: set[str] = set()
+        for repo in cache.repos:
+            if repo.size_on_disk >= _MIN_WEIGHT_BYTES:
+                ids.add(repo.repo_id)
+        return ids
     except Exception:
         return set()
 
