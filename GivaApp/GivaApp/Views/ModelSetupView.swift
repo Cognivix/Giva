@@ -40,7 +40,11 @@ struct ModelSetupView: View {
         }
         .frame(width: 420, height: 520)
         .task {
-            await viewModel.fetchAvailableModels()
+            // Only fetch if we don't already have model data (avoids
+            // re-showing the spinner every time the popover reopens).
+            if viewModel.availableModels == nil && !viewModel.isSettingUpModels {
+                await viewModel.fetchAvailableModels()
+            }
         }
     }
 

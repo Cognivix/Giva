@@ -10,6 +10,7 @@ import SwiftUI
 struct GivaApp: App {
     @StateObject private var viewModel = GivaViewModel()
     @StateObject private var bootstrap = BootstrapManager()
+    @State private var didLaunch = false
 
     var body: some Scene {
         MenuBarExtra("Giva", systemImage: bootstrap.isComplete
@@ -28,7 +29,10 @@ struct GivaApp: App {
                 }
             }
             .task {
-                // Give the ViewModel a reference to the bootstrap manager
+                // Only run bootstrap once at app launch — not every
+                // time the menu bar popover is opened/closed.
+                guard !didLaunch else { return }
+                didLaunch = true
                 viewModel.bootstrapManager = bootstrap
                 await bootstrap.start()
             }
