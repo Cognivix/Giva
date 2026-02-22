@@ -20,6 +20,10 @@ class BootstrapManager: ObservableObject {
     @Published var errorMessage: String?
     @Published var logLines: [String] = []
 
+    /// Guard against concurrent bootstrap runs (e.g. `.task` re-firing
+    /// while `upgrade()` is already running `runBootstrap()`).
+    private var isRunning = false
+
     // Paths
     static let dataDir = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".local/share/giva")
@@ -56,7 +60,7 @@ class BootstrapManager: ObservableObject {
 
     /// Decide whether to do a full bootstrap or just reconnect to an existing daemon.
     func start() async {
-        guard !isComplete && phase != .failed else { return }
+        guard !isComplete && phase != .failed && !isRunning else { return }
 
         // If a previous bootstrap was interrupted, clean up before retrying.
         if UserDefaults.standard.bool(forKey: Self.dirtyKey) {
@@ -149,6 +153,9 @@ class BootstrapManager: ObservableObject {
     // MARK: - Main Entry
 
     func runBootstrap() async {
+        isRunning = true
+        defer { isRunning = false }
+
         // Mark as dirty — only cleared on full success.
         // If the app is killed or bootstrap fails, the next launch will redo from scratch.
         UserDefaults.standard.set(true, forKey: Self.dirtyKey)
@@ -424,6 +431,8 @@ class BootstrapManager: ObservableObject {
 
     /// Full upgrade: stop daemon, delete venv, reinstall everything (including voice).
     func upgrade() async {
+        guard !isRunning else { return }
+
         // Reset state so the UI switches back to the bootstrap view
         isComplete = false
         errorMessage = nil
