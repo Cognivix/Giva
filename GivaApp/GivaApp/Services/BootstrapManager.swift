@@ -1,36 +1,64 @@
-// BootstrapManager.swift - First-run setup: venv, pip install, launchd daemon.
+// BootstrapManager.swift - Thin launcher + observer.
+//
+// The app only does two things that require local process control:
+//   1. Run giva-setup.py (create venv + pip install) when no venv exists
+//   2. Call launchctl to load/unload the daemon
+//
+// Everything else (model downloads, config validation, readiness) is
+// owned by the giva-server daemon.  This manager observes the server's
+// bootstrap state via REST/SSE and mirrors it for SwiftUI.
 
 import Foundation
 
-enum BootstrapPhase: String {
-    case findingPython = "Looking for Python..."
-    case creatingVenv = "Creating virtual environment..."
-    case installingDeps = "Installing dependencies (this may take a minute)..."
-    case downloadingDefaultModel = "Downloading base AI model (~4 GB)..."
-    case installingDaemon = "Setting up background service..."
-    case startingServer = "Starting Giva server..."
-    case done = "Ready!"
-    case failed = "Setup failed"
+/// Setup script progress (JSON lines from giva-setup.py stdout)
+struct SetupProgress: Codable {
+    let step: String
+    let status: String
+    var detail: String?
+    var error: String?
+    var version: String?
 }
 
 @MainActor
 class BootstrapManager: ObservableObject {
-    @Published var phase: BootstrapPhase = .findingPython
-    @Published var isComplete = false
+    // --- Published state for the UI ---
+
+    /// Server-reported bootstrap status (nil until server is reachable)
+    @Published var serverStatus: BootstrapStatusResponse?
+
+    /// True once the server reports ready
+    @Published var isReady = false
+
+    /// True while giva-setup.py is running (pre-server phase)
+    @Published var isSettingUp = false
+
+    /// True once the server is reachable (health check passes)
+    @Published var isServerReachable = false
+
+    /// Current display message for the UI
+    @Published var displayMessage = "Starting..."
+
+    /// Error message (setup script or server)
     @Published var errorMessage: String?
+
+    /// Log lines from the setup script (pre-server phase)
     @Published var logLines: [String] = []
 
-    /// Guard against concurrent bootstrap runs (e.g. `.task` re-firing
-    /// while `upgrade()` is already running `runBootstrap()`).
-    private var isRunning = false
+    /// Download progress from server bootstrap (model_id → progress info)
+    @Published var downloadProgress: [String: BootstrapStepProgress] = [:]
 
-    // Paths
+    /// API service (created once server is reachable)
+    private(set) var apiService: APIService?
+
+    /// SSE observation task
+    private var observeTask: Task<Void, Never>?
+
+    // --- Paths ---
+
     static let dataDir = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".local/share/giva")
     static let venvDir = dataDir.appendingPathComponent(".venv")
     static let venvPython = venvDir.appendingPathComponent("bin/python3")
-    static let venvPip = venvDir.appendingPathComponent("bin/pip")
-    static let venvGivaServer = venvDir.appendingPathComponent("bin/giva-server")
 
     private static let launchdLabel = "com.giva.server"
     private static let launchdPlistURL: URL = {
@@ -38,186 +66,380 @@ class BootstrapManager: ObservableObject {
             .appendingPathComponent("Library/LaunchAgents/com.giva.server.plist")
     }()
 
-    /// Source project root — derived by walking up from the app bundle.
-    /// Works in dev (Xcode run) because the app sits inside DerivedData while
-    /// the project root is the repo. We store it at first bootstrap and reuse.
     static let projectRootKey = "GivaProjectRoot"
 
-    /// Dirty flag key — set at start of bootstrap, cleared on success.
-    /// If the app launches and this is true, the previous bootstrap failed
-    /// partway through, so we must redo it from scratch.
-    private static let dirtyKey = "GivaBootstrapDirty"
+    // --- Main Entry ---
 
-    var isBootstrapped: Bool {
-        // If a previous bootstrap was interrupted or failed, treat as not bootstrapped.
-        if UserDefaults.standard.bool(forKey: Self.dirtyKey) {
-            return false
-        }
-        return FileManager.default.isExecutableFile(atPath: Self.venvPython.path)
-    }
-
-    // MARK: - Auto-start (called from .task on the view)
-
-    /// Decide whether to do a full bootstrap or just reconnect to an existing daemon.
     func start() async {
-        guard !isComplete && phase != .failed && !isRunning else { return }
+        guard !isReady && !isSettingUp else { return }
 
-        // If a previous bootstrap was interrupted, clean up before retrying.
-        if UserDefaults.standard.bool(forKey: Self.dirtyKey) {
-            log("Previous setup was incomplete — starting fresh...")
-            cleanVenv()
+        // Phase 1: Ensure venv exists (local operation)
+        if !isVenvHealthy() {
+            isSettingUp = true
+            displayMessage = "First-time setup..."
+            logLines = []
+            errorMessage = nil
+
+            let success = await runSetupScript()
+            isSettingUp = false
+
+            guard success else { return }
         }
 
-        if isBootstrapped {
-            // Fast path: venv already exists from a previous run.
-            phase = .startingServer
-            log("Already bootstrapped — reconnecting to daemon...")
-            try? ensureDaemonRunning()
-            let healthy = await checkHealth()
-            if !healthy {
-                // One more attempt
-                try? ensureDaemonRunning()
-                _ = await checkHealth()
-            }
+        // Phase 2: Ensure daemon is loaded via launchctl
+        ensureLaunchdLoaded()
 
-            // Check if the source code has changed since last install.
-            // If the git commit doesn't match, reinstall to pick up changes.
-            if await shouldUpgradeForNewCommit() {
-                log("Source code updated — reinstalling...")
-                await upgrade()
-                return
-            }
+        // Phase 3: Wait for server health
+        displayMessage = "Starting server..."
+        isServerReachable = await waitForHealth(timeout: 90)
 
-            phase = .done
-            isComplete = true
-        } else {
-            await runBootstrap()
+        guard isServerReachable else {
+            errorMessage = "Server didn't start. Check logs at ~/.local/share/giva/logs/"
+            displayMessage = "Server failed to start"
+            return
+        }
+
+        apiService = APIService(baseURL: URL(string: "http://127.0.0.1:7483")!)
+
+        // Phase 4: Kick off bootstrap on the server (if needed)
+        do {
+            let status = try await apiService!.startBootstrap()
+            applyServerStatus(status)
+        } catch {
+            // Server is healthy but bootstrap endpoint failed — still observe
+        }
+
+        // Phase 5: Observe server bootstrap state via SSE
+        observeBootstrapStream()
+    }
+
+    /// Retry: if setup script failed, re-run it.  If server bootstrap failed, tell server.
+    func retry() async {
+        errorMessage = nil
+        logLines = []
+
+        if !isServerReachable {
+            // Need to redo everything from setup script
+            await start()
+            return
+        }
+
+        // Server is reachable — ask it to retry
+        guard let api = apiService else {
+            await start()
+            return
+        }
+
+        do {
+            let status = try await api.retryBootstrap()
+            applyServerStatus(status)
+            observeBootstrapStream()
+        } catch {
+            errorMessage = "Retry failed: \(error.localizedDescription)"
         }
     }
 
-    /// Compare the server's installed commit against the current source repo commit.
-    /// Returns true if the source has changed and the server needs a reinstall.
-    private func shouldUpgradeForNewCommit() async -> Bool {
-        guard let projectRoot = UserDefaults.standard.string(forKey: Self.projectRootKey) else {
+    /// Trigger a lightweight upgrade (pip install only, then daemon restart)
+    func triggerUpgrade() async {
+        guard let api = apiService else { return }
+        guard let projectRoot = resolveProjectRoot() else { return }
+
+        displayMessage = "Upgrading..."
+
+        do {
+            let response = try await api.triggerUpgrade(projectRoot: projectRoot)
+            if response.restartRequired {
+                displayMessage = "Restarting server..."
+                restartDaemon()
+                isServerReachable = false
+                apiService = nil
+                serverStatus = nil
+                isReady = false
+
+                // Wait for daemon to come back
+                isServerReachable = await waitForHealth(timeout: 60)
+                if isServerReachable {
+                    apiService = APIService(baseURL: URL(string: "http://127.0.0.1:7483")!)
+                    let status = try await apiService!.getBootstrapStatus()
+                    applyServerStatus(status)
+                    if !status.ready {
+                        observeBootstrapStream()
+                    }
+                } else {
+                    errorMessage = "Server didn't restart after upgrade"
+                    displayMessage = "Upgrade failed"
+                }
+            }
+        } catch {
+            errorMessage = "Upgrade failed: \(error.localizedDescription)"
+        }
+    }
+
+    // MARK: - Phase 1: Setup Script
+
+    private func isVenvHealthy() -> Bool {
+        FileManager.default.isExecutableFile(atPath: Self.venvPython.path)
+    }
+
+    /// Run giva-setup.py and parse JSON lines from stdout
+    private func runSetupScript() async -> Bool {
+        guard let projectRoot = resolveProjectRoot() else {
+            errorMessage = "Could not locate Giva project source (pyproject.toml)"
+            displayMessage = "Setup failed"
             return false
         }
 
-        let localCommit = getLocalGitCommit(projectRoot: projectRoot)
-        guard !localCommit.isEmpty, localCommit != "unknown" else { return false }
+        guard let python = findSystemPython() else {
+            errorMessage = "Python 3.11+ not found. Install via: brew install python3"
+            displayMessage = "Setup failed"
+            return false
+        }
 
-        let serverCommit = await getServerCommit()
-        guard !serverCommit.isEmpty, serverCommit != "unknown" else { return false }
+        let setupScript = findSetupScript(projectRoot: projectRoot)
+        guard let script = setupScript else {
+            errorMessage = "giva-setup.py not found in \(projectRoot)/scripts/"
+            displayMessage = "Setup failed"
+            return false
+        }
 
-        if localCommit != serverCommit {
-            log("Version mismatch: server=\(serverCommit.prefix(8)), local=\(localCommit.prefix(8))")
-            return true
+        displayMessage = "Setting up environment..."
+
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async { [self] in
+                let proc = Process()
+                proc.executableURL = URL(fileURLWithPath: python)
+                proc.arguments = [script, "--project-root", projectRoot]
+
+                var env = ProcessInfo.processInfo.environment
+                let extra = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+                env["PATH"] = extra + ":" + (env["PATH"] ?? "")
+                proc.environment = env
+
+                let outPipe = Pipe()
+                let errPipe = Pipe()
+                proc.standardOutput = outPipe
+                proc.standardError = errPipe
+
+                // Read stdout line by line for JSON progress
+                outPipe.fileHandleForReading.readabilityHandler = { handle in
+                    let data = handle.availableData
+                    guard !data.isEmpty else { return }
+                    guard let line = String(data: data, encoding: .utf8)?
+                        .trimmingCharacters(in: .whitespacesAndNewlines),
+                          !line.isEmpty else { return }
+
+                    // Parse each JSON line
+                    for jsonLine in line.components(separatedBy: "\n") {
+                        let trimmed = jsonLine.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !trimmed.isEmpty else { continue }
+
+                        if let jsonData = trimmed.data(using: .utf8),
+                           let progress = try? JSONDecoder().decode(SetupProgress.self, from: jsonData) {
+                            Task { @MainActor in
+                                self.handleSetupProgress(progress)
+                            }
+                        }
+                    }
+                }
+
+                do {
+                    try proc.run()
+                } catch {
+                    Task { @MainActor in
+                        self.errorMessage = "Failed to run setup: \(error.localizedDescription)"
+                        self.displayMessage = "Setup failed"
+                    }
+                    continuation.resume(returning: false)
+                    return
+                }
+
+                proc.waitUntilExit()
+                outPipe.fileHandleForReading.readabilityHandler = nil
+
+                let success = proc.terminationStatus == 0
+                if !success {
+                    let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+                    let errStr = String(data: errData, encoding: .utf8) ?? "unknown error"
+                    Task { @MainActor in
+                        if self.errorMessage == nil {
+                            self.errorMessage = String(errStr.suffix(500))
+                        }
+                        self.displayMessage = "Setup failed"
+                    }
+                }
+                continuation.resume(returning: success)
+            }
+        }
+    }
+
+    private func handleSetupProgress(_ progress: SetupProgress) {
+        let stepNames: [String: String] = [
+            "finding_python": "Finding Python",
+            "creating_venv": "Creating environment",
+            "installing_deps": "Installing dependencies",
+            "writing_plist": "Configuring service",
+            "checkpoint": "Saving state",
+            "complete": "Environment ready",
+        ]
+
+        let label = stepNames[progress.step] ?? progress.step
+
+        switch progress.status {
+        case "running":
+            displayMessage = progress.detail ?? "\(label)..."
+            logLines.append("\(label)...")
+        case "done":
+            if let detail = progress.detail {
+                logLines.append("\(label): \(detail)")
+            } else {
+                logLines.append("\(label) ✓")
+            }
+            if progress.step == "complete" {
+                displayMessage = "Environment ready"
+            }
+        case "failed":
+            errorMessage = progress.error ?? "\(label) failed"
+            displayMessage = "Setup failed"
+        default:
+            break
+        }
+    }
+
+    // MARK: - Phase 2: Launchctl
+
+    private func ensureLaunchdLoaded() {
+        guard FileManager.default.fileExists(atPath: Self.launchdPlistURL.path) else {
+            return
+        }
+
+        // Bootout first (ignore errors)
+        let unload = Process()
+        unload.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        unload.arguments = ["bootout", "gui/\(getuid())/\(Self.launchdLabel)"]
+        unload.standardOutput = FileHandle.nullDevice
+        unload.standardError = FileHandle.nullDevice
+        try? unload.run()
+        unload.waitUntilExit()
+
+        // Bootstrap
+        let load = Process()
+        load.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        load.arguments = ["bootstrap", "gui/\(getuid())", Self.launchdPlistURL.path]
+        load.standardOutput = FileHandle.nullDevice
+        let errPipe = Pipe()
+        load.standardError = errPipe
+        try? load.run()
+        load.waitUntilExit()
+
+        // Error 37 = already loaded, that's fine
+        if load.terminationStatus != 0 && load.terminationStatus != 37 {
+            let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+            let errStr = String(data: errData, encoding: .utf8) ?? ""
+            if !errStr.contains("37") {
+                logLines.append("Warning: launchctl error: \(errStr)")
+            }
+        }
+    }
+
+    private func restartDaemon() {
+        // Bootout
+        let unload = Process()
+        unload.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        unload.arguments = ["bootout", "gui/\(getuid())/\(Self.launchdLabel)"]
+        unload.standardOutput = FileHandle.nullDevice
+        unload.standardError = FileHandle.nullDevice
+        try? unload.run()
+        unload.waitUntilExit()
+
+        // Re-bootstrap
+        ensureLaunchdLoaded()
+    }
+
+    // MARK: - Phase 3: Health Check
+
+    private func waitForHealth(timeout: TimeInterval) async -> Bool {
+        let start = Date()
+        let url = URL(string: "http://127.0.0.1:7483/api/health")!
+
+        while Date().timeIntervalSince(start) < timeout {
+            do {
+                let (_, response) = try await URLSession.shared.data(from: url)
+                if let http = response as? HTTPURLResponse, http.statusCode == 200 {
+                    return true
+                }
+            } catch {
+                // Not ready yet
+            }
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
         }
         return false
     }
 
-    /// Get the current git HEAD commit from the local source checkout.
-    private func getLocalGitCommit(projectRoot: String) -> String {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        proc.arguments = ["rev-parse", "HEAD"]
-        proc.currentDirectoryURL = URL(fileURLWithPath: projectRoot)
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = FileHandle.nullDevice
-        do {
-            try proc.run()
-            proc.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            return String(data: data, encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        } catch {
-            return ""
-        }
-    }
+    // MARK: - Phase 4+5: Observe Server Bootstrap
 
-    /// Query the running server's /api/health endpoint for its commit hash.
-    private func getServerCommit() async -> String {
-        let url = URL(string: "http://127.0.0.1:7483/api/health")!
-        do {
-            let (data, response) = try await URLSession.shared.data(from: url)
-            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-                return ""
+    private func applyServerStatus(_ status: BootstrapStatusResponse) {
+        serverStatus = status
+        isReady = status.ready
+        displayMessage = status.displayMessage
+
+        if let error = status.error {
+            errorMessage = error
+        }
+
+        // Extract download progress from steps
+        var newProgress: [String: BootstrapStepProgress] = [:]
+        for step in status.steps {
+            if let progress = step.progress {
+                for (modelId, info) in progress {
+                    newProgress[modelId] = info
+                }
             }
-            let health = try JSONDecoder().decode(HealthResponse.self, from: data)
-            return health.commit
-        } catch {
-            return ""
+        }
+        if !newProgress.isEmpty {
+            downloadProgress = newProgress
         }
     }
 
-    // MARK: - Main Entry
+    private func observeBootstrapStream() {
+        observeTask?.cancel()
+        guard let api = apiService else { return }
 
-    func runBootstrap() async {
-        isRunning = true
-        defer { isRunning = false }
+        observeTask = Task {
+            let stream = api.streamBootstrapStatus()
+            do {
+                for try await event in stream {
+                    guard !Task.isCancelled else { break }
 
-        // Mark as dirty — only cleared on full success.
-        // If the app is killed or bootstrap fails, the next launch will redo from scratch.
-        UserDefaults.standard.set(true, forKey: Self.dirtyKey)
+                    if let data = event.data.data(using: .utf8),
+                       let status = try? JSONDecoder().decode(BootstrapStatusResponse.self, from: data) {
+                        applyServerStatus(status)
+                    }
 
-        do {
-            // Step 1: Find system python3
-            phase = .findingPython
-            let systemPython = try findSystemPython()
-            log("Found Python: \(systemPython)")
-
-            // Step 2: Resolve project root (where pyproject.toml lives)
-            let projectRoot = try resolveProjectRoot()
-            log("Project root: \(projectRoot)")
-
-            // Step 3: Create venv
-            phase = .creatingVenv
-            try await createVenv(systemPython: systemPython)
-            log("Virtual environment created")
-
-            // Step 4: Install giva into venv
-            phase = .installingDeps
-            try await installPackage(projectRoot: projectRoot)
-            log("Dependencies installed")
-
-            // Step 5: Pre-download default AI model into HuggingFace cache
-            phase = .downloadingDefaultModel
-            try await downloadDefaultModel()
-            log("Default model ready")
-
-            // Step 6: Install launchd daemon
-            phase = .installingDaemon
-            try installLaunchdAgent()
-            log("Background service installed")
-
-            // Step 7: Start the daemon
-            phase = .startingServer
-            try startLaunchdAgent()
-            log("Server starting...")
-
-            // Wait for health check
-            let healthy = await waitForHealth(timeout: 90)
-            if healthy {
-                log("Server is healthy!")
-            } else {
-                log("Warning: server didn't respond to health check yet (may still be loading models)")
+                    if event.event == "ready" || event.event == "error" {
+                        break
+                    }
+                }
+            } catch {
+                if !Task.isCancelled {
+                    // Connection lost — try to reconnect after delay
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    if !Task.isCancelled && !isReady {
+                        // Refresh status via REST
+                        if let status = try? await api.getBootstrapStatus() {
+                            applyServerStatus(status)
+                            if !status.ready {
+                                observeBootstrapStream()
+                            }
+                        }
+                    }
+                }
             }
-
-            phase = .done
-            isComplete = true
-            // Bootstrap succeeded — clear the dirty flag.
-            UserDefaults.standard.set(false, forKey: Self.dirtyKey)
-        } catch {
-            phase = .failed
-            errorMessage = error.localizedDescription
-            log("ERROR: \(error.localizedDescription)")
-            // Dirty flag stays true — next launch will redo from scratch.
         }
     }
 
-    // MARK: - Step 1: Find Python
+    // MARK: - Helpers
 
-    private func findSystemPython() throws -> String {
+    private func findSystemPython() -> String? {
         let candidates = [
             "/opt/homebrew/bin/python3",
             "/usr/local/bin/python3",
@@ -226,8 +448,8 @@ class BootstrapManager: ObservableObject {
 
         for path in candidates {
             if FileManager.default.isExecutableFile(atPath: path) {
-                if let (major, minor) = pythonVersion(path),
-                   major > 3 || (major == 3 && minor >= 11) {
+                if let version = pythonVersion(path),
+                   version.0 > 3 || (version.0 == 3 && version.1 >= 11) {
                     return path
                 }
             }
@@ -235,12 +457,12 @@ class BootstrapManager: ObservableObject {
 
         // Fallback: which python3
         if let path = whichExecutable("python3"),
-           let (major, minor) = pythonVersion(path),
-           major > 3 || (major == 3 && minor >= 11) {
+           let version = pythonVersion(path),
+           version.0 > 3 || (version.0 == 3 && version.1 >= 11) {
             return path
         }
 
-        throw BootstrapError.pythonNotFound
+        return nil
     }
 
     private func pythonVersion(_ path: String) -> (Int, Int)? {
@@ -254,7 +476,6 @@ class BootstrapManager: ObservableObject {
         proc.waitUntilExit()
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         guard let output = String(data: data, encoding: .utf8) else { return nil }
-        // "Python 3.13.2"
         let parts = output.trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "Python ", with: "")
             .split(separator: ".")
@@ -278,39 +499,29 @@ class BootstrapManager: ObservableObject {
         return path.isEmpty ? nil : path
     }
 
-    // MARK: - Step 2: Resolve Project Root
-
-    private func resolveProjectRoot() throws -> String {
-        // Check if already stored from a previous run
+    func resolveProjectRoot() -> String? {
+        // Check stored value first
         if let stored = UserDefaults.standard.string(forKey: Self.projectRootKey),
            FileManager.default.fileExists(atPath: stored + "/pyproject.toml") {
             return stored
         }
 
-        // Strategy: walk up from the app bundle location looking for pyproject.toml
-        // In dev: Bundle is in DerivedData, but we can use __FILE__ equivalent
-        // at build time. Instead, try common locations.
         let searchRoots: [URL] = [
-            // The repo checkout — app bundle is at GivaApp/ inside the repo
             Bundle.main.bundleURL
-                .deletingLastPathComponent()  // Build/Products/Debug or Release
-                .deletingLastPathComponent()  // Build/Products
-                .deletingLastPathComponent()  // Build
-                .deletingLastPathComponent(), // DerivedData/GivaApp-xxx
-            // Common dev location
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent(),
             FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent("Developer/Giva"),
-            // Current working directory (when run from Xcode)
             URL(fileURLWithPath: FileManager.default.currentDirectoryPath),
         ]
 
         for root in searchRoots {
-            // Walk up to 5 levels
             var candidate = root
             for _ in 0..<6 {
                 let pyproject = candidate.appendingPathComponent("pyproject.toml")
                 if FileManager.default.fileExists(atPath: pyproject.path) {
-                    // Verify it's the giva project
                     if let content = try? String(contentsOf: pyproject, encoding: .utf8),
                        content.contains("name = \"giva\"") {
                         let path = candidate.path
@@ -322,310 +533,18 @@ class BootstrapManager: ObservableObject {
             }
         }
 
-        throw BootstrapError.projectNotFound
+        return nil
     }
 
-    // MARK: - Step 3: Create Venv
-
-    private func createVenv(systemPython: String) async throws {
-        // Ensure parent directory exists
-        try FileManager.default.createDirectory(
-            at: Self.dataDir, withIntermediateDirectories: true
-        )
-
-        // Skip if venv already exists and has a working python
-        if FileManager.default.isExecutableFile(atPath: Self.venvPython.path) {
-            log("Venv already exists, skipping creation")
-            return
-        }
-
-        try await runProcess(
-            executable: systemPython,
-            arguments: ["-m", "venv", Self.venvDir.path]
-        )
-    }
-
-    // MARK: - Step 4: Install Package
-
-    private func installPackage(projectRoot: String) async throws {
-        // Step 1: Upgrade pip itself
-        try await runProcess(
-            executable: Self.venvPip.path,
-            arguments: ["install", "--upgrade", "pip"]
-        )
-        // Step 2: Install the project editable with voice extras
-        // pip requires the extras in the same argument as the path: ".[voice]"
-        // We use "." as the path and set the working directory via the project root.
-        try await runProcess(
-            executable: Self.venvPip.path,
-            arguments: ["install", "-e", ".\(Self.voiceExtras)"],
-            workingDirectory: projectRoot
-        )
-    }
-
-    /// Extras specifier for pip install. Includes voice dependencies.
-    private static let voiceExtras = "[voice]"
-
-    // MARK: - Step 5: Download Default Model
-
-    /// Default model ID that fits any M-series Mac (~4.5GB).
-    /// Also serves as the filter model and bootstrap advisor.
-    private static let defaultModelId = "mlx-community/Qwen3-8B-4bit"
-
-    private func downloadDefaultModel() async throws {
-        // Use the venv python to download via huggingface_hub (installed as mlx-lm dep)
-        // snapshot_download will skip if already cached.
-        let script = """
-        from huggingface_hub import snapshot_download
-        snapshot_download('\(Self.defaultModelId)')
-        print('Model downloaded successfully')
-        """
-        try await runProcess(
-            executable: Self.venvPython.path,
-            arguments: ["-c", script]
-        )
-    }
-
-    // MARK: - Step 6: Install launchd Agent
-
-    private func installLaunchdAgent() throws {
-        let plistDir = Self.launchdPlistURL.deletingLastPathComponent()
-        try FileManager.default.createDirectory(
-            at: plistDir, withIntermediateDirectories: true
-        )
-
-        let logDir = Self.dataDir.appendingPathComponent("logs")
-        try FileManager.default.createDirectory(
-            at: logDir, withIntermediateDirectories: true
-        )
-
-        let plistContent: [String: Any] = [
-            "Label": Self.launchdLabel,
-            "ProgramArguments": [
-                Self.venvPython.path,
-                "-m", "giva.server",
-            ],
-            "RunAtLoad": true,
-            "KeepAlive": [
-                "SuccessfulExit": false,  // Restart on crash, not on clean exit
-            ],
-            "StandardOutPath": logDir.appendingPathComponent("server.log").path,
-            "StandardErrorPath": logDir.appendingPathComponent("server.err").path,
-            "EnvironmentVariables": [
-                "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin",
-                "HOME": FileManager.default.homeDirectoryForCurrentUser.path,
-            ],
-            "ProcessType": "Interactive",
+    private func findSetupScript(projectRoot: String) -> String? {
+        let candidates = [
+            projectRoot + "/scripts/giva-setup.py",
         ]
-
-        let data = try PropertyListSerialization.data(
-            fromPropertyList: plistContent,
-            format: .xml,
-            options: 0
-        )
-        try data.write(to: Self.launchdPlistURL)
-        log("Wrote plist to \(Self.launchdPlistURL.path)")
-    }
-
-    // MARK: - Upgrade (delete venv, reinstall from scratch)
-
-    /// Full upgrade: stop daemon, delete venv, reinstall everything (including voice).
-    func upgrade() async {
-        guard !isRunning else { return }
-
-        // Reset state so the UI switches back to the bootstrap view
-        isComplete = false
-        errorMessage = nil
-        logLines = []
-        phase = .findingPython
-        log("Starting upgrade — stopping server...")
-
-        // Stop the launchd daemon
-        stopDaemon()
-
-        // Delete the entire venv directory
-        log("Removing virtual environment...")
-        cleanVenv()
-
-        // Re-run the full bootstrap (which will recreate venv, install with voice, etc.)
-        await runBootstrap()
-    }
-
-    /// Remove the venv directory so the next bootstrap starts fresh.
-    private func cleanVenv() {
-        let fm = FileManager.default
-        if fm.fileExists(atPath: Self.venvDir.path) {
-            try? fm.removeItem(at: Self.venvDir)
-            log("Removed stale virtual environment")
-        }
-    }
-
-    /// Stop the launchd daemon (bootout). Ignores errors if not running.
-    private func stopDaemon() {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        proc.arguments = ["bootout", "gui/\(getuid())/\(Self.launchdLabel)"]
-        proc.standardOutput = FileHandle.nullDevice
-        proc.standardError = FileHandle.nullDevice
-        try? proc.run()
-        proc.waitUntilExit()
-    }
-
-    // MARK: - Public Helpers (used by GivaApp for reconnect)
-
-    func ensureDaemonRunning() throws {
-        // If plist exists, try to start the agent
-        guard FileManager.default.fileExists(atPath: Self.launchdPlistURL.path) else {
-            // No plist — need full bootstrap
-            return
-        }
-        try startLaunchdAgent()
-    }
-
-    func checkHealth() async -> Bool {
-        return await waitForHealth(timeout: 15)
-    }
-
-    // MARK: - Step 6: Start Agent
-
-    private func startLaunchdAgent() throws {
-        // Unload first (ignore errors if not loaded)
-        let unload = Process()
-        unload.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        unload.arguments = ["bootout", "gui/\(getuid())/\(Self.launchdLabel)"]
-        unload.standardOutput = FileHandle.nullDevice
-        unload.standardError = FileHandle.nullDevice
-        try? unload.run()
-        unload.waitUntilExit()
-
-        // Load
-        let load = Process()
-        load.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        load.arguments = ["bootstrap", "gui/\(getuid())", Self.launchdPlistURL.path]
-        let errPipe = Pipe()
-        load.standardError = errPipe
-        load.standardOutput = FileHandle.nullDevice
-        try load.run()
-        load.waitUntilExit()
-
-        if load.terminationStatus != 0 {
-            let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-            let errStr = String(data: errData, encoding: .utf8) ?? "unknown"
-            // Error 37 = "already loaded" — that's fine
-            if !errStr.contains("37") && load.terminationStatus != 37 {
-                throw BootstrapError.launchdFailed(errStr)
+        for path in candidates {
+            if FileManager.default.fileExists(atPath: path) {
+                return path
             }
         }
-    }
-
-    // MARK: - Health Check
-
-    private func waitForHealth(timeout: TimeInterval) async -> Bool {
-        let start = Date()
-        let url = URL(string: "http://127.0.0.1:7483/api/health")!
-
-        while Date().timeIntervalSince(start) < timeout {
-            do {
-                let (_, response) = try await URLSession.shared.data(from: url)
-                if let http = response as? HTTPURLResponse, http.statusCode == 200 {
-                    return true
-                }
-            } catch {
-                // Not ready yet
-            }
-            try? await Task.sleep(nanoseconds: 1_000_000_000) // 1s
-        }
-        return false
-    }
-
-    // MARK: - Process Runner
-
-    private func runProcess(executable: String, arguments: [String], workingDirectory: String? = nil) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let proc = Process()
-                proc.executableURL = URL(fileURLWithPath: executable)
-                proc.arguments = arguments
-
-                if let wd = workingDirectory {
-                    proc.currentDirectoryURL = URL(fileURLWithPath: wd)
-                }
-
-                // Minimal PATH so pip/python can find system tools
-                var env = ProcessInfo.processInfo.environment
-                let extraPaths = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
-                env["PATH"] = extraPaths + ":" + (env["PATH"] ?? "")
-                proc.environment = env
-
-                let outPipe = Pipe()
-                let errPipe = Pipe()
-                proc.standardOutput = outPipe
-                proc.standardError = errPipe
-
-                do {
-                    try proc.run()
-                } catch {
-                    continuation.resume(throwing: error)
-                    return
-                }
-
-                proc.waitUntilExit()
-
-                let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
-                let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-                let outStr = String(data: outData, encoding: .utf8) ?? ""
-                let errStr = String(data: errData, encoding: .utf8) ?? ""
-
-                if proc.terminationStatus != 0 {
-                    let combined = (outStr + "\n" + errStr).trimmingCharacters(in: .whitespacesAndNewlines)
-                    continuation.resume(throwing: BootstrapError.commandFailed(
-                        cmd: ([executable] + arguments).joined(separator: " "),
-                        output: String(combined.suffix(500))
-                    ))
-                    return
-                }
-
-                // Log last few lines of stdout for visibility
-                if !outStr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    let lines = outStr.split(separator: "\n").suffix(3)
-                    Task { @MainActor in
-                        for line in lines {
-                            self.logLines.append(String(line))
-                        }
-                    }
-                }
-
-                continuation.resume(returning: ())
-            }
-        }
-    }
-
-    // MARK: - Logging
-
-    private func log(_ message: String) {
-        logLines.append(message)
-    }
-}
-
-// MARK: - Errors
-
-enum BootstrapError: LocalizedError {
-    case pythonNotFound
-    case projectNotFound
-    case commandFailed(cmd: String, output: String)
-    case launchdFailed(String)
-
-    var errorDescription: String? {
-        switch self {
-        case .pythonNotFound:
-            return "Python 3.11+ not found. Install via: brew install python3"
-        case .projectNotFound:
-            return "Could not locate the Giva project source (pyproject.toml). "
-                + "Make sure the app is run from the repository checkout."
-        case .commandFailed(let cmd, let output):
-            return "Command failed: \(cmd)\n\(output)"
-        case .launchdFailed(let msg):
-            return "Could not start background service: \(msg)"
-        }
+        return nil
     }
 }

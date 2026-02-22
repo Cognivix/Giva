@@ -502,13 +502,28 @@ def save_model_choices(assistant: str, filter_model: str) -> None:
 
 
 def is_model_setup_complete() -> bool:
-    """Check if the user has completed model setup (has a user config with model choices)."""
+    """Check if the user has completed model setup.
+
+    Verifies that:
+    1. A user config file exists with an [llm] section
+    2. The configured models are actually downloaded
+    """
+    import tomllib
+
     config_path = Path("~/.config/giva/config.toml").expanduser()
     if not config_path.exists():
         return False
     try:
-        content = config_path.read_text()
-        return "[llm]" in content and "model" in content
+        with open(config_path, "rb") as f:
+            raw = tomllib.load(f)
+        llm = raw.get("llm", {})
+        model = llm.get("model")
+        filter_model = llm.get("filter_model")
+        if not model or not filter_model:
+            return False
+        # Verify both models are actually downloaded
+        downloaded = get_downloaded_model_ids()
+        return model in downloaded and filter_model in downloaded
     except Exception:
         return False
 

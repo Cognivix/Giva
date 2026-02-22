@@ -1,4 +1,8 @@
-// BootstrapView.swift - First-run setup screen with spinning animation and progress.
+// BootstrapView.swift - Setup progress screen.
+//
+// Renders state from BootstrapManager, which mirrors the server's bootstrap
+// state machine.  Covers both the initial setup script (pre-server) and
+// the server-driven bootstrap (model downloads, config, validation).
 
 import SwiftUI
 
@@ -12,9 +16,10 @@ struct BootstrapView: View {
         VStack(spacing: 0) {
             Spacer()
 
-            // Animated icon — use TimelineView to avoid implicit animation layout issues
+            // Animated icon
             TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
-                let angle = context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 2) / 2 * 360
+                let angle = context.date.timeIntervalSinceReferenceDate
+                    .truncatingRemainder(dividingBy: 2) / 2 * 360
                 ZStack {
                     Circle()
                         .stroke(
@@ -35,17 +40,24 @@ struct BootstrapView: View {
             .frame(width: 76, height: 76)
             .padding(.bottom, 24)
 
-            // Phase title
+            // Title
             Text(phaseTitle)
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundColor(.primary)
                 .padding(.bottom, 4)
 
-            // Phase subtitle
-            Text(bootstrap.phase.rawValue)
+            // Subtitle
+            Text(bootstrap.displayMessage)
                 .font(.system(size: 12))
                 .foregroundColor(.secondary)
-                .padding(.bottom, 20)
+                .padding(.bottom, 12)
+
+            // Download progress (if downloading)
+            if !bootstrap.downloadProgress.isEmpty {
+                downloadProgressSection
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 12)
+            }
 
             // Error display
             if let error = bootstrap.errorMessage {
@@ -58,9 +70,7 @@ struct BootstrapView: View {
                         .padding(.horizontal, 24)
 
                     Button("Retry") {
-                        bootstrap.errorMessage = nil
-                        bootstrap.logLines = []
-                        Task { await bootstrap.runBootstrap() }
+                        Task { await bootstrap.retry() }
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
@@ -68,7 +78,7 @@ struct BootstrapView: View {
                 .padding(.bottom, 16)
             }
 
-            // Log output (scrolling)
+            // Log output (setup script phase)
             if !bootstrap.logLines.isEmpty {
                 ScrollViewReader { proxy in
                     ScrollView {
@@ -121,27 +131,81 @@ struct BootstrapView: View {
         }
     }
 
-    private var phaseTitle: String {
-        switch bootstrap.phase {
-        case .done:
-            return "All set!"
-        case .failed:
-            return "Oops"
-        default:
-            return "Cooking" + String(repeating: ".", count: dotCount)
+    // MARK: - Download Progress
+
+    private var downloadProgressSection: some View {
+        VStack(spacing: 8) {
+            ForEach(Array(bootstrap.downloadProgress.keys.sorted()), id: \.self) { modelId in
+                if let progress = bootstrap.downloadProgress[modelId] {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text(modelId.replacingOccurrences(of: "mlx-community/", with: ""))
+                                .font(.caption)
+                            Spacer()
+                            if progress.percent < 0 {
+                                if let mb = progress.downloadedMb {
+                                    Text("\(Int(mb)) MB")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            } else if progress.percent >= 100 {
+                                Text("Done")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                Text("\(Int(progress.percent))%")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        if progress.percent < 0 {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            ProgressView(value: min(progress.percent, 100), total: 100)
+                                .tint(progress.percent >= 100 ? .green : .blue)
+                        }
+                    }
+                }
+            }
         }
+        .padding()
+        .background(.fill.tertiary, in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    // MARK: - Phase Display
+
+    private var phaseTitle: String {
+        if bootstrap.isReady {
+            return "All set!"
+        }
+        if bootstrap.errorMessage != nil {
+            return "Oops"
+        }
+        return "Cooking" + String(repeating: ".", count: dotCount)
     }
 
     private var phaseIcon: String {
-        switch bootstrap.phase {
-        case .findingPython: return "magnifyingglass"
-        case .creatingVenv: return "shippingbox"
-        case .installingDeps: return "arrow.down.circle"
-        case .downloadingDefaultModel: return "brain"
-        case .installingDaemon: return "gearshape.2"
-        case .startingServer: return "bolt.fill"
-        case .done: return "checkmark.circle.fill"
-        case .failed: return "exclamationmark.triangle.fill"
+        if bootstrap.isReady { return "checkmark.circle.fill" }
+        if bootstrap.errorMessage != nil { return "exclamationmark.triangle.fill" }
+
+        let state = bootstrap.serverStatus?.state ?? ""
+        switch state {
+        case "downloading_default_model", "downloading_user_models":
+            return "arrow.down.circle"
+        case "awaiting_model_selection":
+            return "cpu"
+        case "validating":
+            return "checkmark.shield"
+        case "ready":
+            return "checkmark.circle.fill"
+        case "failed":
+            return "exclamationmark.triangle.fill"
+        default:
+            if bootstrap.isSettingUp {
+                return "shippingbox"
+            }
+            return "bolt.fill"
         }
     }
 }

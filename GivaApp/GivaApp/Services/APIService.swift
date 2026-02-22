@@ -152,6 +152,29 @@ class APIService {
         return sseStream(url: url, method: "POST", body: ModelDownloadRequest(modelId: modelId))
     }
 
+    // MARK: - Bootstrap
+
+    func getBootstrapStatus() async throws -> BootstrapStatusResponse {
+        return try await get("/api/bootstrap/status")
+    }
+
+    func startBootstrap() async throws -> BootstrapStatusResponse {
+        return try await postNoBody("api/bootstrap/start")
+    }
+
+    func retryBootstrap() async throws -> BootstrapStatusResponse {
+        return try await postNoBody("api/bootstrap/retry")
+    }
+
+    func streamBootstrapStatus() -> AsyncThrowingStream<SSEEvent, Error> {
+        let url = baseURL.appendingPathComponent("api/bootstrap/stream")
+        return sseStream(url: url, method: "GET")
+    }
+
+    func triggerUpgrade(projectRoot: String) async throws -> UpgradeResponse {
+        return try await post("api/upgrade", body: UpgradeRequest(projectRoot: projectRoot))
+    }
+
     // MARK: - SSE Parser
 
     private func sseStream(url: URL, method: String, body: (some Encodable)? = Optional<String>.none) -> AsyncThrowingStream<SSEEvent, Error> {

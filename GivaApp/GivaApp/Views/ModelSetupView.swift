@@ -1,22 +1,26 @@
-// ModelSetupView.swift - Model selection and download wizard.
+// ModelSetupView.swift - Model selection wizard.
+//
+// Shown when the server's bootstrap state is "awaiting_model_selection".
+// The user picks models (or accepts the recommendation), then the server
+// handles downloading via its bootstrap state machine.  Progress is shown
+// in BootstrapView once the server transitions to downloading.
 
 import SwiftUI
 
 struct ModelSetupView: View {
     @ObservedObject var viewModel: GivaViewModel
+    @ObservedObject var bootstrap: BootstrapManager
     @State private var selectedAssistant: String = ""
     @State private var selectedFilter: String = ""
     @State private var showCustomize = false
 
     var body: some View {
         VStack(spacing: 0) {
-            // Header
             header
                 .padding()
 
             Divider()
 
-            // Content
             ScrollView {
                 VStack(spacing: 16) {
                     if viewModel.isSettingUpModels {
@@ -34,15 +38,16 @@ struct ModelSetupView: View {
 
             Divider()
 
-            // Footer
             footer
                 .padding()
         }
         .frame(width: 420, height: 520)
         .task {
-            // Only fetch if we don't already have model data (avoids
-            // re-showing the spinner every time the popover reopens).
             if viewModel.availableModels == nil && !viewModel.isSettingUpModels {
+                // Use bootstrap's apiService if viewModel doesn't have one yet
+                if viewModel.apiService == nil, let api = bootstrap.apiService {
+                    viewModel.apiService = api
+                }
                 await viewModel.fetchAvailableModels()
             }
         }
@@ -111,15 +116,13 @@ struct ModelSetupView: View {
 
     private func modelSelectionContent(_ models: AvailableModelsResponse) -> some View {
         VStack(spacing: 16) {
-            // Recommendation
             recommendationCard(models.recommended, models: models)
 
-            // Use Recommended button
             if !viewModel.isDownloadingModels {
                 Button(action: {
                     selectedAssistant = models.recommended.assistant
                     selectedFilter = models.recommended.filter
-                    viewModel.selectAndDownloadModels(
+                    viewModel.selectModels(
                         assistant: models.recommended.assistant,
                         filter: models.recommended.filter
                     )
@@ -131,12 +134,17 @@ struct ModelSetupView: View {
                 .controlSize(.large)
             }
 
-            // Download progress
             if viewModel.isDownloadingModels {
-                downloadProgressView
+                VStack(spacing: 8) {
+                    ProgressView()
+                    Text("Setting up models...")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding()
+                .background(.fill.tertiary, in: RoundedRectangle(cornerRadius: 10))
             }
 
-            // Customize section
             if !viewModel.isDownloadingModels {
                 customizeSection(models)
             }
@@ -202,35 +210,6 @@ struct ModelSetupView: View {
         .background(.fill.tertiary, in: RoundedRectangle(cornerRadius: 10))
     }
 
-    private var downloadProgressView: some View {
-        VStack(spacing: 8) {
-            ForEach(Array(viewModel.downloadProgress.keys.sorted()), id: \.self) { modelId in
-                let percent = viewModel.downloadProgress[modelId] ?? 0
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Text(modelId.replacingOccurrences(of: "mlx-community/", with: ""))
-                            .font(.caption)
-                        Spacer()
-                        Text(percent >= 100 ? "Done" : "\(Int(percent))%")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    ProgressView(value: min(percent, 100), total: 100)
-                        .tint(percent >= 100 ? .green : .blue)
-                }
-            }
-
-            if viewModel.downloadProgress.values.allSatisfy({ $0 >= 100 }) {
-                Label("Models ready!", systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-                    .padding(.top, 4)
-            }
-        }
-        .padding()
-        .background(.fill.tertiary, in: RoundedRectangle(cornerRadius: 10))
-    }
-
-    /// Assistant candidates: exclude embedding/coder models, downloaded first then by size.
     private func assistantModels(_ models: AvailableModelsResponse) -> [ModelInfo] {
         models.compatibleModels
             .filter { !$0.modelId.lowercased().contains("embedding") }
@@ -240,7 +219,6 @@ struct ModelSetupView: View {
             }
     }
 
-    /// Filter candidates: small models only, downloaded first then by size.
     private func filterModels(_ models: AvailableModelsResponse) -> [ModelInfo] {
         models.compatibleModels
             .filter { $0.sizeGb <= 10 && !$0.modelId.lowercased().contains("embedding") }
@@ -253,7 +231,6 @@ struct ModelSetupView: View {
     private func customizeSection(_ models: AvailableModelsResponse) -> some View {
         DisclosureGroup("Customize", isExpanded: $showCustomize) {
             VStack(spacing: 12) {
-                // Assistant model picker
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Assistant Model")
                         .font(.caption)
@@ -267,7 +244,6 @@ struct ModelSetupView: View {
                     .labelsHidden()
                 }
 
-                // Filter model picker
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Filter Model")
                         .font(.caption)
@@ -282,7 +258,7 @@ struct ModelSetupView: View {
                 }
 
                 Button("Download Custom Selection") {
-                    viewModel.selectAndDownloadModels(
+                    viewModel.selectModels(
                         assistant: selectedAssistant,
                         filter: selectedFilter
                     )
@@ -318,14 +294,6 @@ struct ModelSetupView: View {
             .foregroundStyle(.secondary)
 
             Spacer()
-
-            if viewModel.downloadProgress.values.allSatisfy({ $0 >= 100 })
-                && !viewModel.downloadProgress.isEmpty {
-                Button("Continue") {
-                    viewModel.isModelSetupNeeded = false
-                }
-                .buttonStyle(.borderedProminent)
-            }
         }
     }
 }

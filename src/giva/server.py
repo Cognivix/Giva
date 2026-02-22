@@ -218,14 +218,39 @@ class ModelDownloadRequest(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize config and store on startup."""
+    """Initialize config, store, and bootstrap state on startup."""
     config = load_config()
     config.data_dir.mkdir(parents=True, exist_ok=True)
     store = Store(config.db_path)
     app.state.store = store
     app.state.config = config
-    log.info("Giva server started — DB: %s", config.db_path)
+
+    # Initialize bootstrap state machine
+    from giva.bootstrap import BootstrapNotifier, BootstrapState, run_bootstrap
+
+    app.state.bootstrap = BootstrapState.load()
+    app.state.bootstrap_notifier = BootstrapNotifier()
+    app.state.bootstrap_task = None
+
+    log.info(
+        "Giva server started — DB: %s, bootstrap: %s",
+        config.db_path, app.state.bootstrap.checkpoint,
+    )
+
+    # Auto-resume bootstrap if not ready
+    if not app.state.bootstrap.is_ready:
+        app.state.bootstrap_task = asyncio.create_task(run_bootstrap(app))
+
     yield
+
+    # Cancel bootstrap task on shutdown
+    if app.state.bootstrap_task and not app.state.bootstrap_task.done():
+        app.state.bootstrap_task.cancel()
+        try:
+            await app.state.bootstrap_task
+        except asyncio.CancelledError:
+            pass
+
     log.info("Giva server shutting down")
 
 
@@ -956,7 +981,7 @@ async def models_available(request: Request) -> AvailableModelsResponse:
 
 @app.post("/api/models/select")
 async def models_select(req: ModelSelectRequest, request: Request) -> ModelSelectResponse:
-    """Save model choices to user config."""
+    """Save model choices to user config and resume bootstrap."""
     from giva.models import save_model_choices
 
     try:
@@ -967,12 +992,30 @@ async def models_select(req: ModelSelectRequest, request: Request) -> ModelSelec
 
         request.app.state.config = load_config()
 
+        # Resume bootstrap if it was waiting for model selection
+        bootstrap = getattr(request.app.state, "bootstrap", None)
+        if bootstrap and bootstrap.needs_user_input:
+            from giva.bootstrap import resume_after_model_selection
+
+            request.app.state.bootstrap_task = asyncio.create_task(
+                resume_after_model_selection(request.app)
+            )
+
         return ModelSelectResponse(
             success=True,
             message=f"Models updated: assistant={req.assistant_model}, filter={req.filter_model}",
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save model choices: {e}")
+
+
+def _get_repo_size_bytes_safe(model_id: str) -> int:
+    """Get model weight file size, returning 0 on any error."""
+    try:
+        from giva.models import _get_repo_size_bytes
+        return _get_repo_size_bytes(model_id)
+    except Exception:
+        return 0
 
 
 @app.post("/api/models/download")
@@ -1015,36 +1058,55 @@ async def models_download(req: ModelDownloadRequest, request: Request):
     loop.run_in_executor(None, _run_download)
 
     def _get_cache_size() -> int:
-        """Get actual bytes on disk for this model, including incomplete downloads.
+        """Get actual bytes of weight files on disk, including incomplete downloads.
 
-        ``scan_cache_dir()`` only counts *committed* blobs, which stays at 0
-        until each multi-GB shard finishes.  We measure the real directory
-        size instead so the progress bar moves during the download.
+        Only counts .safetensors/.bin/.gguf files (and their .incomplete temps)
+        to match the total from ``_get_repo_size_bytes()``.
         """
         try:
             from pathlib import Path
 
             cache_root = Path.home() / ".cache" / "huggingface" / "hub"
-            # HF Hub stores repos as models--<org>--<name>
             dir_name = "models--" + req.model_id.replace("/", "--")
             model_dir = cache_root / dir_name
             if not model_dir.is_dir():
                 return 0
-            return sum(f.stat().st_size for f in model_dir.rglob("*") if f.is_file())
+            weight_exts = (".safetensors", ".bin", ".gguf")
+            total = 0
+            for f in model_dir.rglob("*"):
+                if not f.is_file():
+                    continue
+                name = f.name
+                if any(name.endswith(ext) or name.endswith(ext + ".incomplete")
+                       for ext in weight_exts):
+                    try:
+                        total += f.stat().st_size
+                    except OSError:
+                        pass
+            return total
         except Exception:
             return 0
 
     async def event_generator():
-        total_mb = total_bytes / (1024 ** 2) if total_bytes else 0
+        _total = total_bytes
+        total_mb = _total / (1024 ** 2) if _total else 0
 
         while not done_event.is_set():
             cached = await loop.run_in_executor(None, _get_cache_size)
-            if total_bytes > 0:
-                pct = min(round(cached / total_bytes * 100, 1), 99.9)
-                dl_mb = round(cached / (1024 ** 2), 1)
+            dl_mb = round(cached / (1024 ** 2), 1)
+
+            # If we couldn't determine total size, try again from cache growth
+            if _total == 0 and cached > 0:
+                _total = await loop.run_in_executor(
+                    None, lambda: _get_repo_size_bytes_safe(req.model_id)
+                )
+                total_mb = _total / (1024 ** 2) if _total else 0
+
+            if _total > 0:
+                pct = min(round(cached / _total * 100, 1), 99.9)
             else:
-                pct = 0
-                dl_mb = round(cached / (1024 ** 2), 1)
+                # Indeterminate: UI should show spinner + MB count
+                pct = -1
             yield {
                 "event": "progress",
                 "data": _json.dumps({
@@ -1070,6 +1132,167 @@ async def models_download(req: ModelDownloadRequest, request: Request):
             yield {"event": "done", "data": ""}
 
     return EventSourceResponse(event_generator())
+
+
+# --- Bootstrap Endpoints ---
+
+
+class BootstrapStatusResponse(BaseModel):
+    state: str
+    ready: bool
+    needs_user_input: bool
+    steps: list[dict]
+    error: Optional[str] = None
+    display_message: str
+
+
+class UpgradeRequest(BaseModel):
+    project_root: str = Field(..., min_length=1)
+
+
+class UpgradeResponse(BaseModel):
+    success: bool
+    restart_required: bool
+    message: str
+
+
+@app.get("/api/bootstrap/status")
+async def bootstrap_status(request: Request) -> BootstrapStatusResponse:
+    """Get current bootstrap state."""
+    state = request.app.state.bootstrap
+    data = state.to_response()
+    return BootstrapStatusResponse(**data)
+
+
+@app.post("/api/bootstrap/start")
+async def bootstrap_start(request: Request) -> BootstrapStatusResponse:
+    """Trigger bootstrap (if not already running/complete)."""
+    from giva.bootstrap import run_bootstrap
+
+    state = request.app.state.bootstrap
+    task = request.app.state.bootstrap_task
+
+    if state.is_ready:
+        return BootstrapStatusResponse(**state.to_response())
+
+    # If no task running, start one
+    if task is None or task.done():
+        request.app.state.bootstrap_task = asyncio.create_task(
+            run_bootstrap(request.app)
+        )
+
+    return BootstrapStatusResponse(**state.to_response())
+
+
+@app.post("/api/bootstrap/retry")
+async def bootstrap_retry(request: Request) -> BootstrapStatusResponse:
+    """Retry bootstrap from the last failed step."""
+    from giva.bootstrap import run_bootstrap
+
+    state = request.app.state.bootstrap
+    task = request.app.state.bootstrap_task
+
+    # Cancel existing task if running
+    if task and not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    # Clear the error so the step will be re-attempted
+    if state.checkpoint == "failed" and state.current_step:
+        # Remove the failed step from completed so it gets re-run
+        state.error = None
+        state.checkpoint = "venv_ok"  # reset to known good state
+        state.save()
+
+    request.app.state.bootstrap_task = asyncio.create_task(
+        run_bootstrap(request.app)
+    )
+
+    return BootstrapStatusResponse(**state.to_response())
+
+
+@app.get("/api/bootstrap/stream")
+async def bootstrap_stream(request: Request):
+    """SSE stream of bootstrap status updates."""
+    state = request.app.state.bootstrap
+    notifier = request.app.state.bootstrap_notifier
+
+    async def event_generator():
+        import json as _json
+
+        # Emit current state immediately
+        yield {"event": "status", "data": _json.dumps(state.to_response())}
+
+        # If already ready, emit ready and stop
+        if state.is_ready:
+            yield {"event": "ready", "data": _json.dumps(state.to_response())}
+            return
+
+        # Stream updates
+        while True:
+            await notifier.wait(timeout=2.0)
+
+            response = state.to_response()
+            yield {"event": "status", "data": _json.dumps(response)}
+
+            if state.is_ready:
+                yield {"event": "ready", "data": _json.dumps(response)}
+                return
+
+            if state.checkpoint == "failed":
+                yield {"event": "error", "data": _json.dumps(response)}
+                return
+
+            if state.needs_user_input:
+                yield {"event": "needs_input", "data": _json.dumps(response)}
+                # Don't return — keep streaming so the client sees
+                # the transition when the user makes a selection
+
+    return EventSourceResponse(event_generator())
+
+
+@app.post("/api/upgrade")
+async def upgrade(req: UpgradeRequest, request: Request) -> UpgradeResponse:
+    """Upgrade giva by re-running pip install from the project root.
+
+    The app should call launchctl bootout + bootstrap after receiving
+    ``restart_required: true`` to restart the daemon with updated code.
+    """
+    import subprocess
+    from pathlib import Path
+
+    venv_pip = Path("~/.local/share/giva/.venv/bin/pip").expanduser()
+    if not venv_pip.exists():
+        raise HTTPException(status_code=500, detail="venv pip not found")
+
+    project_root = Path(req.project_root)
+    if not (project_root / "pyproject.toml").exists():
+        raise HTTPException(status_code=400, detail="Invalid project root")
+
+    loop = asyncio.get_event_loop()
+
+    def _run_pip():
+        result = subprocess.run(
+            [str(venv_pip), "install", "-e", ".[voice]"],
+            cwd=str(project_root),
+            capture_output=True, text=True, timeout=300,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"pip install failed: {result.stderr[-500:]}")
+
+    try:
+        await loop.run_in_executor(None, _run_pip)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return UpgradeResponse(
+        success=True,
+        restart_required=True,
+        message="Upgrade successful. Restart the daemon to apply changes.",
+    )
 
 
 # --- Entry point ---

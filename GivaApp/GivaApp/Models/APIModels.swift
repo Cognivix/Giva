@@ -291,6 +291,61 @@ struct ModelDownloadRequest: Encodable {
     }
 }
 
+// MARK: - Bootstrap
+
+struct BootstrapStepProgress: Codable {
+    let percent: Double
+    let downloadedMb: Double?
+    let totalMb: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case percent
+        case downloadedMb = "downloaded_mb"
+        case totalMb = "total_mb"
+    }
+}
+
+struct BootstrapStepInfo: Codable {
+    let name: String
+    let status: String  // pending | running | done | failed | waiting
+    let progress: [String: BootstrapStepProgress]?
+    let error: String?
+}
+
+struct BootstrapStatusResponse: Codable {
+    let state: String
+    let ready: Bool
+    let needsUserInput: Bool
+    let steps: [BootstrapStepInfo]
+    let error: String?
+    let displayMessage: String
+
+    enum CodingKeys: String, CodingKey {
+        case state, ready, steps, error
+        case needsUserInput = "needs_user_input"
+        case displayMessage = "display_message"
+    }
+}
+
+struct UpgradeRequest: Encodable {
+    let projectRoot: String
+
+    enum CodingKeys: String, CodingKey {
+        case projectRoot = "project_root"
+    }
+}
+
+struct UpgradeResponse: Codable {
+    let success: Bool
+    let restartRequired: Bool
+    let message: String
+
+    enum CodingKeys: String, CodingKey {
+        case success, message
+        case restartRequired = "restart_required"
+    }
+}
+
 // MARK: - SSE Event
 
 struct SSEEvent {

@@ -9,9 +9,9 @@ enum AppTab: String, CaseIterable {
 
 @MainActor
 class GivaViewModel: ObservableObject {
-    // Server
+    // Server — apiService is provided by BootstrapManager once server is reachable
     @Published var serverManager = ServerManager()
-    private var apiService: APIService?
+    var apiService: APIService?
 
     // Chat
     @Published var messages: [ChatMessage] = []
@@ -58,16 +58,15 @@ class GivaViewModel: ObservableObject {
     // Active streaming task (for cancellation)
     private var streamTask: Task<Void, Never>?
 
-    /// Connect to the daemon-managed server (called after bootstrap completes).
-    func connectToServer() async {
-        await serverManager.connectToDaemon()
-        if serverManager.isRunning {
-            apiService = APIService(baseURL: serverManager.baseURL)
-            await refreshStatus()
-            await checkModelSetup()
-            await loadProfile()
-            await checkOnboarding()
-        }
+    /// Connect to the server using the bootstrap manager's API service.
+    /// Called after bootstrap reports ready.
+    func connectToServer(from bootstrap: BootstrapManager) async {
+        guard let api = bootstrap.apiService else { return }
+        apiService = api
+        serverManager.isRunning = true
+        await refreshStatus()
+        await loadProfile()
+        await checkOnboarding()
     }
 
     // MARK: - Chat
@@ -336,11 +335,10 @@ class GivaViewModel: ObservableObject {
     // MARK: - Reset (tabula rasa)
 
     func triggerReset() async {
-        guard let bootstrap = bootstrapManager else { return }
         isResetting = true
         errorMessage = nil
 
-        // Step 1: Tell server to wipe DB, caches, and user config
+        // Tell server to wipe DB, caches, and user config
         if let api = apiService {
             do {
                 _ = try await api.triggerReset()
@@ -349,7 +347,7 @@ class GivaViewModel: ObservableObject {
             }
         }
 
-        // Step 2: Clear all local state
+        // Clear all local state
         messages.removeAll()
         tasks.removeAll()
         isOnboarding = false
@@ -362,31 +360,12 @@ class GivaViewModel: ObservableObject {
         modelSetupError = nil
         isModelSetupNeeded = false
 
-        // Step 3: Disconnect from server
-        apiService = nil
-        serverManager.isRunning = false
-
-        // Step 4: Full re-bootstrap (stops daemon, deletes venv, reinstalls)
-        // This flips bootstrap.isComplete = false, showing BootstrapView.
-        // After bootstrap completes, the .onChange(of: bootstrap.isComplete)
-        // observer in GivaApp.swift calls connectToServer() → checkModelSetup()
-        // → shows ModelSetupView (since user config was deleted).
-        await bootstrap.upgrade()
+        // Server-side bootstrap will re-enter model setup.
+        // The bootstrap manager's SSE stream will pick up the state change.
         isResetting = false
     }
 
     // MARK: - Model Setup
-
-    func checkModelSetup() async {
-        guard let api = apiService else { return }
-        do {
-            let status = try await api.getModelStatus()
-            isModelSetupNeeded = !status.setupCompleted
-        } catch {
-            // If endpoint fails, assume setup not needed (old server)
-            isModelSetupNeeded = false
-        }
-    }
 
     func fetchAvailableModels() async {
         guard let api = apiService else { return }
@@ -400,59 +379,27 @@ class GivaViewModel: ObservableObject {
         isSettingUpModels = false
     }
 
-    func selectAndDownloadModels(assistant: String, filter: String) {
+    /// Tell the server which models to use.  The server-side bootstrap
+    /// picks up from here and downloads them automatically.
+    func selectModels(assistant: String, filter: String) {
         guard let api = apiService else { return }
         isDownloadingModels = true
         modelSetupError = nil
-        downloadProgress = [:]
 
         Task {
-            // Step 1: Save model choices
             do {
                 _ = try await api.selectModels(assistant: assistant, filter: filter)
+                // Bootstrap SSE stream will report download progress.
+                // The BootstrapManager observes it and updates isReady.
             } catch {
                 modelSetupError = "Failed to save model selection: \(error.localizedDescription)"
                 isDownloadingModels = false
-                return
             }
-
-            // Step 2: Download models that need downloading
-            let modelsToDownload = Set([assistant, filter])
-            for modelId in modelsToDownload {
-                downloadProgress[modelId] = 0.0
-                do {
-                    let stream = api.streamModelDownload(modelId: modelId)
-                    for try await event in stream {
-                        if event.event == "progress" {
-                            if let data = event.data.data(using: .utf8),
-                               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                               let percent = json["percent"] as? Double {
-                                downloadProgress[modelId] = percent
-                            }
-                        } else if event.event == "error" {
-                            modelSetupError = "Download error: \(event.data)"
-                        }
-                    }
-                    downloadProgress[modelId] = 100.0
-                } catch {
-                    modelSetupError = "Download failed for \(modelId): \(error.localizedDescription)"
-                    isDownloadingModels = false
-                    return
-                }
-            }
-
-            isDownloadingModels = false
-            isModelSetupNeeded = false
-
-            // After model setup, trigger initial sync which auto-starts
-            // onboarding when needed (via result.needsOnboarding)
-            await triggerSync()
         }
     }
 
     func skipModelSetup() {
         isModelSetupNeeded = false
-        // Even when skipping, trigger sync so onboarding can start
         Task { await triggerSync() }
     }
 
@@ -461,16 +408,10 @@ class GivaViewModel: ObservableObject {
     func triggerUpgrade() {
         guard let bootstrap = bootstrapManager, !isUpgrading else { return }
         isUpgrading = true
-        apiService = nil
-        serverManager.isRunning = false
 
         Task {
-            await bootstrap.upgrade()
+            await bootstrap.triggerUpgrade()
             isUpgrading = false
-            // After upgrade completes, reconnect
-            if bootstrap.isComplete {
-                await connectToServer()
-            }
         }
     }
 
