@@ -142,6 +142,10 @@ class GivaViewModel: ObservableObject {
     @Published var isLoading: Bool = false
     @Published var errorMessage: String?
 
+    // Agent queue state
+    @Published var pendingConfirmation: AgentConfirmation?
+    @Published var activeJobs: [AgentJobItem] = []
+
     // Reference to bootstrap manager (set from GivaApp)
     weak var bootstrapManager: BootstrapManager?
 
@@ -350,6 +354,11 @@ class GivaViewModel: ObservableObject {
         case "heartbeat":
             break
 
+        // Agent queue events (from background queue consumer)
+        case "agent_job_enqueued", "agent_job_confirmed", "agent_job_started",
+             "agent_job_completed", "agent_job_failed", "agent_job_cancelled":
+            updateAgentQueue(event)
+
         default:
             break
         }
@@ -399,6 +408,12 @@ class GivaViewModel: ObservableObject {
                         appendToLastMessage(event.data)
                     } else if event.event == "audio_chunk" {
                         audioService.enqueueAudioChunk(event.data)
+                    } else if event.event == "agent_actions" {
+                        handleAgentActions(event.data)
+                    } else if event.event == "agent_confirm" {
+                        handleAgentConfirmation(event.data)
+                    } else if event.event == "agent_queued" {
+                        handleAgentQueued(event.data)
                     } else if event.event == "error" {
                         isLoadingModel = false
                         errorMessage = event.data
@@ -423,6 +438,148 @@ class GivaViewModel: ObservableObject {
         audioService.stopPlayback()
         finalizeLastMessage()
         isStreaming = false
+    }
+
+    // MARK: - Agent Handling
+
+    /// Handle agent_actions events from the chat stream (post-chat agents).
+    private func handleAgentActions(_ json: String) {
+        guard let data = json.data(using: .utf8),
+              let actions = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+        else { return }
+
+        for action in actions {
+            guard let type = action["type"] as? String else { continue }
+            switch type {
+            case "task_created":
+                if let title = action["title"] as? String {
+                    appendSystemMessage("✓ Created task: \(title)")
+                }
+                Task { await loadTasks() }
+            case "task_completed":
+                if let title = action["title"] as? String {
+                    appendSystemMessage("✓ Completed task: \(title)")
+                }
+                Task { await loadTasks() }
+            case "preference":
+                if let key = action["key"] as? String {
+                    appendSystemMessage("✓ Noted preference: \(key)")
+                }
+            default:
+                break
+            }
+        }
+    }
+
+    /// Handle agent_confirm event — an agent wants user approval before running.
+    private func handleAgentConfirmation(_ json: String) {
+        guard let confirmation = AgentConfirmation(from: json) else { return }
+        pendingConfirmation = confirmation
+        // Insert a marker in the chat so the UI can render a confirmation card
+        messages.append(ChatMessage(
+            role: "system",
+            content: "[AGENT_CONFIRM:\(confirmation.id)]"
+        ))
+    }
+
+    /// Handle agent_queued event — a non-confirmation agent was queued.
+    private func handleAgentQueued(_ json: String) {
+        guard let data = json.data(using: .utf8),
+              let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let agentName = dict["agent_name"] as? String
+        else { return }
+
+        appendSystemMessage("⚡ \(agentName) is working in the background…")
+    }
+
+    /// Approve a pending agent confirmation.
+    func approveAgent(jobId: String) {
+        pendingConfirmation = nil
+        Task {
+            do {
+                try await apiService?.confirmAgent(jobId: jobId)
+                appendSystemMessage("Agent approved — working in background…")
+            } catch {
+                appendSystemMessage("Failed to approve agent: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Dismiss a pending agent confirmation.
+    func dismissAgent(jobId: String) {
+        pendingConfirmation = nil
+        Task {
+            do {
+                try await apiService?.cancelAgent(jobId: jobId)
+            } catch {
+                log.warning("Failed to cancel agent job: \(error)")
+            }
+        }
+    }
+
+    /// Update agent queue state from session stream events.
+    private func updateAgentQueue(_ event: SSEEvent) {
+        guard let data = event.data.data(using: .utf8),
+              let job = try? JSONDecoder().decode(AgentJobItem.self, from: data)
+        else { return }
+
+        // Update or insert in activeJobs list
+        if let idx = activeJobs.firstIndex(where: { $0.jobId == job.jobId }) {
+            if job.isTerminal {
+                activeJobs.remove(at: idx)
+            } else {
+                activeJobs[idx] = job
+            }
+        } else if !job.isTerminal {
+            activeJobs.append(job)
+        }
+
+        // Notify chat when a background job completes
+        if event.event == "agent_job_completed" {
+            if let output = job.result?.output, !output.isEmpty {
+                let preview = output.count > 200 ? String(output.prefix(200)) + "…" : output
+                appendSystemMessage("✓ Agent finished: \(preview)")
+            } else {
+                appendSystemMessage("✓ Agent job completed.")
+            }
+            Task { await loadTasks() }
+        } else if event.event == "agent_job_failed" {
+            let errMsg = job.error ?? "Unknown error"
+            appendSystemMessage("⚠ Agent failed: \(errMsg)")
+        }
+    }
+
+    /// Refresh agent queue from the server.
+    func refreshAgentQueue() async {
+        guard let api = apiService else { return }
+        do {
+            let response = try await api.getAgentQueue()
+            activeJobs = response.jobs.filter { !$0.isTerminal }
+        } catch {
+            log.warning("Failed to refresh agent queue: \(error)")
+        }
+    }
+
+    /// Request AI assistance for a task via the orchestrator.
+    func requestTaskAI(taskId: Int) async {
+        guard let api = apiService else { return }
+        do {
+            let result = try await api.taskAI(taskId: taskId)
+            if let jobId = result["job_id"] as? String,
+               let planSummary = result["plan_summary"] as? String {
+                // The job is enqueued as pending_confirmation — it will arrive
+                // via the session SSE stream as an agent_job_enqueued event.
+                // Show a summary in chat.
+                appendSystemMessage(
+                    "✨ AI plan for task ready — check the agent activity panel to approve."
+                )
+                log.info("Task AI job created: \(jobId)")
+                // Refresh queue to show it immediately
+                await refreshAgentQueue()
+            }
+        } catch {
+            appendSystemMessage("Failed to create AI plan: \(error.localizedDescription)")
+        }
     }
 
     // MARK: - Voice Input

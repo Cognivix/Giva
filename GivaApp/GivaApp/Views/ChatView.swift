@@ -36,11 +36,36 @@ struct ChatView: View {
                     } else {
                         VStack(alignment: .leading, spacing: 8) {
                             ForEach(viewModel.messages) { message in
-                                MessageBubble(
-                                    message: message,
-                                    isLoadingModel: viewModel.isLoadingModel
-                                )
+                                if let jobId = agentConfirmJobId(from: message),
+                                   let confirmation = viewModel.pendingConfirmation,
+                                   confirmation.id == jobId {
+                                    // Render inline agent confirmation card
+                                    AgentConfirmationCard(
+                                        confirmation: confirmation,
+                                        onApprove: { viewModel.approveAgent(jobId: jobId) },
+                                        onDismiss: { viewModel.dismissAgent(jobId: jobId) }
+                                    )
                                     .id(message.id)
+                                } else if message.role == "system"
+                                            && message.content.hasPrefix("[AGENT_CONFIRM:") {
+                                    // Confirmation already handled — show status
+                                    HStack(spacing: 6) {
+                                        Image(systemName: "checkmark.circle")
+                                            .foregroundColor(.green)
+                                        Text("Agent approved")
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                    }
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 4)
+                                    .id(message.id)
+                                } else {
+                                    MessageBubble(
+                                        message: message,
+                                        isLoadingModel: viewModel.isLoadingModel
+                                    )
+                                    .id(message.id)
+                                }
                             }
                         }
                         .padding(12)
@@ -135,6 +160,21 @@ struct ChatView: View {
     }
 }
 
+// MARK: - Agent Confirmation Helpers
+
+/// Extract agent job ID from a system message marker like `[AGENT_CONFIRM:uuid]`.
+private func agentConfirmJobId(from message: ChatMessage) -> String? {
+    guard message.role == "system",
+          message.content.hasPrefix("[AGENT_CONFIRM:"),
+          message.content.hasSuffix("]")
+    else { return nil }
+
+    let start = message.content.index(message.content.startIndex, offsetBy: 15)
+    let end = message.content.index(before: message.content.endIndex)
+    guard start < end else { return nil }
+    return String(message.content[start..<end])
+}
+
 // MARK: - Message Bubble
 
 struct MessageBubble: View {
@@ -142,7 +182,20 @@ struct MessageBubble: View {
     var isLoadingModel: Bool = false
     @State private var showThinking = false
 
+    @ViewBuilder
     var body: some View {
+        // System messages render as subtle inline text
+        if message.role == "system" {
+            HStack(spacing: 6) {
+                Text(message.content)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .italic()
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 2)
+        } else {
+
         HStack(alignment: .top) {
             if message.role == "user" {
                 Spacer(minLength: 60)
@@ -208,6 +261,8 @@ struct MessageBubble: View {
                 Spacer(minLength: 40)
             }
         }
+
+        } // end else (non-system)
     }
 }
 

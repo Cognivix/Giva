@@ -10,12 +10,27 @@ import SwiftUI
 struct GoalsWindowView: View {
     @ObservedObject var viewModel: GoalsViewModel
 
+    // Selection is owned by the view via @State — safe for List binding.
+    // The viewModel never stores the selected ID; it only loads data via
+    // loadDetail(for:) and signals programmatic navigation via pendingSelection.
+    @State private var sidebarSelection: Int?
+
     var body: some View {
         NavigationSplitView {
-            GoalsSidebarView(viewModel: viewModel)
+            GoalsSidebarView(viewModel: viewModel, selection: $sidebarSelection)
         } detail: {
-            if let goal = viewModel.selectedGoal {
-                GoalDetailView(goal: goal, viewModel: viewModel)
+            if sidebarSelection != nil {
+                if let goal = viewModel.goalDetail {
+                    GoalDetailView(
+                        goal: goal,
+                        goalId: sidebarSelection!,
+                        viewModel: viewModel
+                    )
+                } else {
+                    // Loading placeholder — prevents flash of "Select a Goal"
+                    ProgressView("Loading goal…")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
             } else {
                 ContentUnavailableView(
                     "Select a Goal",
@@ -47,7 +62,7 @@ struct GoalsWindowView: View {
             GoalCreateSheet(viewModel: viewModel)
         }
         .sheet(isPresented: $viewModel.showEditSheet) {
-            if let goal = viewModel.selectedGoal {
+            if let goal = viewModel.goalDetail {
                 GoalEditSheet(goal: goal, viewModel: viewModel)
             }
         }
@@ -65,11 +80,17 @@ struct GoalsWindowView: View {
             await viewModel.loadGoals()
             await viewModel.checkReviewStatus()
         }
-        .onChange(of: viewModel.selectedGoalId) { _, newId in
+        // Load detail whenever sidebar selection changes.
+        // .task(id:) auto-cancels the previous task on re-selection.
+        .task(id: sidebarSelection) {
+            await viewModel.loadDetail(for: sidebarSelection)
+        }
+        // Programmatic navigation (e.g. after createGoal, child tap):
+        // viewModel sets pendingSelection → we sync it to local @State.
+        .onChange(of: viewModel.pendingSelection) { _, newId in
             if let id = newId {
-                Task { await viewModel.selectGoal(id: id) }
-            } else {
-                viewModel.selectedGoal = nil
+                sidebarSelection = id
+                viewModel.pendingSelection = nil
             }
         }
         .frame(minWidth: 700, minHeight: 500)
@@ -80,9 +101,10 @@ struct GoalsWindowView: View {
 
 struct GoalsSidebarView: View {
     @ObservedObject var viewModel: GoalsViewModel
+    @Binding var selection: Int?
 
     var body: some View {
-        List(selection: $viewModel.selectedGoalId) {
+        List(selection: $selection) {
             if viewModel.isLoading && viewModel.goals.isEmpty {
                 ProgressView()
                     .frame(maxWidth: .infinity, alignment: .center)
@@ -160,6 +182,7 @@ struct GoalsSidebarView: View {
 
 struct GoalDetailView: View {
     let goal: GoalItem
+    let goalId: Int
     @ObservedObject var viewModel: GoalsViewModel
 
     var body: some View {
@@ -216,6 +239,16 @@ struct GoalDetailView: View {
                     .font(.title2.bold())
 
                 Spacer()
+
+                Button {
+                    Task { await viewModel.requestGoalBrainstorm(goalId: goal.id) }
+                } label: {
+                    Label("AI Brainstorm", systemImage: "sparkles")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .tint(.purple)
+                .help("Use AI to brainstorm next steps for this goal")
 
                 Button("Edit") {
                     viewModel.showEditSheet = true
@@ -283,7 +316,7 @@ struct GoalDetailView: View {
                         }
                         .contentShape(Rectangle())
                         .onTapGesture {
-                            viewModel.selectedGoalId = child.id
+                            viewModel.navigateTo(goalId: child.id)
                         }
                     }
                 }
@@ -567,11 +600,22 @@ struct GoalDetailView: View {
             if !viewModel.goalChatMessages.isEmpty {
                 ForEach(viewModel.goalChatMessages) { msg in
                     if msg.role == "system" {
-                        // Agent action notifications — compact inline style
-                        Text(msg.content)
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                            .padding(.leading, 28)
+                        // Check for agent confirmation cards
+                        if msg.content.hasPrefix("[AGENT_CONFIRM:"),
+                           let conf = viewModel.pendingConfirmation,
+                           msg.content.contains(conf.id) {
+                            AgentConfirmationCard(
+                                confirmation: conf,
+                                onApprove: { viewModel.approveAgent(jobId: conf.id) },
+                                onDismiss: { viewModel.dismissAgent(jobId: conf.id) }
+                            )
+                        } else {
+                            // Agent action notifications — compact inline style
+                            Text(msg.content)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .padding(.leading, 28)
+                        }
                     } else {
                         HStack(alignment: .top, spacing: 8) {
                             Image(systemName: msg.role == "user"
@@ -597,11 +641,11 @@ struct GoalDetailView: View {
             HStack(spacing: 8) {
                 TextField("Ask about this goal...", text: $viewModel.goalChatInput)
                     .textFieldStyle(.roundedBorder)
-                    .onSubmit { viewModel.sendGoalChat() }
+                    .onSubmit { viewModel.sendGoalChat(goalId: goalId) }
                     .disabled(viewModel.isGoalChatStreaming)
 
                 Button {
-                    viewModel.sendGoalChat()
+                    viewModel.sendGoalChat(goalId: goalId)
                 } label: {
                     Image(systemName: "paperplane.fill")
                 }

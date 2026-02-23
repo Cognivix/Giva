@@ -61,6 +61,20 @@ MIGRATIONS: dict[int, str] = {
     """,
     3: "",  # ALTER-only migration; statements in _ALTER_MIGRATIONS[3]
     4: "",  # ALTER-only migration; statements in _ALTER_MIGRATIONS[4]
+    5: """
+        CREATE TABLE IF NOT EXISTS agent_executions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_id TEXT NOT NULL,
+            query TEXT NOT NULL,
+            params TEXT DEFAULT '{}',
+            success INTEGER NOT NULL DEFAULT 1,
+            output_summary TEXT DEFAULT '',
+            artifacts TEXT DEFAULT '{}',
+            error TEXT DEFAULT '',
+            duration_ms INTEGER DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+    """,
 }
 
 # ALTER TABLE must run as a separate execute() (not inside executescript).

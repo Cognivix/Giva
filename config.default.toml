@@ -36,6 +36,43 @@ max_strategies_per_run = 1
 # Tactical plan horizon in days
 plan_horizon_days = 7
 
+[agents]
+# Pluggable agent system
+enabled = true
+# LLM-based routing: automatically match queries to specialized agents
+routing_enabled = true
+# Max seconds an agent can run before timeout
+max_execution_seconds = 60
+# Orchestrator: max wall-clock seconds for full plan+execute+synthesize cycle
+# orchestrator_timeout_seconds = 180
+# Orchestrator: max subtasks the planner is allowed to create
+# orchestrator_max_subtasks = 6
+# Scheduler: enable periodic agent tasks (opt-in, runs automated agent work)
+# scheduler_agent_enabled = false
+# Scheduler: how often to check for automated agent work (minutes)
+# scheduler_agent_interval_minutes = 60
+
+# --- MCP Servers (optional, requires `pip install giva[mcp]`) ---
+# Each [mcp_servers.<name>] section configures one MCP server.
+# Servers are auto-discovered at startup and appear as pluggable agents.
+#
+# [mcp_servers.filesystem]
+# transport = "stdio"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/Users/me/Documents"]
+# timeout_seconds = 30
+#
+# [mcp_servers.github]
+# transport = "stdio"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-github"]
+# env = { GITHUB_PERSONAL_ACCESS_TOKEN = "ghp_..." }
+#
+# [mcp_servers.remote_api]
+# transport = "http"
+# url = "http://localhost:8080/mcp"
+# timeout_seconds = 60
+
 [voice]
 # Voice mode: TTS (text-to-speech) and STT (speech-to-text)
 enabled = false

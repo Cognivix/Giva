@@ -11,9 +11,11 @@ class GoalsViewModel: ObservableObject {
     @Published var isLoading: Bool = false
     @Published var errorMessage: String?
 
-    // Selection
-    @Published var selectedGoalId: Int?
-    @Published var selectedGoal: GoalItem?
+    // Selection — detail data keyed by goal ID.
+    // The sidebar List binds to a @State in the view; the viewModel only holds
+    // fetched detail + chat for the currently selected goal.
+    @Published var goalDetail: GoalItem?
+    @Published var isLoadingDetail: Bool = false
 
     // Daily review
     @Published var isDailyReviewDue: Bool = false
@@ -40,8 +42,19 @@ class GoalsViewModel: ObservableObject {
     @Published var showCreateSheet: Bool = false
     @Published var showEditSheet: Bool = false
 
+    // Agent state for goal chat
+    @Published var pendingConfirmation: AgentConfirmation?
+
+    // Programmatic selection (set after createGoal, child tap, etc.)
+    // The view observes this and syncs it to its own @State.
+    @Published var pendingSelection: Int?
+
     // Active streaming task (for cancellation)
     private var streamTask: Task<Void, Never>?
+    // Detail fetch task (cancelled on re-selection)
+    private var detailTask: Task<Void, Never>?
+    // The goal ID we're currently loading detail for
+    private var loadingGoalId: Int?
 
     init(apiService: APIService) {
         self.apiService = apiService
@@ -61,32 +74,74 @@ class GoalsViewModel: ObservableObject {
         isLoading = false
     }
 
-    /// Fetch and display a goal's full detail (children, strategies, tasks, progress).
-    /// Triggered by `.onChange(of: selectedGoalId)` in the view.
-    func selectGoal(id: Int) async {
-        do {
-            selectedGoal = try await apiService.getGoal(id: id)
-            goalChatInput = ""
+    // MARK: - Selection
 
-            // Load persisted chat history for this goal
-            let history = try await apiService.getGoalMessages(goalId: id)
+    /// Called by the view's `.task(id:)` when sidebar selection changes.
+    /// Fetches full detail for the selected goal asynchronously.
+    /// Safe to call repeatedly with the same ID — early-returns if already loaded.
+    func loadDetail(for goalId: Int?) async {
+        guard let goalId else {
+            // Deselected — clear everything
+            loadingGoalId = nil
+            goalDetail = nil
+            isLoadingDetail = false
+            goalChatInput = ""
+            goalChatMessages = []
+            return
+        }
+
+        // Already showing this goal — nothing to do
+        if loadingGoalId == goalId, goalDetail?.id == goalId {
+            return
+        }
+
+        loadingGoalId = goalId
+        isLoadingDetail = true
+
+        // Show lightweight placeholder from sidebar data immediately
+        // (keeps the detail pane populated while the API call runs)
+        if goalDetail?.id != goalId {
+            goalDetail = goals.first { $0.id == goalId }
+            goalChatInput = ""
+            goalChatMessages = []
+        }
+
+        do {
+            let detail = try await apiService.getGoal(id: goalId)
+            guard loadingGoalId == goalId else { return }
+            goalDetail = detail
+
+            let history = try await apiService.getGoalMessages(goalId: goalId)
+            guard loadingGoalId == goalId else { return }
             goalChatMessages = history.messages.map { msg in
                 ChatMessage(role: msg.role, content: msg.content)
             }
+        } catch is CancellationError {
+            return
         } catch {
+            guard loadingGoalId == goalId else { return }
             errorMessage = error.localizedDescription
-            selectedGoal = nil
-            goalChatMessages = []
+            // On error, keep the placeholder rather than showing "Select a Goal"
         }
+        guard loadingGoalId == goalId else { return }
+        isLoadingDetail = false
     }
 
     func refreshSelectedGoal() async {
-        guard let id = selectedGoalId else { return }
+        guard let id = loadingGoalId else { return }
         do {
-            selectedGoal = try await apiService.getGoal(id: id)
+            let detail = try await apiService.getGoal(id: id)
+            guard loadingGoalId == id else { return }
+            goalDetail = detail
         } catch {
             // Non-critical
         }
+    }
+
+    /// Navigate to a goal programmatically (e.g. after create, child tap).
+    /// Sets pendingSelection which the view picks up.
+    func navigateTo(goalId: Int) {
+        pendingSelection = goalId
     }
 
     // MARK: - Goal CRUD
@@ -113,7 +168,7 @@ class GoalsViewModel: ObservableObject {
             )
             let newGoal = try await apiService.createGoal(request: request)
             await loadGoals()
-            selectedGoalId = newGoal.id  // triggers .onChange → selectGoal(id:)
+            navigateTo(goalId: newGoal.id)
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -149,7 +204,7 @@ class GoalsViewModel: ObservableObject {
         do {
             _ = try await apiService.updateGoalStatus(id: id, status: status)
             await loadGoals()
-            if selectedGoalId == id {
+            if loadingGoalId == id {
                 await refreshSelectedGoal()
             }
         } catch {
@@ -298,9 +353,9 @@ class GoalsViewModel: ObservableObject {
 
     // MARK: - Goal Chat
 
-    func sendGoalChat() {
+    func sendGoalChat(goalId: Int) {
         let query = goalChatInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty, !isGoalChatStreaming, let goalId = selectedGoalId else { return }
+        guard !query.isEmpty, !isGoalChatStreaming else { return }
 
         goalChatInput = ""
         goalChatMessages.append(ChatMessage(role: "user", content: query))
@@ -316,6 +371,10 @@ class GoalsViewModel: ObservableObject {
                         goalChatMessages[goalChatMessages.count - 1].content += event.data
                     } else if event.event == "agent_actions" {
                         handleAgentActions(event.data)
+                    } else if event.event == "agent_confirm" {
+                        handleAgentConfirmation(event.data)
+                    } else if event.event == "agent_queued" {
+                        handleAgentQueued(event.data)
                     } else if event.event == "error" {
                         errorMessage = event.data
                     }
@@ -371,6 +430,65 @@ class GoalsViewModel: ObservableObject {
 
     private func appendSystemChatMessage(_ text: String) {
         goalChatMessages.append(ChatMessage(role: "system", content: text))
+    }
+
+    /// Handle agent_confirm event — an agent wants user approval.
+    private func handleAgentConfirmation(_ json: String) {
+        guard let confirmation = AgentConfirmation(from: json) else { return }
+        pendingConfirmation = confirmation
+        goalChatMessages.append(ChatMessage(
+            role: "system",
+            content: "[AGENT_CONFIRM:\(confirmation.id)]"
+        ))
+    }
+
+    /// Handle agent_queued event — agent enqueued for background execution.
+    private func handleAgentQueued(_ json: String) {
+        guard let data = json.data(using: .utf8),
+              let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let agentName = dict["agent_name"] as? String
+        else { return }
+
+        appendSystemChatMessage("⚡ \(agentName) is working in the background…")
+    }
+
+    /// Approve a pending agent confirmation in goal chat.
+    func approveAgent(jobId: String) {
+        pendingConfirmation = nil
+        Task {
+            do {
+                try await apiService.confirmAgent(jobId: jobId)
+                appendSystemChatMessage("Agent approved — working in background…")
+            } catch {
+                appendSystemChatMessage("Failed to approve agent: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Dismiss a pending agent confirmation in goal chat.
+    func dismissAgent(jobId: String) {
+        pendingConfirmation = nil
+        Task {
+            do {
+                try await apiService.cancelAgent(jobId: jobId)
+            } catch {
+                // Silently fail — job may have already been cancelled
+            }
+        }
+    }
+
+    /// Request AI brainstorm for a goal via the orchestrator.
+    func requestGoalBrainstorm(goalId: Int) async {
+        do {
+            let result = try await apiService.goalBrainstorm(goalId: goalId)
+            if let _ = result["job_id"] as? String {
+                appendSystemChatMessage(
+                    "✨ AI brainstorm plan ready — check the agent activity panel to approve."
+                )
+            }
+        } catch {
+            errorMessage = "Failed to create brainstorm plan: \(error.localizedDescription)"
+        }
     }
 
     // MARK: - Daily Review

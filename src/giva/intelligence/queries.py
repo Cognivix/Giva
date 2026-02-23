@@ -49,8 +49,13 @@ def handle_query(
     if session_summary:
         context = f"Session context: {session_summary}\n\n{context}"
 
-    # Build messages
-    system = build_system_prompt(profile_summary=get_profile_summary(store))
+    # Build messages (with agent awareness if agents are registered)
+    from giva.agents.registry import registry
+
+    system = build_system_prompt(
+        profile_summary=get_profile_summary(store),
+        has_agents=registry.has_agents(),
+    )
 
     # The LLM sees the enriched query (with context_prefix), but the DB
     # stores only the original query to keep conversation history clean.

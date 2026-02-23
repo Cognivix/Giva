@@ -49,6 +49,20 @@ struct GivaApp: App {
         }
         .menuBarExtraStyle(.window)
 
+        Window("Giva", id: "main-window") {
+            if bootstrap.isReady {
+                GivaMainWindowView()
+                    .environmentObject(viewModel)
+            } else {
+                ContentUnavailableView(
+                    "Server Not Ready",
+                    systemImage: "exclamationmark.circle",
+                    description: Text("Wait for the server to start, then try again.")
+                )
+            }
+        }
+        .defaultSize(width: 900, height: 700)
+
         Window("Goals & Objectives", id: "goals") {
             if let goalsVM = viewModel.goalsViewModel {
                 GoalsWindowView(viewModel: goalsVM)

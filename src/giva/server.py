@@ -355,6 +355,31 @@ async def lifespan(app: FastAPI):
     app.state.session_queues = []
     app.state.scheduler = None
 
+    # Discover pluggable agents
+    from giva.agents.registry import registry as agent_registry
+
+    agent_count = agent_registry.discover(db_path=config.db_path)
+    log.info("Agent registry: %d agents discovered", agent_count)
+
+    # Initialize agent execution queue
+    from giva.agents.queue import AgentQueue
+
+    def _broadcast_to_sessions(event: dict) -> None:
+        """Push an event to all session queues from the agent queue thread."""
+        queues: list = getattr(app.state, "session_queues", [])
+        loop = getattr(app.state, "_event_loop", None)
+        if not loop or not queues:
+            return
+        for q in queues:
+            try:
+                loop.call_soon_threadsafe(q.put_nowait, event)
+            except Exception:
+                pass
+
+    agent_queue = AgentQueue(store, config, _llm_lock, _broadcast_to_sessions)
+    agent_queue.start()
+    app.state.agent_queue = agent_queue
+
     log.info(
         "Server started — DB: %s, bootstrap: %s (ready=%s, operational=%s)",
         config.db_path, app.state.bootstrap.checkpoint,
@@ -378,6 +403,10 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    # Stop agent queue on shutdown
+    if hasattr(app.state, "agent_queue"):
+        app.state.agent_queue.stop()
+
     # Stop scheduler on shutdown
     if app.state.scheduler:
         app.state.scheduler.stop()
@@ -390,6 +419,14 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
 
+    # Shut down MCP event loop (if it was started)
+    try:
+        from giva.agents.mcp_agent.lifecycle import shutdown_mcp_loop
+
+        shutdown_mcp_loop()
+    except ImportError:
+        pass  # mcp_agent package not installed or MCP not used
+
     log.info("Giva server shutting down")
 
 
@@ -400,6 +437,7 @@ def _start_scheduler(app) -> None:
     from giva.sync.scheduler import SyncScheduler
     scheduler = SyncScheduler(
         app.state.store, app.state.config, app=app, llm_lock=_llm_lock,
+        agent_queue=getattr(app.state, "agent_queue", None),
     )
     scheduler.start()
     app.state.scheduler = scheduler
@@ -553,6 +591,11 @@ async def _sync_gen_to_sse(gen_fn, *args, **kwargs) -> AsyncGenerator[dict, None
     queue: asyncio.Queue[dict] = asyncio.Queue()
 
     def _run():
+        # Signal the agent queue that user chat is active — the queue
+        # consumer will wait for this to clear before starting the next job.
+        aq = getattr(app.state, "agent_queue", None)
+        if aq:
+            aq.chat_active.set()
         try:
             # Notify the client if the model isn't loaded yet — this means
             # we'll spend 10-30s loading before any tokens arrive.
@@ -587,6 +630,9 @@ async def _sync_gen_to_sse(gen_fn, *args, **kwargs) -> AsyncGenerator[dict, None
             loop.call_soon_threadsafe(
                 queue.put_nowait, {"event": "error", "data": str(e)}
             )
+        finally:
+            if aq:
+                aq.chat_active.clear()
 
     future = loop.run_in_executor(None, _run)
 
@@ -639,6 +685,10 @@ async def _sync_gen_to_sse_with_voice(
                 log.warning("TTS synthesis error in SSE: %s", e)
 
         sentence_buffer = ""
+        # Signal the agent queue that user chat is active
+        aq = getattr(app.state, "agent_queue", None)
+        if aq:
+            aq.chat_active.set()
         try:
             parser = _ThinkParser(start_in_think=_model_starts_in_think())
             with _llm_lock:
@@ -680,6 +730,9 @@ async def _sync_gen_to_sse_with_voice(
             loop.call_soon_threadsafe(
                 queue.put_nowait, {"event": "error", "data": str(e)}
             )
+        finally:
+            if aq:
+                aq.chat_active.clear()
 
     future = loop.run_in_executor(None, _run)
 
@@ -902,6 +955,70 @@ async def update_task(
     )
 
 
+@app.post("/api/tasks/{task_id}/ai")
+async def task_ai(task_id: int, request: Request):
+    """Plan an agent-assisted approach to a task via the orchestrator.
+
+    Creates a pending_confirmation job in the agent queue with the
+    orchestrator's plan summary.  The client shows the plan and asks
+    the user to approve before execution.
+    """
+    store: Store = request.app.state.store
+    config = request.app.state.config
+    aq = getattr(request.app.state, "agent_queue", None)
+
+    task = store.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    query = f"Help me accomplish this task: {task.title}"
+    if task.description:
+        query += f"\nDetails: {task.description}"
+
+    from giva.agents.registry import registry as agent_registry
+
+    orch = agent_registry.get("orchestrator")
+    if not orch:
+        raise HTTPException(status_code=503, detail="Orchestrator agent not available")
+
+    loop = asyncio.get_event_loop()
+
+    # Plan under lock
+    def _plan():
+        with _llm_lock:
+            return orch.plan_only(query, config)
+
+    plan = await loop.run_in_executor(None, _plan)
+
+    plan_summary = None
+    if plan:
+        from giva.agents.orchestrator.planner import format_plan_summary
+
+        plan_summary = format_plan_summary(plan)
+
+    from giva.agents.queue import AgentJob, make_job_id
+
+    job = AgentJob(
+        job_id=make_job_id(),
+        agent_id="orchestrator",
+        query=query,
+        context={"params": {}, "query": query, "task_id": task_id},
+        priority=0,
+        status="pending_confirmation",
+        source="task",
+        task_id=task_id,
+        plan_summary=plan_summary,
+    )
+    if aq:
+        aq.enqueue(job)
+
+    return {
+        "job_id": job.job_id,
+        "plan_summary": plan_summary,
+        "agent_id": "orchestrator",
+    }
+
+
 @app.post("/api/sync")
 async def sync(request: Request) -> SyncResponse:
     """Trigger full email + calendar sync. Long-running (~30s)."""
@@ -1022,6 +1139,145 @@ async def _run_post_chat(
     return await loop.run_in_executor(None, _agents)
 
 
+async def _check_agent_routing(
+    query: str,
+    store: Store,
+    config,
+    goal_id: int | None = None,
+) -> AsyncGenerator[dict, None]:
+    """Check if the query should trigger an agent via the AgentQueue.
+
+    Runs after the normal chat stream completes. If an agent is matched:
+    - If requires_confirmation: enqueues as pending_confirmation, yields agent_confirm
+    - Otherwise: enqueues for background execution (result comes via session stream)
+
+    Yields SSE events (may yield nothing if no agent is needed).
+    """
+    if not config.agents.enabled or not config.agents.routing_enabled:
+        return
+
+    from giva.agents.registry import registry as agent_registry
+
+    if not agent_registry.has_agents():
+        return
+
+    loop = asyncio.get_event_loop()
+
+    # Check if the assistant response contains the [NEEDS_AGENT] marker
+    recent = store.get_recent_messages(limit=2, goal_id=goal_id)
+    response_text = ""
+    for m in reversed(recent):
+        if m["role"] == "assistant":
+            response_text = m["content"]
+            break
+
+    has_marker = "[NEEDS_AGENT]" in response_text
+
+    # Only route if the marker is present or keyword pre-filter matches
+    from giva.agents.router import keyword_prefilter
+
+    manifests = agent_registry.list_manifests()
+    candidates = keyword_prefilter(query, manifests)
+
+    if not has_marker and not candidates:
+        return
+
+    # Run the LLM router (under lock) to decide which agent to use
+    def _route_query():
+        from giva.agents.router import route_query
+
+        with _llm_lock:
+            return route_query(query, config)
+
+    route = await loop.run_in_executor(None, _route_query)
+    if route is None:
+        return
+
+    agent_id, params = route
+    agent = agent_registry.get(agent_id)
+    if not agent:
+        return
+
+    # Get the agent queue (may not be available during tests)
+    aq = getattr(app.state, "agent_queue", None)
+
+    from giva.agents.queue import AgentJob, make_job_id
+
+    context = {"params": params, "query": query}
+    if goal_id is not None:
+        context["goal_id"] = goal_id
+
+    if agent.manifest.requires_confirmation:
+        # Build a confirmation message (includes orchestrator plan if applicable)
+        confirm_message = (
+            f"I can use the {agent.manifest.name} to help with this. "
+            f"Would you like me to proceed?"
+        )
+        plan_summary = None
+        if agent_id == "orchestrator":
+            def _plan():
+                with _llm_lock:
+                    return agent.plan_only(query, config)
+
+            try:
+                plan = await loop.run_in_executor(None, _plan)
+                if plan:
+                    from giva.agents.orchestrator.planner import format_plan_summary
+                    confirm_message = format_plan_summary(plan)
+                    plan_summary = confirm_message
+                else:
+                    confirm_message = (
+                        "I'd like to break this into steps, but couldn't "
+                        "create a plan. Would you like me to try anyway?"
+                    )
+            except Exception as exc:
+                log.debug("Orchestrator plan_only failed: %s", exc)
+
+        # Enqueue as pending_confirmation — waits for user approval
+        job = AgentJob(
+            job_id=make_job_id(),
+            agent_id=agent_id,
+            query=query,
+            context=context,
+            priority=0,
+            status="pending_confirmation",
+            source="goal" if goal_id else "chat",
+            goal_id=goal_id,
+            plan_summary=plan_summary,
+        )
+        if aq:
+            aq.enqueue(job)
+
+        yield {"event": "agent_confirm", "data": json.dumps({
+            "job_id": job.job_id,
+            "agent_id": agent_id,
+            "agent_name": agent.manifest.name,
+            "params": params,
+            "message": confirm_message,
+        })}
+    else:
+        # Non-confirmation agent: enqueue for immediate background execution.
+        # The result will be delivered via the session stream as
+        # agent_job_completed / agent_job_failed events.
+        job = AgentJob(
+            job_id=make_job_id(),
+            agent_id=agent_id,
+            query=query,
+            context=context,
+            priority=0,
+            source="goal" if goal_id else "chat",
+            goal_id=goal_id,
+        )
+        if aq:
+            aq.enqueue(job)
+
+        yield {"event": "agent_queued", "data": json.dumps({
+            "job_id": job.job_id,
+            "agent_id": agent_id,
+            "agent_name": agent.manifest.name,
+        })}
+
+
 @app.post("/api/chat")
 async def chat(req: ChatRequest, request: Request):
     """Streaming chat via SSE. Returns token-by-token LLM response.
@@ -1029,6 +1285,10 @@ async def chat(req: ChatRequest, request: Request):
     After the response stream completes, runs the post-chat agent pipeline
     (intent detection, progress tracking, conversation compression) using the
     filter model and emits ``agent_actions`` SSE events for UI feedback.
+
+    If pluggable agents are enabled, the response is also checked for the
+    [NEEDS_AGENT] marker. If found, the agent router runs and emits an
+    ``agent_result`` SSE event with the matched agent's output.
 
     When voice=true, also emits "audio_chunk" events containing base64-encoded
     WAV audio for each sentence (synthesized via Qwen3-TTS).
@@ -1052,6 +1312,9 @@ async def chat(req: ChatRequest, request: Request):
                     "event": "agent_actions",
                     "data": json.dumps(actions),
                 }
+            # Agent routing check (after response is complete)
+            async for event in _check_agent_routing(query_text, store, config):
+                yield event
     else:
         async def event_generator():
             async for event in _sync_gen_to_sse(handle_query, req.query, store, config):
@@ -1063,6 +1326,9 @@ async def chat(req: ChatRequest, request: Request):
                     "event": "agent_actions",
                     "data": json.dumps(actions),
                 }
+            # Agent routing check (after response is complete)
+            async for event in _check_agent_routing(query_text, store, config):
+                yield event
 
     return EventSourceResponse(event_generator())
 
@@ -1080,6 +1346,174 @@ async def suggest(request: Request):
             yield event
 
     return EventSourceResponse(event_generator())
+
+
+# --- Pluggable Agent Endpoints ---
+
+
+@app.get("/api/agents")
+async def list_agents(request: Request):
+    """List all available agents with their manifests."""
+    from giva.agents.registry import registry as agent_registry
+
+    manifests = agent_registry.list_manifests()
+    return {
+        "agents": [
+            {
+                "agent_id": m.agent_id,
+                "name": m.name,
+                "description": m.description,
+                "examples": m.examples,
+                "model_tier": m.model_tier,
+                "supports_streaming": m.supports_streaming,
+                "requires_confirmation": m.requires_confirmation,
+                "version": m.version,
+            }
+            for m in manifests
+        ],
+        "count": len(manifests),
+    }
+
+
+@app.post("/api/agents/{agent_id}/execute")
+async def execute_agent_endpoint(
+    agent_id: str, req: ChatRequest, request: Request
+):
+    """Directly invoke a specific agent (bypasses routing)."""
+    store: Store = request.app.state.store
+    config = request.app.state.config
+
+    from giva.agents.registry import registry as agent_registry
+    from giva.agents.router import execute_agent
+
+    agent = agent_registry.get(agent_id)
+    if agent is None:
+        raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
+
+    loop = asyncio.get_event_loop()
+
+    def _run():
+        import time
+
+        context = {"params": {}, "query": req.query}
+        start = time.monotonic()
+        # Agents with model_tier="none" (e.g. MCP) don't use the local LLM.
+        if agent.manifest.model_tier == "none":
+            result = execute_agent(agent_id, req.query, context, store, config)
+        else:
+            with _llm_lock:
+                result = execute_agent(agent_id, req.query, context, store, config)
+        duration_ms = int((time.monotonic() - start) * 1000)
+        store.log_agent_execution(
+            agent_id, req.query, {}, result.success,
+            result.output[:500], result.artifacts,
+            result.error or "", duration_ms,
+        )
+        return result
+
+    result = await loop.run_in_executor(None, _run)
+
+    async def event_generator():
+        yield {"event": "token", "data": result.output}
+        if result.actions:
+            yield {"event": "agent_actions", "data": json.dumps(result.actions)}
+        yield {"event": "done", "data": ""}
+
+    return EventSourceResponse(event_generator())
+
+
+@app.get("/api/agents/history")
+async def agent_history(
+    request: Request,
+    agent_id: Optional[str] = Query(None),
+    limit: int = Query(20, ge=1, le=100),
+):
+    """Get recent agent execution history."""
+    store: Store = request.app.state.store
+    executions = store.get_agent_executions(agent_id=agent_id, limit=limit)
+    return {"executions": executions, "count": len(executions)}
+
+
+# ---------------------------------------------------------------------------
+# Agent Queue endpoints
+# ---------------------------------------------------------------------------
+
+
+class AgentConfirmRequest(BaseModel):
+    job_id: str
+
+
+@app.get("/api/agents/queue")
+async def list_agent_queue(
+    request: Request,
+    status: Optional[str] = Query(None),
+    limit: int = Query(20, ge=1, le=100),
+):
+    """List agent queue jobs, optionally filtered by status.
+
+    Returns most recent first. Active + recent completed jobs.
+    """
+    aq = getattr(request.app.state, "agent_queue", None)
+    if aq is None:
+        return {"jobs": [], "count": 0}
+
+    jobs = aq.list_jobs(status=status, limit=limit)
+    return {
+        "jobs": [j.to_dict() for j in jobs],
+        "count": len(jobs),
+        "active_count": aq.active_count,
+    }
+
+
+@app.post("/api/agents/confirm")
+async def confirm_agent_job(req: AgentConfirmRequest, request: Request):
+    """Confirm a pending_confirmation agent job and push it to the execution queue."""
+    aq = getattr(request.app.state, "agent_queue", None)
+    if aq is None:
+        raise HTTPException(status_code=503, detail="Agent queue not available")
+
+    if aq.confirm(req.job_id):
+        return {"status": "confirmed", "job_id": req.job_id}
+    raise HTTPException(
+        status_code=404,
+        detail=f"Job '{req.job_id}' not found or not pending confirmation",
+    )
+
+
+@app.post("/api/agents/queue/{job_id}/cancel")
+async def cancel_agent_job(job_id: str, request: Request):
+    """Cancel a queued or pending_confirmation agent job.
+
+    Running jobs cannot be cancelled.
+    """
+    aq = getattr(request.app.state, "agent_queue", None)
+    if aq is None:
+        raise HTTPException(status_code=503, detail="Agent queue not available")
+
+    if aq.cancel(job_id):
+        return {"status": "cancelled", "job_id": job_id}
+    raise HTTPException(
+        status_code=404,
+        detail=f"Job '{job_id}' not found or not cancellable (may be running)",
+    )
+
+
+@app.get("/api/agents/queue/{job_id}")
+async def get_agent_job(job_id: str, request: Request):
+    """Get details for a specific agent queue job."""
+    aq = getattr(request.app.state, "agent_queue", None)
+    if aq is None:
+        raise HTTPException(status_code=503, detail="Agent queue not available")
+
+    job = aq.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
+    return job.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# Onboarding
+# ---------------------------------------------------------------------------
 
 
 @app.get("/api/onboarding/status")
@@ -1865,6 +2299,12 @@ async def session_stream(request: Request):
     - review_due          — daily review is due
     - stats               — updated stats {emails, events, tasks}
     - heartbeat           — keepalive (every 15s)
+    - agent_job_enqueued  — agent job added to queue
+    - agent_job_confirmed — pending_confirmation job approved by user
+    - agent_job_started   — agent job execution started
+    - agent_job_completed — agent job finished successfully
+    - agent_job_failed    — agent job failed
+    - agent_job_cancelled — agent job cancelled
     """
     store: Store = request.app.state.store
     config = request.app.state.config
@@ -2410,6 +2850,71 @@ async def review_plans(request: Request):
     return EventSourceResponse(event_generator())
 
 
+@app.post("/api/goals/{goal_id}/brainstorm")
+async def goal_brainstorm(goal_id: int, request: Request):
+    """Plan an AI brainstorm session for a goal via the orchestrator.
+
+    Creates a pending_confirmation job in the agent queue.  The orchestrator
+    will research and brainstorm next steps for the goal.
+    """
+    store: Store = request.app.state.store
+    config = request.app.state.config
+    aq = getattr(request.app.state, "agent_queue", None)
+
+    goal = store.get_goal(goal_id)
+    if not goal:
+        raise HTTPException(status_code=404, detail="Goal not found")
+
+    query = (
+        f"Brainstorm next steps and tactics for my goal: {goal.title}\n"
+        f"Tier: {goal.tier}, Category: {goal.category}\n"
+        f"Description: {goal.description or 'N/A'}\n"
+        f"Status: {goal.status}, Priority: {goal.priority}"
+    )
+
+    from giva.agents.registry import registry as agent_registry
+
+    orch = agent_registry.get("orchestrator")
+    if not orch:
+        raise HTTPException(status_code=503, detail="Orchestrator agent not available")
+
+    loop = asyncio.get_event_loop()
+
+    def _plan():
+        with _llm_lock:
+            return orch.plan_only(query, config)
+
+    plan = await loop.run_in_executor(None, _plan)
+
+    plan_summary = None
+    if plan:
+        from giva.agents.orchestrator.planner import format_plan_summary
+
+        plan_summary = format_plan_summary(plan)
+
+    from giva.agents.queue import AgentJob, make_job_id
+
+    job = AgentJob(
+        job_id=make_job_id(),
+        agent_id="orchestrator",
+        query=query,
+        context={"params": {}, "query": query, "goal_id": goal_id},
+        priority=0,
+        status="pending_confirmation",
+        source="goal",
+        goal_id=goal_id,
+        plan_summary=plan_summary,
+    )
+    if aq:
+        aq.enqueue(job)
+
+    return {
+        "job_id": job.job_id,
+        "plan_summary": plan_summary,
+        "agent_id": "orchestrator",
+    }
+
+
 @app.post("/api/goals/{goal_id}/chat")
 async def goal_chat(goal_id: int, req: GoalChatRequest, request: Request):
     """Goal-scoped chat: sends goal context to LLM. Returns SSE stream.
@@ -2448,6 +2953,11 @@ async def goal_chat(goal_id: int, req: GoalChatRequest, request: Request):
                 "event": "agent_actions",
                 "data": json.dumps(actions),
             }
+        # Agent routing check (same as global chat)
+        async for event in _check_agent_routing(
+            original_query, store, config, goal_id=goal_id,
+        ):
+            yield event
 
     return EventSourceResponse(event_generator())
 

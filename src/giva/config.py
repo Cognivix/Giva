@@ -55,6 +55,21 @@ class GoalsConfig:
 
 
 @dataclass(frozen=True)
+class AgentsConfig:
+    enabled: bool = True
+    routing_enabled: bool = True  # False to disable LLM routing (manual-only)
+    max_execution_seconds: int = 60
+    # Orchestrator: max wall-clock seconds for full plan+execute+synthesize cycle
+    orchestrator_timeout_seconds: int = 180
+    # Orchestrator: max subtasks the planner is allowed to create
+    orchestrator_max_subtasks: int = 6
+    # Scheduler: enable periodic agent tasks (opt-in)
+    scheduler_agent_enabled: bool = False
+    # Scheduler: how often to check for automated agent work (minutes)
+    scheduler_agent_interval_minutes: int = 60
+
+
+@dataclass(frozen=True)
 class GivaConfig:
     data_dir: Path = field(default_factory=lambda: Path("~/.local/share/giva").expanduser())
     log_level: str = "INFO"
@@ -63,6 +78,7 @@ class GivaConfig:
     llm: LLMConfig = field(default_factory=LLMConfig)
     voice: VoiceConfig = field(default_factory=VoiceConfig)
     goals: GoalsConfig = field(default_factory=GoalsConfig)
+    agents: AgentsConfig = field(default_factory=AgentsConfig)
 
     @property
     def db_path(self) -> Path:
@@ -105,6 +121,8 @@ def _apply_env(raw: dict) -> dict:
         "GIVA_VOICE_STT_MODEL": ("voice", "stt_model"),
         "GIVA_GOALS_STRATEGY_INTERVAL": ("goals", "strategy_interval_hours"),
         "GIVA_GOALS_REVIEW_HOUR": ("goals", "daily_review_hour"),
+        "GIVA_AGENTS_ENABLED": ("agents", "enabled"),
+        "GIVA_AGENTS_ROUTING": ("agents", "routing_enabled"),
     }
     for env_key, path in env_map.items():
         val = os.environ.get(env_key)
@@ -175,8 +193,13 @@ def _toml_value(val) -> str:
     return f'"{val}"'
 
 
-def load_config() -> GivaConfig:
-    """Load configuration from defaults, user file, and environment."""
+def load_raw_config() -> dict:
+    """Load and merge raw TOML config (without parsing into GivaConfig).
+
+    Applies: config.default.toml → user config.toml → GIVA_* env vars.
+    Useful when subsystems (e.g. MCP agents) need access to sections
+    that are not represented in the typed :class:`GivaConfig`.
+    """
     raw: dict = {}
 
     if _DEFAULT_CONFIG.exists():
@@ -188,7 +211,12 @@ def load_config() -> GivaConfig:
             user = tomllib.load(f)
         raw = _deep_merge(raw, user)
 
-    raw = _apply_env(raw)
+    return _apply_env(raw)
+
+
+def load_config() -> GivaConfig:
+    """Load configuration from defaults, user file, and environment."""
+    raw = load_raw_config()
 
     giva_raw = raw.get("giva", {})
     data_dir = Path(giva_raw.get("data_dir", "~/.local/share/giva")).expanduser()
@@ -234,5 +262,24 @@ def load_config() -> GivaConfig:
                 raw.get("goals", {}).get("max_strategies_per_run", 1)
             ),
             plan_horizon_days=int(raw.get("goals", {}).get("plan_horizon_days", 7)),
+        ),
+        agents=AgentsConfig(
+            enabled=_to_bool(raw.get("agents", {}).get("enabled", True)),
+            routing_enabled=_to_bool(raw.get("agents", {}).get("routing_enabled", True)),
+            max_execution_seconds=int(
+                raw.get("agents", {}).get("max_execution_seconds", 60)
+            ),
+            orchestrator_timeout_seconds=int(
+                raw.get("agents", {}).get("orchestrator_timeout_seconds", 180)
+            ),
+            orchestrator_max_subtasks=int(
+                raw.get("agents", {}).get("orchestrator_max_subtasks", 6)
+            ),
+            scheduler_agent_enabled=_to_bool(
+                raw.get("agents", {}).get("scheduler_agent_enabled", False)
+            ),
+            scheduler_agent_interval_minutes=int(
+                raw.get("agents", {}).get("scheduler_agent_interval_minutes", 60)
+            ),
         ),
     )

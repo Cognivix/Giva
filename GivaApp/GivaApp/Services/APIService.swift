@@ -321,6 +321,60 @@ class APIService {
         return try await post("api/upgrade", body: UpgradeRequest(projectRoot: projectRoot))
     }
 
+    // MARK: - Agent Queue
+
+    func getAgentQueue(status: String? = nil, limit: Int = 20) async throws -> AgentQueueResponse {
+        var path = "api/agents/queue?limit=\(limit)"
+        if let status { path += "&status=\(status)" }
+        return try await get(path)
+    }
+
+    func confirmAgent(jobId: String) async throws {
+        let url = baseURL.appendingPathComponent("api/agents/confirm")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(AgentConfirmRequest(jobId: jobId))
+        let (data, response) = try await session.data(for: request)
+        try checkResponse(response, data: data)
+    }
+
+    func cancelAgent(jobId: String) async throws {
+        let url = baseURL.appendingPathComponent("api/agents/queue/\(jobId)/cancel")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        let (data, response) = try await session.data(for: request)
+        try checkResponse(response, data: data)
+    }
+
+    func getAgentJob(jobId: String) async throws -> AgentJobItem {
+        return try await get("api/agents/queue/\(jobId)")
+    }
+
+    func taskAI(taskId: Int) async throws -> [String: Any] {
+        let url = baseURL.appendingPathComponent("api/tasks/\(taskId)/ai")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        let (data, response) = try await session.data(for: request)
+        try checkResponse(response, data: data)
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw URLError(.cannotParseResponse)
+        }
+        return json
+    }
+
+    func goalBrainstorm(goalId: Int) async throws -> [String: Any] {
+        let url = baseURL.appendingPathComponent("api/goals/\(goalId)/brainstorm")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        let (data, response) = try await session.data(for: request)
+        try checkResponse(response, data: data)
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw URLError(.cannotParseResponse)
+        }
+        return json
+    }
+
     // MARK: - SSE Parser
 
     /// Parse an SSE stream from the server.

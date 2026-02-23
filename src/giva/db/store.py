@@ -23,7 +23,7 @@ from giva.db.models import (
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -207,6 +207,19 @@ CREATE TABLE IF NOT EXISTS daily_reviews (
     prompt_text TEXT NOT NULL,
     user_response TEXT DEFAULT '',
     summary TEXT DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS agent_executions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id TEXT NOT NULL,
+    query TEXT NOT NULL,
+    params TEXT DEFAULT '{}',
+    success INTEGER NOT NULL DEFAULT 1,
+    output_summary TEXT DEFAULT '',
+    artifacts TEXT DEFAULT '{}',
+    error TEXT DEFAULT '',
+    duration_ms INTEGER DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 """
@@ -680,6 +693,7 @@ class Store:
                 conn.execute("DELETE FROM task_extraction_log")
                 conn.execute("DELETE FROM sync_state")
                 conn.execute("DELETE FROM user_profile")
+                conn.execute("DELETE FROM agent_executions")
                 # Rebuild FTS indexes after clearing data
                 conn.execute("INSERT INTO emails_fts(emails_fts) VALUES('rebuild')")
                 conn.execute("INSERT INTO tasks_fts(tasks_fts) VALUES('rebuild')")
@@ -917,6 +931,57 @@ class Store:
                 (user_response, summary, review_id),
             )
             return cursor.rowcount > 0
+
+    # --- Agent Executions ---
+
+    def log_agent_execution(
+        self,
+        agent_id: str,
+        query: str,
+        params: dict,
+        success: bool,
+        output_summary: str,
+        artifacts: dict,
+        error: str,
+        duration_ms: int,
+    ) -> int:
+        """Log an agent execution for history and debugging."""
+        with self._conn() as conn:
+            cursor = conn.execute(
+                """INSERT INTO agent_executions
+                   (agent_id, query, params, success, output_summary,
+                    artifacts, error, duration_ms)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    agent_id,
+                    query,
+                    json.dumps(params),
+                    int(success),
+                    output_summary[:500],
+                    json.dumps(artifacts),
+                    error,
+                    duration_ms,
+                ),
+            )
+            return cursor.lastrowid
+
+    def get_agent_executions(
+        self, agent_id: Optional[str] = None, limit: int = 20
+    ) -> list[dict]:
+        """Get recent agent executions, optionally filtered by agent_id."""
+        with self._conn() as conn:
+            if agent_id:
+                rows = conn.execute(
+                    "SELECT * FROM agent_executions WHERE agent_id = ? "
+                    "ORDER BY id DESC LIMIT ?",
+                    (agent_id, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM agent_executions ORDER BY id DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            return [dict(r) for r in rows]
 
     # --- Tasks for Goals ---
 

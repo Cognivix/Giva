@@ -27,6 +27,8 @@ class SyncScheduler:
     Broadcasts events to connected UI sessions via ``app.state.session_queues``.
     Acquires ``llm_lock`` before any LLM calls to avoid concurrent access
     to the non-thread-safe MLX ModelManager.
+
+    Optionally runs periodic agent tasks via the AgentQueue (opt-in via config).
     """
 
     def __init__(
@@ -35,13 +37,16 @@ class SyncScheduler:
         config: GivaConfig,
         app: Any = None,
         llm_lock: Optional[threading.Lock] = None,
+        agent_queue: Any = None,
     ):
         self.store = store
         self.config = config
         self.app = app  # FastAPI app instance for session broadcasting
         self._llm_lock = llm_lock
+        self._agent_queue = agent_queue
         self._timer: threading.Timer | None = None
         self._strategy_timer: threading.Timer | None = None
+        self._agent_timer: threading.Timer | None = None
         self._running = False
 
     @contextmanager
@@ -82,6 +87,16 @@ class SyncScheduler:
         strategy_interval = self.config.goals.strategy_interval_hours * 3600
         self._schedule_strategy(strategy_interval)
 
+        # Start agent tasks timer (if enabled and queue available)
+        if (
+            self._agent_queue
+            and self.config.agents.scheduler_agent_enabled
+        ):
+            agent_interval = self.config.agents.scheduler_agent_interval_minutes * 60
+            self._schedule_agent_tasks(agent_interval)
+            log.info("Scheduler agent tasks enabled (every %d min)",
+                     self.config.agents.scheduler_agent_interval_minutes)
+
         log.info("Background sync started (every %d minutes)", interval // 60)
 
     def stop(self):
@@ -93,6 +108,9 @@ class SyncScheduler:
         if self._strategy_timer:
             self._strategy_timer.cancel()
             self._strategy_timer = None
+        if self._agent_timer:
+            self._agent_timer.cancel()
+            self._agent_timer = None
         log.info("Background sync stopped")
 
     def _schedule(self, interval: float):
@@ -217,3 +235,37 @@ class SyncScheduler:
             log.error("Background strategy error: %s", e)
         finally:
             self._schedule_strategy(interval)
+
+    # ------------------------------------------------------------------
+    # Agent tasks (third timer — periodic agent work)
+    # ------------------------------------------------------------------
+
+    def _schedule_agent_tasks(self, interval: float):
+        if not self._running:
+            return
+        self._agent_timer = threading.Timer(
+            interval, self._run_agent_tasks, args=(interval,)
+        )
+        self._agent_timer.daemon = True
+        self._agent_timer.start()
+
+    def _run_agent_tasks(self, interval: float):
+        """Check for automated agent work. Runs periodically when enabled.
+
+        This is infrastructure — specific triggers will be added as agents
+        are built.  Currently a no-op placeholder that logs and reschedules.
+
+        Future triggers could include:
+        - Stale tasks (no progress in N days) → auto-brainstorm
+        - Unactioned important emails → draft response
+        - Goal check-ins → progress review
+        """
+        try:
+            log.debug("Scheduler agent tasks: checking for automated work")
+            # Placeholder — add specific agent task triggers here as agents
+            # are built. Each trigger would create an AgentJob with
+            # source="scheduler" and priority=2 (low, behind user work).
+        except Exception as e:
+            log.error("Scheduler agent tasks error: %s", e)
+        finally:
+            self._schedule_agent_tasks(interval)

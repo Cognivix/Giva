@@ -27,10 +27,20 @@ struct QuickActionsView: View {
             }
             .disabled(!viewModel.areActionsEnabled || viewModel.isSyncing)
 
+            // Full Window
+            ActionButton(
+                icon: "macwindow",
+                label: "Window"
+            ) {
+                openWindow(id: "main-window")
+            }
+            .disabled(!viewModel.areActionsEnabled)
+
             // Goals
             ActionButton(
-                icon: viewModel.isDailyReviewDue ? "target.badge.clock" : "target",
-                label: "Goals"
+                icon: "target",
+                label: "Goals",
+                tint: viewModel.isDailyReviewDue ? .orange : nil
             ) {
                 openWindow(id: "goals")
             }

@@ -102,3 +102,39 @@ class DailyReviewResult(BaseModel):
     summary: str = Field(description="Summary of the day's progress")
     goal_updates: list[dict] = Field(default_factory=list)
     suggested_focus: list[str] = Field(default_factory=list)
+
+
+# --- Orchestrator models ---
+
+
+class SubTask(BaseModel):
+    """A single subtask in an orchestrator plan."""
+
+    id: int = Field(description="Sequential subtask ID, starting from 1")
+    description: str = Field(description="What this subtask should accomplish")
+    agent_id: str = Field(description="ID of the agent to handle this subtask")
+    query: str = Field(description="Self-contained instruction for the assigned agent")
+    params: dict = Field(default_factory=dict, description="Extra params for the agent")
+    depends_on: list[int] = Field(
+        default_factory=list,
+        description="IDs of subtasks that must complete before this one",
+    )
+
+
+class OrchestratorPlan(BaseModel):
+    """LLM-generated plan for decomposing a complex request."""
+
+    goal: str = Field(description="One-sentence restatement of the user's intent")
+    reasoning: str = Field(default="", description="Brief explanation of the decomposition")
+    subtasks: list[SubTask] = Field(default_factory=list)
+
+
+class SubTaskQA(BaseModel):
+    """QA evaluation of a completed subtask."""
+
+    passed: bool = Field(description="Whether the subtask output meets expectations")
+    feedback: str = Field(default="", description="What was good or what was wrong")
+    retry_suggestion: Optional[str] = Field(
+        default=None,
+        description="Modified query for a retry attempt, or null if not needed",
+    )

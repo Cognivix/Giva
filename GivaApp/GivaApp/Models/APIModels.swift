@@ -624,6 +624,114 @@ struct ReviewHistoryItem: Codable, Identifiable {
     }
 }
 
+// MARK: - Agent Queue
+
+struct AgentJobItem: Decodable, Identifiable {
+    var id: String { jobId }
+
+    let jobId: String
+    let agentId: String
+    let query: String
+    let priority: Int
+    let status: String        // pending | pending_confirmation | running | completed | failed | cancelled
+    let source: String         // chat | task | goal | scheduler
+    let goalId: Int?
+    let taskId: Int?
+    let planSummary: String?
+    let result: AgentJobResult?
+    let error: String?
+    let createdAt: Double
+    let completedAt: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case query, priority, status, source, result, error
+        case jobId = "job_id"
+        case agentId = "agent_id"
+        case goalId = "goal_id"
+        case taskId = "task_id"
+        case planSummary = "plan_summary"
+        case createdAt = "created_at"
+        case completedAt = "completed_at"
+    }
+
+    var isActive: Bool { status == "pending" || status == "running" }
+    var isTerminal: Bool { status == "completed" || status == "failed" || status == "cancelled" }
+
+    var statusLabel: String {
+        switch status {
+        case "pending": return "Queued"
+        case "pending_confirmation": return "Needs Approval"
+        case "running": return "Running"
+        case "completed": return "Done"
+        case "failed": return "Failed"
+        case "cancelled": return "Cancelled"
+        default: return status.capitalized
+        }
+    }
+}
+
+struct AgentJobResult: Decodable {
+    let success: Bool
+    let output: String?
+    let error: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case success, output, error
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        success = (try? c.decode(Bool.self, forKey: .success)) ?? false
+        output = try? c.decodeIfPresent(String.self, forKey: .output)
+        error = try? c.decodeIfPresent(String.self, forKey: .error)
+    }
+}
+
+struct AgentConfirmation: Identifiable {
+    let id: String          // job_id
+    let agentId: String
+    let agentName: String
+    let message: String
+    let params: [String: Any]
+
+    init?(from json: String) {
+        guard let data = json.data(using: .utf8),
+              let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+
+        guard let jobId = dict["job_id"] as? String,
+              let agentId = dict["agent_id"] as? String,
+              let agentName = dict["agent_name"] as? String,
+              let message = dict["message"] as? String
+        else { return nil }
+
+        self.id = jobId
+        self.agentId = agentId
+        self.agentName = agentName
+        self.message = message
+        self.params = dict["params"] as? [String: Any] ?? [:]
+    }
+}
+
+struct AgentConfirmRequest: Encodable {
+    let jobId: String
+
+    enum CodingKeys: String, CodingKey {
+        case jobId = "job_id"
+    }
+}
+
+struct AgentQueueResponse: Decodable {
+    let jobs: [AgentJobItem]
+    let count: Int
+    let activeCount: Int
+
+    enum CodingKeys: String, CodingKey {
+        case jobs, count
+        case activeCount = "active_count"
+    }
+}
+
 // MARK: - Session State (server-driven lifecycle)
 
 /// Numeric stats from the server's get_stats().

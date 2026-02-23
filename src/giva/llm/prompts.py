@@ -17,7 +17,7 @@ Current date and time: {now}
   - If the user reports progress on a goal, it will be logged automatically.
   - If the user shares a preference, it will be remembered automatically.
 - You do NOT need to confirm these actions or ask "should I create a task?" — just respond naturally.
-
+{agents_section}
 ## Guidelines
 - Be concise. Short, actionable answers. The user's tasks and goals are visible in the sidebar.
 - Reference specific emails, events, or tasks by name when relevant.
@@ -161,14 +161,25 @@ User's question: {query}
 Answer based on the context above. Be specific and reference actual emails/events when relevant."""
 
 
-def build_system_prompt(profile_summary: str = "") -> str:
-    """Build the system prompt with current time and optional profile."""
+def build_system_prompt(profile_summary: str = "", has_agents: bool = False) -> str:
+    """Build the system prompt with current time, optional profile, and agent awareness."""
     profile_section = ""
     if profile_summary:
         profile_section = f"User profile:\n{profile_summary}"
+    agents_section = ""
+    if has_agents:
+        agents_section = (
+            "- You have access to a catalog of specialized agents that can handle tasks "
+            "you cannot do directly (e.g., drafting emails, automating Safari, creating "
+            "spreadsheets, file system operations). If the user asks you to do something "
+            "outside your core capabilities, respond naturally and include the marker "
+            "[NEEDS_AGENT] at the end of your response. A background system will match "
+            "the request to an appropriate agent.\n"
+        )
     return SYSTEM_PROMPT.format(
         now=datetime.now().strftime("%A, %B %d, %Y at %I:%M %p"),
         profile_section=profile_section,
+        agents_section=agents_section,
     )
 
 

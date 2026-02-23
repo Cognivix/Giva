@@ -35,11 +35,13 @@ struct TaskListView: View {
                 ScrollView {
                     LazyVStack(spacing: 4) {
                         ForEach(viewModel.tasks) { task in
-                            TaskRow(task: task) { status in
+                            TaskRow(task: task, onStatusChange: { status in
                                 Task {
                                     await viewModel.updateTaskStatus(taskId: task.id, status: status)
                                 }
-                            }
+                            }, onAIRequest: {
+                                Task { await viewModel.requestTaskAI(taskId: task.id) }
+                            })
                         }
                     }
                     .padding(8)
@@ -55,6 +57,7 @@ struct TaskListView: View {
 struct TaskRow: View {
     let task: TaskItem
     let onStatusChange: (String) -> Void
+    var onAIRequest: (() -> Void)? = nil
 
     @State private var isHovering = false
 
@@ -97,6 +100,16 @@ struct TaskRow: View {
             // Action buttons (visible on hover)
             if isHovering {
                 HStack(spacing: 4) {
+                    if let onAI = onAIRequest {
+                        Button(action: onAI) {
+                            Image(systemName: "sparkles")
+                                .font(.system(size: 14))
+                                .foregroundColor(.purple)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Plan with AI")
+                    }
+
                     Button(action: { onStatusChange("done") }) {
                         Image(systemName: "checkmark.circle.fill")
                             .font(.system(size: 16))
