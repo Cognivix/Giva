@@ -1,4 +1,5 @@
 // ChatView.swift - Message list with streaming text and input field.
+// Assistant messages render Markdown (headers, bold, italic, code, links, lists).
 
 import SwiftUI
 
@@ -12,20 +13,33 @@ struct ChatView: View {
                 ScrollView {
                     if viewModel.messages.isEmpty {
                         VStack(spacing: 12) {
-                            Image(systemName: "bubble.left.and.text.bubble.right")
-                                .font(.system(size: 32))
-                                .foregroundColor(.secondary.opacity(0.5))
-                            Text("Ask Giva anything about your emails,\ncalendar, or tasks.")
-                                .font(.callout)
-                                .foregroundColor(.secondary)
-                                .multilineTextAlignment(.center)
+                            if viewModel.serverPhase == "syncing" {
+                                ProgressView()
+                                    .controlSize(.large)
+                                    .padding(.bottom, 4)
+                                Text("Syncing your data...\nYou'll be able to chat once setup completes.")
+                                    .font(.callout)
+                                    .foregroundColor(.secondary)
+                                    .multilineTextAlignment(.center)
+                            } else {
+                                Image(systemName: "bubble.left.and.text.bubble.right")
+                                    .font(.system(size: 32))
+                                    .foregroundColor(.secondary.opacity(0.5))
+                                Text("Ask Giva anything about your emails,\ncalendar, or tasks.")
+                                    .font(.callout)
+                                    .foregroundColor(.secondary)
+                                    .multilineTextAlignment(.center)
+                            }
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .padding(.top, 60)
                     } else {
-                        LazyVStack(alignment: .leading, spacing: 8) {
+                        VStack(alignment: .leading, spacing: 8) {
                             ForEach(viewModel.messages) { message in
-                                MessageBubble(message: message)
+                                MessageBubble(
+                                    message: message,
+                                    isLoadingModel: viewModel.isLoadingModel
+                                )
                                     .id(message.id)
                             }
                         }
@@ -75,7 +89,7 @@ struct ChatView: View {
                     .onSubmit {
                         viewModel.sendMessage()
                     }
-                    .disabled(viewModel.isStreaming || viewModel.isRecording)
+                    .disabled(!viewModel.isChatEnabled || viewModel.isStreaming || viewModel.isRecording)
 
                 if viewModel.isRecording {
                     HStack(spacing: 4) {
@@ -121,8 +135,11 @@ struct ChatView: View {
     }
 }
 
+// MARK: - Message Bubble
+
 struct MessageBubble: View {
     let message: ChatMessage
+    var isLoadingModel: Bool = false
     @State private var showThinking = false
 
     var body: some View {
@@ -143,25 +160,38 @@ struct MessageBubble: View {
 
                 // Main content bubble
                 if !message.content.isEmpty || message.isStreaming {
-                    Text(message.content)
-                        .font(.system(size: 13))
-                        .textSelection(.enabled)
-                        .lineLimit(nil)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .background(
-                            message.role == "user"
-                                ? Color.accentColor.opacity(0.15)
-                                : Color(nsColor: .controlBackgroundColor)
-                        )
-                        .cornerRadius(10)
+                    Group {
+                        if message.role == "user" {
+                            // User messages: plain text
+                            Text(message.content)
+                                .font(.system(size: 13))
+                        } else {
+                            // Assistant messages: Markdown rendering
+                            MarkdownText(message.content)
+                                .font(.system(size: 13))
+                        }
+                    }
+                    .textSelection(.enabled)
+                    .lineLimit(nil)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(
+                        message.role == "user"
+                            ? Color.accentColor.opacity(0.15)
+                            : Color(nsColor: .controlBackgroundColor)
+                    )
+                    .cornerRadius(10)
                 }
 
                 if message.isStreaming {
                     HStack(spacing: 4) {
                         ProgressView()
                             .controlSize(.mini)
-                        if message.isThinking {
+                        if isLoadingModel {
+                            Text("Loading AI model...")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        } else if message.isThinking {
                             Text("Thinking...")
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
@@ -180,6 +210,99 @@ struct MessageBubble: View {
         }
     }
 }
+
+// MARK: - Markdown Text
+
+/// Renders Markdown content using `AttributedString`.
+///
+/// Handles headers, bold, italic, inline code, code blocks, links, lists,
+/// and numbered lists. Falls back to plain text if markdown parsing fails (e.g. mid-stream
+/// when tokens arrive incrementally and syntax is incomplete).
+struct MarkdownText: View {
+    let source: String
+
+    init(_ source: String) {
+        self.source = source
+    }
+
+    var body: some View {
+        if let attributed = Self.parseMarkdown(source) {
+            Text(attributed)
+        } else {
+            Text(source)
+        }
+    }
+
+    /// Parse markdown string into an `AttributedString`.
+    ///
+    /// Uses `.full` syntax to support block-level elements (headers, lists,
+    /// numbered lists, blockquotes) alongside inline formatting (bold, italic,
+    /// inline code, links). Falls back to `.inlineOnlyPreservingWhitespace`
+    /// if full parsing fails (e.g. mid-stream incomplete markdown), then to
+    /// plain text as a last resort.
+    private static func parseMarkdown(_ text: String) -> AttributedString? {
+        guard !text.isEmpty else { return nil }
+
+        // Try full markdown parsing first (supports headers, lists, etc.)
+        let fullOptions = AttributedString.MarkdownParsingOptions(
+            interpretedSyntax: .full
+        )
+        if let result = try? AttributedString(markdown: text, options: fullOptions) {
+            return result
+        }
+
+        // Fallback: inline-only parsing (more tolerant of incomplete markdown
+        // during streaming). Pre-process code blocks since this mode doesn't
+        // handle fenced blocks.
+        let processed = preprocessCodeBlocks(text)
+        let inlineOptions = AttributedString.MarkdownParsingOptions(
+            interpretedSyntax: .inlineOnlyPreservingWhitespace
+        )
+        if let result = try? AttributedString(markdown: processed, options: inlineOptions) {
+            return result
+        }
+
+        return nil
+    }
+
+    /// Convert fenced code blocks (```...```) into inline-code-styled blocks.
+    ///
+    /// Used only in the inline-only fallback path. Wraps each line in backticks
+    /// so they render as inline code while preserving the block structure.
+    private static func preprocessCodeBlocks(_ text: String) -> String {
+        var result: [String] = []
+        var inCodeBlock = false
+        let lines = text.components(separatedBy: "\n")
+
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("```") {
+                inCodeBlock.toggle()
+                if !inCodeBlock {
+                    // Closing fence — skip the line
+                    continue
+                }
+                // Opening fence — skip the line (language hint is decorative)
+                continue
+            }
+
+            if inCodeBlock {
+                // Wrap code lines in backticks for inline code rendering.
+                // Escape any existing backticks to avoid broken markdown.
+                let escaped = line.replacingOccurrences(of: "`", with: "'")
+                // Empty lines in code blocks become a non-breaking space in code
+                let codeLine = escaped.isEmpty ? "` `" : "`\(escaped)`"
+                result.append(codeLine)
+            } else {
+                result.append(line)
+            }
+        }
+
+        return result.joined(separator: "\n")
+    }
+}
+
+// MARK: - Thinking Pane
 
 struct ThinkingPane: View {
     let content: String

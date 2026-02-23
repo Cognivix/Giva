@@ -3,6 +3,8 @@
 import AVFoundation
 import Foundation
 
+private let log = Log.make(category: "Audio")
+
 @MainActor
 class AudioPlaybackService: ObservableObject {
     @Published var isPlaying: Bool = false
@@ -17,7 +19,7 @@ class AudioPlaybackService: ObservableObject {
     /// Enqueue a base64-encoded WAV audio chunk for playback.
     func enqueueAudioChunk(_ base64Data: String) {
         guard let data = Data(base64Encoded: base64Data) else {
-            print("AudioPlaybackService: Failed to decode base64 audio data")
+            log.warning(" Failed to decode base64 audio data")
             return
         }
         audioQueue.append(data)
@@ -57,28 +59,34 @@ class AudioPlaybackService: ObservableObject {
             audioPlayer?.play()
             isPlaying = true
         } catch {
-            print("AudioPlaybackService: Playback error: \(error)")
+            log.warning(" Playback error: \(error)")
             playNext() // Skip to next chunk
         }
     }
 
     // MARK: - Recording
 
+    enum RecordingError: Error {
+        case permissionDenied
+        case recordingFailed
+    }
+
     /// Record audio from the microphone.
-    /// Returns the recorded audio data as WAV, or nil if recording failed.
-    func recordAudio(duration: TimeInterval = 5.0) async -> Data? {
+    /// Throws `RecordingError.permissionDenied` if mic access is denied (caller should open Settings).
+    /// Returns the recorded audio data as WAV, or nil if recording produced no data.
+    func recordAudio(duration: TimeInterval = 5.0) async throws -> Data? {
         // Request microphone permission
         let status = AVCaptureDevice.authorizationStatus(for: .audio)
         switch status {
         case .notDetermined:
             let granted = await AVCaptureDevice.requestAccess(for: .audio)
-            if !granted { return nil }
+            if !granted { throw RecordingError.permissionDenied }
         case .denied, .restricted:
-            return nil
+            throw RecordingError.permissionDenied
         case .authorized:
             break
         @unknown default:
-            return nil
+            throw RecordingError.permissionDenied
         }
 
         return await withCheckedContinuation { continuation in
@@ -140,7 +148,7 @@ private class SimpleAudioRecorder {
                 completion(data)
             }
         } catch {
-            print("SimpleAudioRecorder: Recording error: \(error)")
+            log.error("Recording error: \(error)")
             completion(nil)
         }
     }

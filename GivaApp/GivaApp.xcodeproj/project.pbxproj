@@ -21,6 +21,9 @@
 		A100000C /* BootstrapView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200000E /* BootstrapView.swift */; };
 		A100000D /* AudioPlaybackService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200000F /* AudioPlaybackService.swift */; };
 		A100000E /* ModelSetupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000010 /* ModelSetupView.swift */; };
+		A100000F /* GoalsViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000011 /* GoalsViewModel.swift */; };
+		A1000010 /* GoalsWindowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000012 /* GoalsWindowView.swift */; };
+		A1000011 /* FileLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000013 /* FileLogger.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -40,6 +43,9 @@
 		A200000E /* BootstrapView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BootstrapView.swift; sourceTree = "<group>"; };
 		A200000F /* AudioPlaybackService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioPlaybackService.swift; sourceTree = "<group>"; };
 		A2000010 /* ModelSetupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelSetupView.swift; sourceTree = "<group>"; };
+		A2000011 /* GoalsViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GoalsViewModel.swift; sourceTree = "<group>"; };
+		A2000012 /* GoalsWindowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GoalsWindowView.swift; sourceTree = "<group>"; };
+		A2000013 /* FileLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileLogger.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -89,6 +95,7 @@
 				A2000003 /* APIService.swift */,
 				A200000F /* AudioPlaybackService.swift */,
 				A200000D /* BootstrapManager.swift */,
+				A2000013 /* FileLogger.swift */,
 				A2000004 /* ServerManager.swift */,
 			);
 			path = Services;
@@ -98,6 +105,7 @@
 			isa = PBXGroup;
 			children = (
 				A2000005 /* GivaViewModel.swift */,
+				A2000011 /* GoalsViewModel.swift */,
 			);
 			path = ViewModels;
 			sourceTree = "<group>";
@@ -111,6 +119,7 @@
 				A2000008 /* QuickActionsView.swift */,
 				A2000009 /* TaskListView.swift */,
 				A2000010 /* ModelSetupView.swift */,
+				A2000012 /* GoalsWindowView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -205,6 +214,9 @@
 				A1000009 /* TaskListView.swift in Sources */,
 				A100000D /* AudioPlaybackService.swift in Sources */,
 				A100000E /* ModelSetupView.swift in Sources */,
+				A100000F /* GoalsViewModel.swift in Sources */,
+				A1000010 /* GoalsWindowView.swift in Sources */,
+				A1000011 /* FileLogger.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -263,7 +275,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -319,7 +331,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				SDKROOT = macosx;
@@ -340,6 +352,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_LSUIElement = YES;
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Giva uses the microphone for voice input to transcribe your spoken queries.";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.giva.GivaApp;
@@ -362,6 +375,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_LSUIElement = YES;
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Giva uses the microphone for voice input to transcribe your spoken queries.";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.giva.GivaApp;

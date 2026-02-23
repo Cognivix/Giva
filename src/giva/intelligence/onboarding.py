@@ -118,6 +118,8 @@ def continue_onboarding(
     history = pd.get("onboarding_history", [])
     step = pd.get("onboarding_step", 0) + 1
 
+    log.info("continue_onboarding: step=%d, history=%d entries", step, len(history))
+
     # Append user response to history
     history.append({"role": "user", "content": user_response})
 
@@ -170,6 +172,19 @@ def continue_onboarding(
         "onboarding_completed": is_complete,
         **({"onboarding_completed_at": datetime.now().isoformat()} if is_complete else {}),
     })
+
+    # Seed initial goals from onboarding answers
+    if is_complete:
+        try:
+            from giva.intelligence.goals import create_initial_goals
+
+            profile = store.get_profile()
+            if profile and profile.profile_data:
+                count = create_initial_goals(store, profile.profile_data)
+                if count > 0:
+                    log.info("Seeded %d initial goals from onboarding", count)
+        except Exception as e:
+            log.warning("Failed to seed initial goals: %s", e)
 
 
 # --- Internal helpers ---
@@ -240,31 +255,59 @@ def _filter_visible_token(
     """Filter streaming tokens, hiding <profile_update> blocks from the user.
 
     Returns (visible_token_or_None, should_stop).
+
+    The LLM may emit ``<profile_update>JSON</profile_update>`` anywhere in the
+    output — before, after, or in the middle of visible text.  This function
+    strips the tag block and yields all other text.
+
+    Handles tag boundaries split across tokens by holding back any trailing
+    text that could be a partial prefix of ``<profile_update>``.
     """
     text = "".join(full_response)
     visible_len = sum(len(t) for t in visible_so_far)
 
-    # Check if we've entered the tag region
+    # Build the "visible text" by stripping the tag block from the full text.
+    # This gives us a clean visible-only string we can compare to what was
+    # already yielded.
     tag_start = text.find(_TAG_OPEN)
 
     if tag_start == -1:
-        # No tag yet — yield everything after what we've already yielded
-        new_text = text[visible_len:]
-        return (new_text if new_text else None, False)
+        # No tag found yet — the visible text is the entire accumulation.
+        visible_text_so_far = text
+    else:
+        # Tag found — visible text is everything before it ...
+        before_tag = text[:tag_start]
+        tag_close_start = text.find(_TAG_CLOSE)
+        if tag_close_start == -1:
+            # Tag not yet closed — visible text is only what's before the tag
+            visible_text_so_far = before_tag
+        else:
+            # Tag closed — visible = before tag + after closing tag
+            after_tag = text[tag_close_start + len(_TAG_CLOSE):]
+            visible_text_so_far = before_tag + after_tag
 
-    # Tag found — only yield text before the tag
-    if visible_len < tag_start:
-        new_text = text[visible_len:tag_start]
-        return (new_text if new_text else None, False)
+    # How much new visible text is available?
+    new_text = visible_text_so_far[visible_len:]
+    if not new_text:
+        return (None, False)
 
-    # We're inside or past the tag — check if closing tag is present
-    tag_end = text.find(_TAG_CLOSE)
-    if tag_end != -1:
-        # Tag block is complete — stop streaming
-        return (None, True)
+    # Hold back any suffix that could be a partial start of a tag
+    holdback = _partial_tag_suffix_len(new_text, _TAG_OPEN)
+    safe = new_text[: len(new_text) - holdback] if holdback else new_text
+    return (safe if safe else None, False)
 
-    # Still accumulating the JSON block — don't yield anything
-    return (None, False)
+
+def _partial_tag_suffix_len(text: str, tag: str) -> int:
+    """Return the length of the longest suffix of *text* that matches a prefix of *tag*.
+
+    For example, if text ends with ``"<prof"`` and tag is ``"<profile_update>"``,
+    returns 5.
+    """
+    max_check = min(len(tag) - 1, len(text))
+    for length in range(max_check, 0, -1):
+        if text[-length:] == tag[:length]:
+            return length
+    return 0
 
 
 def _parse_and_save(

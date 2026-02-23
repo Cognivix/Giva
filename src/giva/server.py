@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
+import json
 import logging
 import threading
 from contextlib import asynccontextmanager
@@ -98,6 +99,25 @@ class UpdateStatusResponse(BaseModel):
     success: bool
     task_id: int
     status: str
+
+
+class TaskCreateRequest(BaseModel):
+    title: str = Field(..., min_length=1, max_length=200)
+    description: str = ""
+    priority: str = Field("medium", pattern=r"^(high|medium|low)$")
+    due_date: Optional[str] = None  # ISO 8601 YYYY-MM-DD
+    goal_id: Optional[int] = None
+
+
+class TaskUpdateRequest(BaseModel):
+    title: Optional[str] = Field(None, min_length=1, max_length=200)
+    description: Optional[str] = None
+    priority: Optional[str] = Field(None, pattern=r"^(high|medium|low)$")
+    due_date: Optional[str] = None  # ISO 8601 YYYY-MM-DD or "" to clear
+    status: Optional[str] = Field(
+        None, pattern=r"^(pending|in_progress|done|dismissed)$"
+    )
+    goal_id: Optional[int] = None
 
 
 class SyncInfo(BaseModel):
@@ -210,8 +230,105 @@ class ModelSelectResponse(BaseModel):
     message: str
 
 
+# --- Goal Pydantic Models ---
+
+
+class GoalProgressResponse(BaseModel):
+    id: int
+    goal_id: int
+    note: str
+    source: str
+    created_at: Optional[str] = None
+
+
+class GoalResponse(BaseModel):
+    id: int
+    title: str
+    tier: str
+    description: str
+    category: str
+    parent_id: Optional[int] = None
+    status: str
+    priority: str
+    target_date: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    progress: list[GoalProgressResponse] = []
+    children: list[dict] = []
+    strategies: list[dict] = []
+    tasks: list[dict] = []
+
+
+class GoalListResponse(BaseModel):
+    goals: list[GoalResponse]
+    count: int
+
+
+class GoalRequest(BaseModel):
+    title: str = Field(..., min_length=1, max_length=500)
+    tier: str = Field(..., pattern=r"^(long_term|mid_term|short_term)$")
+    description: str = ""
+    category: str = ""
+    parent_id: Optional[int] = None
+    priority: str = Field("medium", pattern=r"^(high|medium|low)$")
+    target_date: Optional[str] = None
+
+
+class GoalUpdateRequest(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    category: Optional[str] = None
+    priority: Optional[str] = Field(None, pattern=r"^(high|medium|low)$")
+    target_date: Optional[str] = None
+
+
+class GoalStatusRequest(BaseModel):
+    status: str = Field(
+        ..., pattern=r"^(active|paused|completed|abandoned)$"
+    )
+
+
+class GoalProgressRequest(BaseModel):
+    note: str = Field(..., min_length=1, max_length=2000)
+    source: str = Field("user", pattern=r"^(user|sync|review|chat)$")
+
+
+class PlanAcceptRequest(BaseModel):
+    plan_json: str = Field(..., min_length=1)
+
+
+class ReviewRespondRequest(BaseModel):
+    review_id: int
+    response: str = Field(..., min_length=1, max_length=4096)
+
+
+class ReviewStatusResponse(BaseModel):
+    due: bool
+    last_review_date: Optional[str] = None
+
+
+class ReviewSummaryResponse(BaseModel):
+    summary: str
+
+
+class GoalChatRequest(BaseModel):
+    query: str = Field(..., min_length=1, max_length=4096)
+
+
 class ModelDownloadRequest(BaseModel):
     model_id: str = Field(..., min_length=1)
+
+
+class SessionStateResponse(BaseModel):
+    """Snapshot of the current session state for the UI.
+
+    ``phase`` is the server's authoritative checkpoint.
+    The UI should derive everything from this single field.
+    """
+    phase: str  # server checkpoint (ready | syncing | onboarding | operational | ...)
+    messages: list[dict] = []  # Replay of onboarding history [{role, content}]
+    needs_response: bool = False  # True if waiting for user input in onboarding
+    stats: Optional[dict] = None
 
 
 # --- Lifespan ---
@@ -233,16 +350,37 @@ async def lifespan(app: FastAPI):
     app.state.bootstrap_notifier = BootstrapNotifier()
     app.state.bootstrap_task = None
 
+    # Store event loop reference for background threads (scheduler broadcasting)
+    app.state._event_loop = asyncio.get_event_loop()
+    app.state.session_queues = []
+    app.state.scheduler = None
+
     log.info(
-        "Giva server started — DB: %s, bootstrap: %s",
+        "Server started — DB: %s, bootstrap: %s (ready=%s, operational=%s)",
         config.db_path, app.state.bootstrap.checkpoint,
+        app.state.bootstrap.is_ready, app.state.bootstrap.is_operational,
     )
 
     # Auto-resume bootstrap if not ready
     if not app.state.bootstrap.is_ready:
+        log.info(
+            "Bootstrap not ready (checkpoint=%s) — launching run_bootstrap task",
+            app.state.bootstrap.checkpoint,
+        )
         app.state.bootstrap_task = asyncio.create_task(run_bootstrap(app))
+    elif app.state.bootstrap.is_operational:
+        # Server restarted while already operational — start scheduler
+        log.info("Already operational (checkpoint=%s) — starting scheduler",
+                 app.state.bootstrap.checkpoint)
+        _start_scheduler(app)
+    else:
+        log.info("Ready but not operational — waiting for session stream")
 
     yield
+
+    # Stop scheduler on shutdown
+    if app.state.scheduler:
+        app.state.scheduler.stop()
 
     # Cancel bootstrap task on shutdown
     if app.state.bootstrap_task and not app.state.bootstrap_task.done():
@@ -253,6 +391,19 @@ async def lifespan(app: FastAPI):
             pass
 
     log.info("Giva server shutting down")
+
+
+def _start_scheduler(app) -> None:
+    """Start the background sync scheduler (called once operational)."""
+    if app.state.scheduler is not None:
+        return  # Already running
+    from giva.sync.scheduler import SyncScheduler
+    scheduler = SyncScheduler(
+        app.state.store, app.state.config, app=app, llm_lock=_llm_lock,
+    )
+    scheduler.start()
+    app.state.scheduler = scheduler
+    log.info("Background scheduler started")
 
 
 # --- App ---
@@ -396,12 +547,24 @@ async def _sync_gen_to_sse(gen_fn, *args, **kwargs) -> AsyncGenerator[dict, None
     Runs the generator in a thread pool (with LLM lock) and pushes tokens
     into an asyncio.Queue for non-blocking consumption.
     Parses <think>...</think> blocks into separate "thinking" events.
+    Emits a ``model_loading`` event if the model needs to be loaded first.
     """
     loop = asyncio.get_event_loop()
     queue: asyncio.Queue[dict] = asyncio.Queue()
 
     def _run():
         try:
+            # Notify the client if the model isn't loaded yet — this means
+            # we'll spend 10-30s loading before any tokens arrive.
+            from giva.llm.engine import manager
+
+            config = load_config()
+            if not manager.is_loaded(config.llm.model):
+                loop.call_soon_threadsafe(
+                    queue.put_nowait,
+                    {"event": "model_loading", "data": config.llm.model},
+                )
+
             # Some models (Qwen3-Next-*-Thinking) inject <think> in the prompt
             # template, so the model outputs thinking content without a <think> tag.
             parser = _ThinkParser(start_in_think=_model_starts_in_think())
@@ -636,6 +799,109 @@ async def update_task_status(
     return UpdateStatusResponse(success=True, task_id=task_id, status=req.status)
 
 
+@app.post("/api/tasks")
+async def create_task(
+    req: TaskCreateRequest,
+    request: Request,
+) -> TaskResponse:
+    """Create a new task manually."""
+    from giva.db.models import Task as TaskModel
+
+    store: Store = request.app.state.store
+
+    due_date = None
+    if req.due_date:
+        try:
+            from datetime import datetime
+
+            due_date = datetime.fromisoformat(req.due_date)
+        except ValueError:
+            raise HTTPException(
+                status_code=400, detail="Invalid due_date format. Use YYYY-MM-DD."
+            )
+
+    task = TaskModel(
+        title=req.title,
+        description=req.description,
+        source_type="manual",
+        source_id=0,
+        priority=req.priority,
+        due_date=due_date,
+        status="pending",
+        goal_id=req.goal_id,
+    )
+    task_id = store.add_task(task)
+    created = store.get_task(task_id)
+
+    return TaskResponse(
+        id=created.id,
+        title=created.title,
+        description=created.description,
+        source_type=created.source_type,
+        source_id=created.source_id,
+        priority=created.priority,
+        due_date=created.due_date.isoformat() if created.due_date else None,
+        status=created.status,
+        created_at=created.created_at.isoformat() if created.created_at else None,
+    )
+
+
+@app.put("/api/tasks/{task_id}")
+async def update_task(
+    task_id: int,
+    req: TaskUpdateRequest,
+    request: Request,
+) -> TaskResponse:
+    """Update a task's fields (title, description, priority, due_date, status, goal_id)."""
+    store: Store = request.app.state.store
+
+    # Build update kwargs from non-None fields
+    updates = {}
+    if req.title is not None:
+        updates["title"] = req.title
+    if req.description is not None:
+        updates["description"] = req.description
+    if req.priority is not None:
+        updates["priority"] = req.priority
+    if req.status is not None:
+        updates["status"] = req.status
+    if req.goal_id is not None:
+        updates["goal_id"] = req.goal_id
+    if req.due_date is not None:
+        if req.due_date == "":
+            updates["due_date"] = None
+        else:
+            try:
+                from datetime import datetime
+
+                updates["due_date"] = datetime.fromisoformat(req.due_date)
+            except ValueError:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid due_date format. Use YYYY-MM-DD.",
+                )
+
+    if not updates:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    success = store.update_task(task_id, **updates)
+    if not success:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    updated = store.get_task(task_id)
+    return TaskResponse(
+        id=updated.id,
+        title=updated.title,
+        description=updated.description,
+        source_type=updated.source_type,
+        source_id=updated.source_id,
+        priority=updated.priority,
+        due_date=updated.due_date.isoformat() if updated.due_date else None,
+        status=updated.status,
+        created_at=updated.created_at.isoformat() if updated.created_at else None,
+    )
+
+
 @app.post("/api/sync")
 async def sync(request: Request) -> SyncResponse:
     """Trigger full email + calendar sync. Long-running (~30s)."""
@@ -698,15 +964,78 @@ async def extract(request: Request) -> ExtractResponse:
     return ExtractResponse(tasks_extracted=count)
 
 
+# --- Post-Chat Agent Helper (shared by /chat and /goals/{id}/chat) ---
+
+async def _run_post_chat(
+    query: str,
+    store: Store,
+    config,
+    goal_id: int | None = None,
+) -> list[dict]:
+    """Run post-chat agents in a thread with LLM lock.
+
+    Args:
+        goal_id: When set, scopes message retrieval and auto-links
+            created tasks/objectives to this goal.  Conversation
+            compression is skipped for goal-scoped chats.
+    """
+    loop = asyncio.get_event_loop()
+
+    def _agents():
+        actions: list[dict] = []
+        # Get the last assistant response from the DB (scoped)
+        recent = store.get_recent_messages(limit=2, goal_id=goal_id)
+        response_text = ""
+        for m in reversed(recent):
+            if m["role"] == "assistant":
+                response_text = m["content"]
+                break
+
+        if not response_text:
+            return actions
+
+        # 1. Run combined post-chat agent (intent + tagging + progress)
+        try:
+            from giva.intelligence.agents import run_post_chat_agent
+
+            with _llm_lock:
+                actions = run_post_chat_agent(
+                    query, response_text, store, config, goal_id=goal_id
+                )
+        except Exception as e:
+            log.debug("Post-chat agent error: %s", e)
+
+        # 2. Run conversation compressor if needed (global chat only)
+        if goal_id is None:
+            try:
+                from giva.intelligence.context import maybe_compress_conversation
+
+                with _llm_lock:
+                    compressed = maybe_compress_conversation(store, config.llm)
+                if compressed:
+                    actions.append({"type": "conversation_compressed"})
+            except Exception as e:
+                log.debug("Conversation compressor error: %s", e)
+
+        return actions
+
+    return await loop.run_in_executor(None, _agents)
+
+
 @app.post("/api/chat")
 async def chat(req: ChatRequest, request: Request):
     """Streaming chat via SSE. Returns token-by-token LLM response.
+
+    After the response stream completes, runs the post-chat agent pipeline
+    (intent detection, progress tracking, conversation compression) using the
+    filter model and emits ``agent_actions`` SSE events for UI feedback.
 
     When voice=true, also emits "audio_chunk" events containing base64-encoded
     WAV audio for each sentence (synthesized via Qwen3-TTS).
     """
     store: Store = request.app.state.store
     config = request.app.state.config
+    query_text = req.query
 
     from giva.intelligence.queries import handle_query
 
@@ -716,10 +1045,24 @@ async def chat(req: ChatRequest, request: Request):
                 handle_query, config, req.query, store, config
             ):
                 yield event
+            # Post-chat agents (after stream done, lock released)
+            actions = await _run_post_chat(query_text, store, config)
+            if actions:
+                yield {
+                    "event": "agent_actions",
+                    "data": json.dumps(actions),
+                }
     else:
         async def event_generator():
             async for event in _sync_gen_to_sse(handle_query, req.query, store, config):
                 yield event
+            # Post-chat agents (after stream done, lock released)
+            actions = await _run_post_chat(query_text, store, config)
+            if actions:
+                yield {
+                    "event": "agent_actions",
+                    "data": json.dumps(actions),
+                }
 
     return EventSourceResponse(event_generator())
 
@@ -793,18 +1136,34 @@ async def onboarding_respond(req: OnboardingRequest, request: Request):
 
 @app.post("/api/reset")
 async def reset(request: Request) -> ResetResponse:
-    """Full tabula rasa: clear DB, caches, and user config.
+    """Full tabula rasa: clear DB, caches, user config, and roll back bootstrap.
 
-    After this, the app should re-trigger model setup.
+    After this, the app should restart the daemon.  On restart, bootstrap
+    re-runs from "unknown": it finds the default model already downloaded,
+    then parks at "awaiting_model_selection" so the user can re-pick models.
+
     Downloaded HuggingFace models are preserved (expensive to re-download).
     """
     store: Store = request.app.state.store
     config = request.app.state.config
 
-    # 1. Clear all DB data
-    store.reset_all_data()
+    # 1. Stop scheduler if running
+    if request.app.state.scheduler:
+        request.app.state.scheduler.stop()
+        request.app.state.scheduler = None
 
-    # 2. Delete model and benchmark caches
+    # 2. Roll checkpoint to "unknown" FIRST — this is the critical mutation.
+    #    If anything below crashes, the daemon restart still re-enters bootstrap
+    #    instead of resuming as operational with stale data.
+    bootstrap = request.app.state.bootstrap
+    log.info("Reset: checkpoint %s → unknown", bootstrap.checkpoint)
+    bootstrap.advance("unknown")
+
+    # 3. Clear all DB data (handles corrupt DB by deleting + recreating)
+    store.reset_all_data()
+    log.info("Reset: DB data cleared")
+
+    # 4. Delete model and benchmark caches
     from pathlib import Path
 
     cache_files = [
@@ -814,24 +1173,37 @@ async def reset(request: Request) -> ResetResponse:
     for cache_file in cache_files:
         try:
             cache_file.unlink(missing_ok=True)
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("Reset: failed to delete %s: %s", cache_file, e)
 
-    # 3. Delete user config (forces model setup on next launch)
+    # 5. Delete user config — forces model selection on next launch.
+    #    Downloaded model files are preserved (expensive to re-download);
+    #    the user picks which ones to use via the model setup UI.
     user_config = Path("~/.config/giva/config.toml").expanduser()
+    existed = user_config.exists()
     try:
         user_config.unlink(missing_ok=True)
-    except Exception:
-        pass
+    except Exception as e:
+        log.error("Reset: failed to delete user config: %s", e)
 
-    # 4. Reload config (will fall back to defaults since user config is gone)
+    if user_config.exists():
+        log.error("Reset: user config still exists after unlink!")
+    else:
+        log.info("Reset: user config deleted (existed=%s)", existed)
+
+    # 6. Reload config (falls back to defaults since user config is gone)
     from giva.config import load_config
 
     request.app.state.config = load_config()
+    log.info(
+        "Reset: config reloaded — model=%s filter=%s",
+        request.app.state.config.llm.model,
+        request.app.state.config.llm.filter_model,
+    )
 
     return ResetResponse(
         success=True,
-        message="All data, caches, and settings cleared. Please set up your models again.",
+        message="All data cleared. Restart to re-sync and re-onboard.",
     )
 
 
@@ -842,8 +1214,6 @@ async def transcribe(request: Request, file: UploadFile = File(...)) -> Transcri
     Accepts multipart file upload. Returns transcribed text.
     """
     config = request.app.state.config
-    if not config.voice.enabled:
-        raise HTTPException(status_code=400, detail="Voice mode is not enabled in config.")
 
     # Read uploaded audio
     audio_bytes = await file.read()
@@ -1167,7 +1537,7 @@ class BootstrapStatusResponse(BaseModel):
     state: str
     ready: bool
     needs_user_input: bool
-    steps: list[dict]
+    progress: dict = {}
     error: Optional[str] = None
     display_message: str
 
@@ -1226,12 +1596,9 @@ async def bootstrap_retry(request: Request) -> BootstrapStatusResponse:
         except asyncio.CancelledError:
             pass
 
-    # Clear the error so the step will be re-attempted
-    if state.checkpoint == "failed" and state.current_step:
-        # Remove the failed step from completed so it gets re-run
-        state.error = None
-        state.checkpoint = "venv_ok"  # reset to known good state
-        state.save()
+    # Clear the error and reset to 'unknown' so all steps are re-attempted
+    if state.checkpoint == "failed":
+        state.advance("unknown")
 
     request.app.state.bootstrap_task = asyncio.create_task(
         run_bootstrap(request.app)
@@ -1319,6 +1686,861 @@ async def upgrade(req: UpgradeRequest, request: Request) -> UpgradeResponse:
         restart_required=True,
         message="Upgrade successful. Restart the daemon to apply changes.",
     )
+
+
+# --- Session Helpers ---
+
+
+async def _run_sync_in_executor(
+    store: Store, config,
+    session_queues: list | None = None,
+) -> tuple[int, int, int]:
+    """Run email + calendar sync in a thread pool with progress reporting.
+
+    If *session_queues* is provided, pushes ``sync_progress`` events so the
+    UI can show "40/400 emails processed, 12/47 events".
+    """
+    loop = asyncio.get_event_loop()
+
+    def _broadcast_threadsafe(event: dict):
+        """Push an event to all session queues from a background thread.
+
+        Uses ``call_soon_threadsafe`` because asyncio.Queue is NOT thread-safe.
+        """
+        if not session_queues:
+            return
+        log.debug(
+            "Broadcast %s to %d queues",
+            event.get("event", "?"), len(session_queues),
+        )
+        for q in list(session_queues):
+            try:
+                loop.call_soon_threadsafe(q.put_nowait, event)
+            except Exception as exc:
+                log.warning("Broadcast failed: %s", exc)
+
+    def _emit_progress(
+        mail_synced: int, mail_filtered: int, mail_total: int,
+        events_synced: int, events_total: int,
+        stage: str,
+    ):
+        import json as _json
+        event = {
+            "event": "sync_progress",
+            "data": _json.dumps({
+                "stage": stage,
+                "mail_synced": mail_synced,
+                "mail_filtered": mail_filtered,
+                "mail_total": mail_total,
+                "events_synced": events_synced,
+                "events_total": events_total,
+            }),
+        }
+        log.debug("sync_progress: stage=%s mail=%d/%d events=%d",
+                  stage, mail_synced, mail_total, events_synced)
+        _broadcast_threadsafe(event)
+
+    def _run():
+        from giva.intelligence.profile import update_profile
+        from giva.sync.calendar import sync_calendar
+        from giva.sync.mail import sync_mail_jxa
+
+        log.info("Sync executor started")
+
+        # --- Email sync with progress callback ---
+        total_est = config.mail.batch_size * len(config.mail.mailboxes)
+
+        def _on_mail_progress(synced, filtered, total):
+            nonlocal total_est
+            total_est = total  # JXA returns actual mailbox size
+            _emit_progress(synced, filtered, total_est, 0, 0, "emails")
+
+        _emit_progress(0, 0, total_est, 0, 0, "emails")
+
+        with _llm_lock:
+            mail_synced, mail_filtered = sync_mail_jxa(
+                store, config.mail.mailboxes, config.mail.batch_size,
+                on_progress=_on_mail_progress, config=config,
+            )
+        log.info("Email sync done: %d synced, %d filtered", mail_synced, mail_filtered)
+
+        # --- Calendar sync ---
+        _emit_progress(mail_synced, mail_filtered, mail_synced + mail_filtered, 0, 0, "events")
+
+        events_synced = sync_calendar(
+            store, config.calendar.sync_window_past_days,
+            config.calendar.sync_window_future_days,
+        )
+        log.info("Calendar sync done: %d events", events_synced)
+
+        # --- Profile update ---
+        _emit_progress(
+            mail_synced, mail_filtered, mail_synced + mail_filtered,
+            events_synced, events_synced, "profile",
+        )
+
+        try:
+            update_profile(store, config)
+        except Exception as exc:
+            log.warning("Profile update error (non-fatal): %s", exc)
+
+        log.info(
+            "Sync complete: %d emails, %d filtered, %d events",
+            mail_synced, mail_filtered, events_synced,
+        )
+        return mail_synced, mail_filtered, events_synced
+
+    return await loop.run_in_executor(None, _run)
+
+
+# --- Session Endpoint (server-driven state machine for the UI) ---
+#
+# The /api/session endpoint is the UI's single entry point after bootstrap.
+# It returns current state + conversation history so the UI can render
+# immediately on connect/reconnect.
+#
+# The /api/session/stream SSE endpoint is a long-lived stream that pushes
+# all server-driven events: phase changes, sync results, onboarding questions,
+# daily review prompts, periodic sync notifications, etc.
+# The UI connects once and stays connected.
+
+
+@app.get("/api/session")
+async def session_state(request: Request) -> SessionStateResponse:
+    """Get the current session state for the UI.
+
+    The server's ``checkpoint`` IS the phase — no derivation needed.
+    Also returns onboarding conversation history for replay.
+    """
+    store: Store = request.app.state.store
+    bootstrap = request.app.state.bootstrap
+    phase = bootstrap.checkpoint
+
+    # Build message history for replay (only relevant during onboarding)
+    messages: list[dict] = []
+    needs_response = False
+
+    if phase == "onboarding":
+        profile = store.get_profile()
+        pd = profile.profile_data if profile else {}
+        if not pd.get("onboarding_completed", False):
+            history = pd.get("onboarding_history", [])
+            for msg in history:
+                messages.append({"role": msg["role"], "content": msg["content"]})
+            # Waiting for user response if last message is from assistant
+            needs_response = (
+                pd.get("onboarding_step", 0) > 0
+                and (len(messages) == 0 or messages[-1]["role"] == "assistant")
+            )
+
+    stats = store.get_stats()
+
+    return SessionStateResponse(
+        phase=phase,
+        messages=messages,
+        needs_response=needs_response,
+        stats=stats,
+    )
+
+
+@app.get("/api/session/stream")
+async def session_stream(request: Request):
+    """Long-lived SSE stream that pushes all server-driven events to the UI.
+
+    This endpoint drives the post-ready lifecycle.  When the UI connects:
+      1. Emits current phase
+      2. If sync hasn't happened yet → runs initial sync, streaming progress
+      3. If onboarding is needed → streams onboarding questions
+      4. Marks operational, starts scheduler
+      5. Long-lived heartbeat loop, relaying events from background tasks
+
+    Events emitted:
+    - phase:<phase>       — phase change (syncing, onboarding, operational)
+    - sync_progress       — granular progress: {stage, mail_synced, mail_total, ...}
+    - sync_complete       — periodic sync finished, data: {emails, events}
+    - onboarding_token    — streamed onboarding question token
+    - onboarding_thinking — streamed thinking content
+    - onboarding_done     — current onboarding question fully streamed
+    - onboarding_complete — onboarding interview finished
+    - review_due          — daily review is due
+    - stats               — updated stats {emails, events, tasks}
+    - heartbeat           — keepalive (every 15s)
+    """
+    store: Store = request.app.state.store
+    config = request.app.state.config
+    bootstrap = request.app.state.bootstrap
+
+    # Session-scoped event queue for pushing events from background tasks
+    session_queue: asyncio.Queue[dict] = asyncio.Queue()
+
+    # Register this session with the app for background task notifications
+    if not hasattr(request.app.state, "session_queues"):
+        request.app.state.session_queues = []
+    request.app.state.session_queues.append(session_queue)
+
+    async def event_generator():
+        try:
+            # Emit current checkpoint as initial phase
+            log.info(
+                "Session stream connected: phase=%s (ready=%s, operational=%s)",
+                bootstrap.checkpoint, bootstrap.is_ready, bootstrap.is_operational,
+            )
+            yield {"event": "phase", "data": bootstrap.checkpoint}
+
+            # ----- Post-ready lifecycle (sync → onboarding → operational) -----
+            # Only run if models are ready but we haven't reached operational yet.
+
+            if bootstrap.is_ready and not bootstrap.is_operational:
+                # Step A: Initial sync (checkpoint moves ready → syncing)
+                if not bootstrap.past("syncing"):
+                    bootstrap.mark_syncing()
+                    yield {"event": "phase", "data": "syncing"}
+
+                    stats = store.get_stats()
+                    if stats["emails"] > 0 or stats["events"] > 0:
+                        # Data already exists (e.g., manual sync was triggered)
+                        log.info("Data exists — skipping initial sync")
+                    else:
+                        log.info("Starting initial sync...")
+                        # Launch sync as a background task so we can yield
+                        # progress events from the session queue while it runs.
+                        sync_task = asyncio.create_task(
+                            _run_sync_in_executor(
+                                store, config,
+                                session_queues=request.app.state.session_queues,
+                            )
+                        )
+                        # Drain session queue while sync is in progress,
+                        # forwarding sync_progress events to the SSE client.
+                        while not sync_task.done():
+                            try:
+                                event = await asyncio.wait_for(
+                                    session_queue.get(), timeout=1.0
+                                )
+                                yield event
+                            except asyncio.TimeoutError:
+                                continue
+
+                        # Sync finished — drain any remaining queued events
+                        while not session_queue.empty():
+                            try:
+                                yield session_queue.get_nowait()
+                            except asyncio.QueueEmpty:
+                                break
+
+                        # Get the result (or error) from sync
+                        try:
+                            mail_s, mail_f, events_s = sync_task.result()
+                            log.info(
+                                "Sync done: %d emails, %d filtered, %d events",
+                                mail_s, mail_f, events_s,
+                            )
+                            yield {
+                                "event": "sync_complete",
+                                "data": f'{{"emails": {mail_s}, "events": {events_s}}}',
+                            }
+                        except Exception as e:
+                            log.error("Sync failed: %s", e, exc_info=True)
+                            yield {"event": "error", "data": f"Sync failed: {e}"}
+                            # Don't block lifecycle — let user retry via Sync button
+                else:
+                    log.debug("Already past syncing (checkpoint=%s)", bootstrap.checkpoint)
+
+                # Step B: Onboarding (checkpoint moves syncing → onboarding)
+                if not bootstrap.past("onboarding"):
+                    from giva.intelligence.onboarding import is_onboarding_needed
+
+                    onboarding_needed = is_onboarding_needed(store)
+                    if onboarding_needed:
+                        bootstrap.mark_onboarding()
+                        yield {"event": "phase", "data": "onboarding"}
+
+                        # Check for existing conversation history (resume case)
+                        profile = store.get_profile()
+                        pd = profile.profile_data if profile else {}
+                        history = pd.get("onboarding_history", [])
+
+                        if not history:
+                            # Fresh onboarding — stream the first question
+                            log.info("Starting fresh onboarding")
+                            from giva.intelligence.onboarding import start_onboarding
+                            async for event in _sync_gen_to_sse(
+                                start_onboarding, store, config
+                            ):
+                                if event["event"] == "token":
+                                    yield {
+                                        "event": "onboarding_token",
+                                        "data": event["data"],
+                                    }
+                                elif event["event"] == "thinking":
+                                    yield {
+                                        "event": "onboarding_thinking",
+                                        "data": event["data"],
+                                    }
+                                elif event["event"] == "done":
+                                    yield {"event": "onboarding_done", "data": ""}
+                                elif event["event"] == "error":
+                                    yield {"event": "error", "data": event["data"]}
+                        # else: history exists — UI replays from /api/session.
+                        # User responses come via /api/session/respond.
+                        # Don't mark operational here — respond endpoint will.
+                    else:
+                        log.info("Onboarding not needed — skipping to operational")
+                else:
+                    log.debug(
+                        "Already past onboarding (checkpoint=%s)",
+                        bootstrap.checkpoint,
+                    )
+
+                # Step C: Mark operational if we're past onboarding
+                # (either skipped or already completed)
+                if bootstrap.checkpoint != "onboarding":
+                    # We didn't park at onboarding — go straight to operational
+                    bootstrap.mark_operational()
+                    _start_scheduler(request.app)
+                    log.info("Marked operational, scheduler started")
+                    yield {"event": "phase", "data": "operational"}
+                else:
+                    log.info("Parked at onboarding — waiting for user responses")
+            else:
+                log.debug(
+                    "Skipping lifecycle (ready=%s, operational=%s)",
+                    bootstrap.is_ready, bootstrap.is_operational,
+                )
+
+            # ----- Long-lived event loop -----
+            while True:
+                try:
+                    event = await asyncio.wait_for(
+                        session_queue.get(), timeout=15.0
+                    )
+                    log.debug("Relaying event: %s", event.get("event", "?"))
+                    yield event
+                    # When onboarding finishes, the respond endpoint broadcasts
+                    # onboarding_complete and advances the checkpoint.
+                except asyncio.TimeoutError:
+                    yield {"event": "heartbeat", "data": ""}
+                except asyncio.CancelledError:
+                    break
+        except GeneratorExit:
+            log.debug("Session stream: client disconnected")
+        except asyncio.CancelledError:
+            log.debug("Session stream: task cancelled")
+        except Exception as exc:
+            log.error("Session stream error: %s", exc, exc_info=True)
+            yield {"event": "error", "data": f"Internal error: {exc}"}
+        finally:
+            log.info("Session stream disconnecting")
+            # Unregister session queue
+            if hasattr(request.app.state, "session_queues"):
+                try:
+                    request.app.state.session_queues.remove(session_queue)
+                except ValueError:
+                    pass
+
+    log.debug("Creating EventSourceResponse for session stream")
+    return EventSourceResponse(event_generator())
+
+
+@app.post("/api/session/respond")
+async def session_respond(req: OnboardingRequest, request: Request):
+    """Continue onboarding with user's response. Returns SSE stream with next question.
+
+    Tokens are also pushed to all connected /api/session/stream consumers.
+    """
+    store: Store = request.app.state.store
+    config = request.app.state.config
+
+    if not req.response.strip():
+        raise HTTPException(status_code=400, detail="Response cannot be empty.")
+
+    from giva.intelligence.onboarding import continue_onboarding
+
+    # Get all connected session streams to broadcast to
+    session_queues: list[asyncio.Queue] = getattr(
+        request.app.state, "session_queues", []
+    )
+
+    def _broadcast(event: dict):
+        for q in session_queues:
+            try:
+                q.put_nowait(event)
+            except asyncio.QueueFull:
+                pass
+
+    async def event_generator():
+        token_count = 0
+        async for event in _sync_gen_to_sse(
+            continue_onboarding, req.response, store, config
+        ):
+            etype = event["event"]
+            # Forward to direct SSE consumer
+            if etype == "token":
+                token_count += 1
+                yield {"event": "onboarding_token", "data": event["data"]}
+                _broadcast({"event": "onboarding_token", "data": event["data"]})
+            elif etype == "thinking":
+                yield {"event": "onboarding_thinking", "data": event["data"]}
+                _broadcast(
+                    {"event": "onboarding_thinking", "data": event["data"]}
+                )
+            elif etype == "model_loading":
+                yield {"event": "model_loading", "data": event["data"]}
+                _broadcast({"event": "model_loading", "data": event["data"]})
+            elif etype == "done":
+                log.info("session/respond: done (%d tokens)", token_count)
+                yield {"event": "onboarding_done", "data": ""}
+                _broadcast({"event": "onboarding_done", "data": ""})
+            elif etype == "error":
+                log.error("session/respond: error=%s", event["data"])
+                yield {"event": "error", "data": event["data"]}
+                _broadcast({"event": "error", "data": event["data"]})
+
+        # Check if onboarding just completed
+        profile = store.get_profile()
+        pd = profile.profile_data if profile else {}
+        is_complete = pd.get("onboarding_completed", False)
+        if is_complete:
+            from giva.bootstrap import complete_onboarding
+            complete_onboarding(request.app)
+            yield {"event": "onboarding_complete", "data": "true"}
+            _broadcast({"event": "onboarding_complete", "data": "true"})
+            _broadcast({"event": "phase", "data": "operational"})
+
+    return EventSourceResponse(event_generator())
+
+
+# --- Goals Endpoints ---
+
+
+def _goal_to_response(goal, store, include_detail: bool = False) -> GoalResponse:
+    """Convert a Goal model to a GoalResponse, optionally with children/strategies/tasks."""
+    progress = store.get_goal_progress(goal.id, limit=5)
+    progress_list = [
+        GoalProgressResponse(
+            id=p.id, goal_id=p.goal_id, note=p.note, source=p.source,
+            created_at=p.created_at.isoformat() if p.created_at else None,
+        )
+        for p in progress
+    ]
+
+    children = []
+    strategies = []
+    tasks = []
+
+    if include_detail:
+        for c in store.get_child_goals(goal.id):
+            children.append({
+                "id": c.id, "title": c.title, "tier": c.tier,
+                "status": c.status, "priority": c.priority,
+            })
+        for s in store.get_strategies(goal.id):
+            strategies.append({
+                "id": s.id, "strategy_text": s.strategy_text,
+                "action_items": s.action_items, "status": s.status,
+                "suggested_objectives": s.suggested_objectives or [],
+                "created_at": s.created_at.isoformat() if s.created_at else None,
+            })
+        for t in store.get_tasks_for_goal(goal.id):
+            tasks.append({
+                "id": t.id, "title": t.title, "priority": t.priority,
+                "status": t.status,
+                "due_date": t.due_date.isoformat() if t.due_date else None,
+            })
+
+    return GoalResponse(
+        id=goal.id, title=goal.title, tier=goal.tier,
+        description=goal.description, category=goal.category,
+        parent_id=goal.parent_id, status=goal.status, priority=goal.priority,
+        target_date=goal.target_date.isoformat() if goal.target_date else None,
+        created_at=goal.created_at.isoformat() if goal.created_at else None,
+        updated_at=goal.updated_at.isoformat() if goal.updated_at else None,
+        progress=progress_list, children=children,
+        strategies=strategies, tasks=tasks,
+    )
+
+
+@app.get("/api/goals")
+async def get_goals(
+    request: Request,
+    tier: Optional[str] = Query(None, pattern=r"^(long_term|mid_term|short_term)$"),
+    status: str = Query("active", pattern=r"^(active|paused|completed|abandoned)$"),
+) -> GoalListResponse:
+    """List goals, optionally filtered by tier and status."""
+    store: Store = request.app.state.store
+    goals = store.get_goals(tier=tier, status=status)
+    goal_list = [_goal_to_response(g, store) for g in goals]
+    return GoalListResponse(goals=goal_list, count=len(goal_list))
+
+
+@app.post("/api/goals")
+async def create_goal(req: GoalRequest, request: Request) -> GoalResponse:
+    """Create a new goal."""
+    from datetime import datetime as dt
+
+    from giva.db.models import Goal
+
+    store: Store = request.app.state.store
+
+    target_date = None
+    if req.target_date:
+        try:
+            target_date = dt.fromisoformat(req.target_date)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid target_date format")
+
+    goal = Goal(
+        title=req.title, tier=req.tier, description=req.description,
+        category=req.category, parent_id=req.parent_id,
+        priority=req.priority, target_date=target_date,
+    )
+    goal_id = store.add_goal(goal)
+    created = store.get_goal(goal_id)
+    return _goal_to_response(created, store, include_detail=True)
+
+
+@app.get("/api/goals/{goal_id}")
+async def get_goal(goal_id: int, request: Request) -> GoalResponse:
+    """Get a goal with children, strategies, tasks, and progress."""
+    store: Store = request.app.state.store
+    goal = store.get_goal(goal_id)
+    if not goal:
+        raise HTTPException(status_code=404, detail="Goal not found")
+    return _goal_to_response(goal, store, include_detail=True)
+
+
+@app.put("/api/goals/{goal_id}")
+async def update_goal(
+    goal_id: int, req: GoalUpdateRequest, request: Request
+) -> GoalResponse:
+    """Update goal fields."""
+    store: Store = request.app.state.store
+
+    updates = {k: v for k, v in req.model_dump().items() if v is not None}
+    if not updates:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    success = store.update_goal(goal_id, **updates)
+    if not success:
+        raise HTTPException(status_code=404, detail="Goal not found")
+
+    goal = store.get_goal(goal_id)
+    return _goal_to_response(goal, store, include_detail=True)
+
+
+@app.post("/api/goals/{goal_id}/status")
+async def update_goal_status_endpoint(
+    goal_id: int, req: GoalStatusRequest, request: Request
+) -> GoalResponse:
+    """Update a goal's status."""
+    store: Store = request.app.state.store
+    success = store.update_goal_status(goal_id, req.status)
+    if not success:
+        raise HTTPException(status_code=404, detail="Goal not found")
+    goal = store.get_goal(goal_id)
+    return _goal_to_response(goal, store)
+
+
+@app.post("/api/goals/{goal_id}/progress")
+async def add_goal_progress(
+    goal_id: int, req: GoalProgressRequest, request: Request
+) -> GoalProgressResponse:
+    """Add a progress note to a goal."""
+    store: Store = request.app.state.store
+    goal = store.get_goal(goal_id)
+    if not goal:
+        raise HTTPException(status_code=404, detail="Goal not found")
+
+    store.add_goal_progress(goal_id, req.note, req.source)
+    progress = store.get_goal_progress(goal_id, limit=1)
+    p = progress[0]
+    return GoalProgressResponse(
+        id=p.id, goal_id=p.goal_id, note=p.note, source=p.source,
+        created_at=p.created_at.isoformat() if p.created_at else None,
+    )
+
+
+@app.get("/api/goals/{goal_id}/progress")
+async def get_goal_progress_endpoint(
+    goal_id: int,
+    request: Request,
+    limit: int = Query(20, ge=1, le=100),
+) -> list[GoalProgressResponse]:
+    """Get progress history for a goal."""
+    store: Store = request.app.state.store
+    progress = store.get_goal_progress(goal_id, limit=limit)
+    return [
+        GoalProgressResponse(
+            id=p.id, goal_id=p.goal_id, note=p.note, source=p.source,
+            created_at=p.created_at.isoformat() if p.created_at else None,
+        )
+        for p in progress
+    ]
+
+
+@app.post("/api/goals/infer")
+async def infer_goals(request: Request):
+    """Stream goal inference from profile + recent data via SSE."""
+    store: Store = request.app.state.store
+    config = request.app.state.config
+
+    from giva.intelligence.goals import infer_goals as _infer
+
+    async def event_generator():
+        import json as _json
+
+        loop = asyncio.get_event_loop()
+
+        def _run():
+            with _llm_lock:
+                return _infer(store, config)
+
+        goals = await loop.run_in_executor(None, _run)
+        yield {"event": "token", "data": _json.dumps({"goals": goals})}
+        yield {"event": "done", "data": ""}
+
+    return EventSourceResponse(event_generator())
+
+
+@app.post("/api/goals/{goal_id}/strategy")
+async def generate_strategy(goal_id: int, request: Request):
+    """Stream strategy generation for a goal via SSE."""
+    store: Store = request.app.state.store
+    config = request.app.state.config
+
+    from giva.intelligence.goals import generate_strategy as _gen_strategy
+
+    async def event_generator():
+        async for event in _sync_gen_to_sse(_gen_strategy, goal_id, store, config):
+            yield event
+
+    return EventSourceResponse(event_generator())
+
+
+@app.post("/api/goals/{goal_id}/strategy/{strategy_id}/accept")
+async def accept_strategy(
+    goal_id: int, strategy_id: int, request: Request
+) -> dict:
+    """Accept a strategy (mark as accepted, supersede others)."""
+    store: Store = request.app.state.store
+
+    # Supersede existing accepted strategies for this goal
+    existing = store.get_strategies(goal_id, status="accepted")
+    for s in existing:
+        store.update_strategy_status(s.id, "superseded")
+
+    success = store.update_strategy_status(strategy_id, "accepted")
+    if not success:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+
+    # Auto-create mid-term objectives from suggested_objectives
+    objectives_created = 0
+    strategy = store.get_strategy(strategy_id)
+    if strategy and strategy.suggested_objectives:
+        from giva.db.models import Goal
+
+        for obj in strategy.suggested_objectives:
+            title = obj.get("title", "").strip()
+            if not title:
+                continue
+            child_goal = Goal(
+                title=title,
+                tier="mid_term",
+                description=obj.get("description", ""),
+                category=obj.get("category", ""),
+                parent_id=goal_id,
+            )
+            store.add_goal(child_goal)
+            objectives_created += 1
+
+        if objectives_created > 0:
+            log.info(
+                "Created %d mid-term objectives from strategy %d for goal %d",
+                objectives_created, strategy_id, goal_id,
+            )
+
+    return {
+        "success": True,
+        "strategy_id": strategy_id,
+        "status": "accepted",
+        "objectives_created": objectives_created,
+    }
+
+
+@app.post("/api/goals/{goal_id}/plan")
+async def generate_plan(goal_id: int, request: Request):
+    """Stream tactical plan generation for an objective via SSE."""
+    store: Store = request.app.state.store
+    config = request.app.state.config
+
+    from giva.intelligence.goals import generate_tactical_plan
+
+    async def event_generator():
+        async for event in _sync_gen_to_sse(
+            generate_tactical_plan, goal_id, store, config
+        ):
+            yield event
+
+    return EventSourceResponse(event_generator())
+
+
+@app.post("/api/goals/{goal_id}/plan/accept")
+async def accept_plan(goal_id: int, req: PlanAcceptRequest, request: Request) -> dict:
+    """Create tasks from a tactical plan JSON."""
+    store: Store = request.app.state.store
+
+    from giva.intelligence.goals import accept_plan as _accept
+
+    count = _accept(req.plan_json, goal_id, store)
+    return {"success": True, "tasks_created": count}
+
+
+@app.post("/api/goals/plan/review")
+async def review_plans(request: Request):
+    """Stream tactical plan review for all active objectives via SSE."""
+    store: Store = request.app.state.store
+    config = request.app.state.config
+
+    from giva.intelligence.daily_review import review_tactical_plans
+
+    async def event_generator():
+        async for event in _sync_gen_to_sse(review_tactical_plans, store, config):
+            yield event
+
+    return EventSourceResponse(event_generator())
+
+
+@app.post("/api/goals/{goal_id}/chat")
+async def goal_chat(goal_id: int, req: GoalChatRequest, request: Request):
+    """Goal-scoped chat: sends goal context to LLM. Returns SSE stream.
+
+    Messages are persisted scoped to this goal (not mixed with global chat).
+    After the response stream, runs the post-chat agent pipeline to detect
+    intents (create_task, create_objective, progress, etc.).
+    """
+    store: Store = request.app.state.store
+    config = request.app.state.config
+
+    goal = store.get_goal(goal_id)
+    if not goal:
+        raise HTTPException(status_code=404, detail="Goal not found")
+
+    from giva.intelligence.queries import handle_query
+
+    # Build goal context prefix — sent to LLM but NOT saved to DB
+    goal_context = (
+        f"[Context: discussing goal '{goal.title}' ({goal.tier}, {goal.category}). "
+        f"Description: {goal.description or 'N/A'}. "
+        f"Status: {goal.status}, Priority: {goal.priority}.]"
+    )
+    original_query = req.query
+
+    async def event_generator():
+        async for event in _sync_gen_to_sse(
+            handle_query, original_query, store, config,
+            goal_id=goal_id, context_prefix=goal_context,
+        ):
+            yield event
+        # Post-chat agents (after stream done, lock released)
+        actions = await _run_post_chat(original_query, store, config, goal_id=goal_id)
+        if actions:
+            yield {
+                "event": "agent_actions",
+                "data": json.dumps(actions),
+            }
+
+    return EventSourceResponse(event_generator())
+
+
+@app.get("/api/goals/{goal_id}/messages")
+async def goal_messages(
+    goal_id: int,
+    request: Request,
+    limit: int = Query(50, ge=1, le=200),
+):
+    """Get persisted chat messages for a goal."""
+    store: Store = request.app.state.store
+    goal = store.get_goal(goal_id)
+    if not goal:
+        raise HTTPException(status_code=404, detail="Goal not found")
+    messages = store.get_goal_messages(goal_id, limit=limit)
+    return {"messages": messages, "count": len(messages)}
+
+
+# --- Daily Review Endpoints ---
+
+
+@app.get("/api/review/status")
+async def review_status(request: Request) -> ReviewStatusResponse:
+    """Check if a daily review is due."""
+    store: Store = request.app.state.store
+    config = request.app.state.config
+
+    from giva.intelligence.daily_review import is_review_due
+
+    reviews = store.get_recent_reviews(limit=1)
+    last_date = reviews[0].review_date if reviews else None
+
+    return ReviewStatusResponse(
+        due=is_review_due(store, config),
+        last_review_date=last_date,
+    )
+
+
+@app.post("/api/review/start")
+async def review_start(request: Request):
+    """Start a daily review. Returns SSE stream with review prompt."""
+    store: Store = request.app.state.store
+    config = request.app.state.config
+
+    from giva.intelligence.daily_review import generate_review
+
+    async def event_generator():
+        async for event in _sync_gen_to_sse(generate_review, store, config):
+            yield event
+
+    return EventSourceResponse(event_generator())
+
+
+@app.post("/api/review/respond")
+async def review_respond(
+    req: ReviewRespondRequest, request: Request
+) -> ReviewSummaryResponse:
+    """Save user's response to a daily review and extract progress."""
+    store: Store = request.app.state.store
+    config = request.app.state.config
+
+    from giva.intelligence.daily_review import save_review_response
+
+    loop = asyncio.get_event_loop()
+
+    def _run():
+        with _llm_lock:
+            return save_review_response(req.review_id, req.response, store, config)
+
+    summary = await loop.run_in_executor(None, _run)
+    return ReviewSummaryResponse(summary=summary)
+
+
+@app.get("/api/review/history")
+async def review_history(
+    request: Request,
+    limit: int = Query(7, ge=1, le=30),
+) -> list[dict]:
+    """Get recent daily reviews."""
+    store: Store = request.app.state.store
+    reviews = store.get_recent_reviews(limit=limit)
+    return [
+        {
+            "id": r.id,
+            "review_date": r.review_date,
+            "prompt_text": r.prompt_text,
+            "user_response": r.user_response,
+            "summary": r.summary,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        }
+        for r in reviews
+    ]
 
 
 # --- Entry point ---

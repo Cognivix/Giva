@@ -40,11 +40,26 @@ struct GivaApp: App {
                 await bootstrap.start()
             }
             .onChange(of: bootstrap.isReady) { _, ready in
-                if ready {
+                if ready && !viewModel.isSystemBusy {
+                    // Only auto-connect when NOT in a system action (reset/upgrade/restart).
+                    // Those flows reconnect themselves after the action completes.
                     Task { await viewModel.connectToServer(from: bootstrap) }
                 }
             }
         }
         .menuBarExtraStyle(.window)
+
+        Window("Goals & Objectives", id: "goals") {
+            if let goalsVM = viewModel.goalsViewModel {
+                GoalsWindowView(viewModel: goalsVM)
+            } else {
+                ContentUnavailableView(
+                    "Server Not Ready",
+                    systemImage: "exclamationmark.circle",
+                    description: Text("Wait for the server to start, then try again.")
+                )
+            }
+        }
+        .defaultSize(width: 800, height: 600)
     }
 }

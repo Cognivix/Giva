@@ -1,12 +1,42 @@
 """Server-side bootstrap state machine.
 
-Manages the post-venv setup: model downloads, config validation, and readiness.
-State is persisted to ``~/.local/share/giva/bootstrap.json`` so the daemon can
+Single authoritative state: ``checkpoint``.
+
+The checkpoint follows a strict Markov chain — each value implies all
+previous steps are done.  No separate ``steps_completed`` list; the
+checkpoint IS the history.
+
+Markov chain
+~~~~~~~~~~~~
+::
+
+    unknown
+      → downloading_default_model
+      → awaiting_model_selection
+      → downloading_user_models
+      → validating
+      → ready            ← models done, UI shows main panel
+      → syncing          ← initial email/calendar sync
+      → onboarding       ← LLM interview to learn user prefs
+      → operational      ← fully running, scheduler active
+
+Transient / overlay states (can happen from any post-ready checkpoint):
+
+- ``failed``    — error; ``error`` field has details
+- ``upgrading`` — pip install in progress (not currently set by server)
+
+Persistence
+~~~~~~~~~~~
+Written to ``~/.local/share/giva/bootstrap.json`` so the daemon can
 resume after crashes, restarts, or app quit/reopen cycles.
 
-The SwiftUI app observes this state via ``/api/bootstrap/status`` (snapshot)
-and ``/api/bootstrap/stream`` (SSE live updates).  The app never writes to the
-checkpoint file — only the server does.
+Observation
+~~~~~~~~~~~
+- ``/api/bootstrap/status`` — snapshot
+- ``/api/bootstrap/stream`` — SSE live updates
+- ``/api/session/stream``   — post-ready lifecycle (sync → onboard → operational)
+
+The app never writes to the checkpoint file — only the server does.
 """
 
 from __future__ import annotations
@@ -17,7 +47,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 log = logging.getLogger(__name__)
 
@@ -25,9 +55,35 @@ DEFAULT_MODEL = "mlx-community/Qwen3-8B-4bit"
 
 _WEIGHT_EXTS = frozenset((".safetensors", ".bin", ".gguf"))
 
+# Ordered list of checkpoints in the Markov chain.
+# Each checkpoint implies all preceding ones are complete.
+CHECKPOINT_ORDER = [
+    "unknown",
+    "downloading_default_model",
+    "awaiting_model_selection",
+    "downloading_user_models",
+    "validating",
+    "ready",
+    "syncing",
+    "onboarding",
+    "operational",
+]
+
+# Set of checkpoints that can be considered "past ready" — the UI can
+# show the main panel.
+_PAST_READY = frozenset(CHECKPOINT_ORDER[CHECKPOINT_ORDER.index("ready"):])
+
 
 def _checkpoint_path() -> Path:
     return Path("~/.local/share/giva/bootstrap.json").expanduser()
+
+
+def _checkpoint_index(cp: str) -> int:
+    """Return the ordinal position of *cp* in the Markov chain, or -1."""
+    try:
+        return CHECKPOINT_ORDER.index(cp)
+    except ValueError:
+        return -1
 
 
 # ---------------------------------------------------------------------------
@@ -36,53 +92,51 @@ def _checkpoint_path() -> Path:
 
 
 @dataclass
-class StepInfo:
-    """Status of a single bootstrap step."""
-    name: str
-    status: str = "pending"  # pending | running | done | failed | waiting
-    progress: Optional[dict] = None
-    error: Optional[str] = None
-
-    def to_dict(self) -> dict:
-        d: dict[str, Any] = {"name": self.name, "status": self.status}
-        if self.progress is not None:
-            d["progress"] = self.progress
-        if self.error is not None:
-            d["error"] = self.error
-        return d
-
-
-@dataclass
 class BootstrapState:
-    """Mutable bootstrap state, persisted to bootstrap.json."""
+    """Mutable bootstrap state — single authoritative ``checkpoint``.
+
+    The ``checkpoint`` field IS the state machine.  There is no separate
+    list of completed steps; a later checkpoint implies all earlier ones
+    are done.
+    """
 
     checkpoint: str = "unknown"
-    steps_completed: list[str] = field(default_factory=list)
-    current_step: Optional[str] = None
     progress: dict = field(default_factory=dict)
     error: Optional[str] = None
     updated_at: Optional[str] = None
 
-    # --- Derived properties ---
+    # --- Derived properties (all computed from checkpoint) ---
 
     @property
     def is_ready(self) -> bool:
-        return self.checkpoint == "ready"
+        """True when models are downloaded and validated (main UI can show)."""
+        return self.checkpoint in _PAST_READY
+
+    @property
+    def is_operational(self) -> bool:
+        """True when the full lifecycle is complete."""
+        return self.checkpoint == "operational"
 
     @property
     def needs_user_input(self) -> bool:
         return self.checkpoint == "awaiting_model_selection"
 
+    def past(self, checkpoint: str) -> bool:
+        """True if current checkpoint is *at or past* ``checkpoint``."""
+        return _checkpoint_index(self.checkpoint) >= _checkpoint_index(checkpoint)
+
     @property
     def display_message(self) -> str:
         messages = {
             "unknown": "Initializing...",
-            "venv_ok": "Environment ready",
             "downloading_default_model": "Downloading base AI model...",
             "awaiting_model_selection": "Choose your AI models",
             "downloading_user_models": "Downloading selected models...",
             "validating": "Validating models...",
             "ready": "Ready!",
+            "syncing": "Syncing your emails and calendar...",
+            "onboarding": "Getting to know you...",
+            "operational": "Ready!",
             "failed": f"Setup failed: {self.error or 'unknown error'}",
             "upgrading": "Upgrading...",
         }
@@ -97,10 +151,15 @@ class BootstrapState:
         if path.exists():
             try:
                 raw = json.loads(path.read_text())
+
+                # Migrate from v1 (steps_completed-based) to v2 (checkpoint-only).
+                # If the file has steps_completed, compute the highest checkpoint
+                # that those completed steps imply.
+                if "steps_completed" in raw:
+                    return cls._migrate_v1(raw)
+
                 return cls(
                     checkpoint=raw.get("checkpoint", "unknown"),
-                    steps_completed=raw.get("steps_completed", []),
-                    current_step=raw.get("current_step"),
                     progress=raw.get("progress", {}),
                     error=raw.get("error"),
                     updated_at=raw.get("updated_at"),
@@ -109,77 +168,98 @@ class BootstrapState:
                 log.warning("Failed to load bootstrap checkpoint: %s", e)
         return cls()
 
+    @classmethod
+    def _migrate_v1(cls, raw: dict) -> BootstrapState:
+        """Migrate a v1 bootstrap.json (with steps_completed) to v2.
+
+        The v1 format tracked ``steps_completed`` alongside ``checkpoint``.
+        In v2, only ``checkpoint`` matters.  We honour the v1 checkpoint
+        directly unless it's inconsistent, in which case we derive from
+        the completed steps.
+        """
+        cp = raw.get("checkpoint", "unknown")
+
+        # If checkpoint is already a valid, well-known state, trust it.
+        if cp in CHECKPOINT_ORDER or cp in ("failed", "upgrading"):
+            log.info("Migrating bootstrap v1→v2: keeping checkpoint=%s", cp)
+        else:
+            # Derive from steps_completed
+            steps = set(raw.get("steps_completed", []))
+            if "onboarding" in steps:
+                cp = "operational"
+            elif "initial_sync" in steps:
+                cp = "onboarding"
+            elif "validation" in steps:
+                cp = "ready"
+            elif "user_models" in steps:
+                cp = "validating"
+            elif "model_config" in steps:
+                cp = "downloading_user_models"
+            elif "default_model" in steps:
+                cp = "awaiting_model_selection"
+            else:
+                cp = "unknown"
+            log.info("Migrating bootstrap v1→v2: derived checkpoint=%s", cp)
+
+        state = cls(
+            checkpoint=cp,
+            progress=raw.get("progress", {}),
+            error=raw.get("error"),
+            updated_at=raw.get("updated_at"),
+        )
+        state.save()  # Persist the v2 format
+        return state
+
     def save(self) -> None:
         """Persist current state to disk."""
         self.updated_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         path = _checkpoint_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         data = {
-            "version": 1,
+            "version": 2,
             "checkpoint": self.checkpoint,
-            "steps_completed": self.steps_completed,
-            "current_step": self.current_step,
             "progress": self.progress,
             "error": self.error,
             "updated_at": self.updated_at,
         }
         path.write_text(json.dumps(data, indent=2))
 
-    # --- State transitions ---
+    # --- State transitions (all move checkpoint forward) ---
 
-    def complete_step(self, step: str) -> None:
-        if step not in self.steps_completed:
-            self.steps_completed.append(step)
-        self.current_step = None
-        self.error = None
-        self.save()
-
-    def start_step(self, step: str, checkpoint: str) -> None:
+    def advance(self, checkpoint: str) -> None:
+        """Move to the next checkpoint.  Clears error and progress."""
         self.checkpoint = checkpoint
-        self.current_step = step
         self.error = None
+        self.progress = {}
         self.save()
 
-    def fail(self, step: str, error: str) -> None:
+    def fail(self, error: str) -> None:
+        """Move to 'failed'.  Preserves which checkpoint we were at in error."""
         self.checkpoint = "failed"
-        self.current_step = step
         self.error = error
         self.save()
 
     def mark_ready(self) -> None:
-        self.checkpoint = "ready"
-        self.current_step = None
-        self.error = None
-        self.progress = {}
-        self.save()
+        self.advance("ready")
+
+    def mark_syncing(self) -> None:
+        self.advance("syncing")
+
+    def mark_onboarding(self) -> None:
+        self.advance("onboarding")
+
+    def mark_operational(self) -> None:
+        self.advance("operational")
 
     # --- Snapshot for API ---
 
     def to_response(self) -> dict:
         """Build the API response dict."""
-        all_steps = [
-            "default_model", "model_config", "user_models", "validation"
-        ]
-        steps = []
-        for name in all_steps:
-            if name in self.steps_completed:
-                steps.append(StepInfo(name=name, status="done").to_dict())
-            elif name == self.current_step:
-                status = "waiting" if self.needs_user_input else "running"
-                si = StepInfo(name=name, status=status)
-                if self.progress:
-                    si.progress = self.progress
-                if self.error:
-                    si.error = self.error
-                steps.append(si.to_dict())
-            else:
-                steps.append(StepInfo(name=name, status="pending").to_dict())
-
         return {
             "state": self.checkpoint,
             "ready": self.is_ready,
             "needs_user_input": self.needs_user_input,
-            "steps": steps,
+            "progress": self.progress,
             "error": self.error,
             "display_message": self.display_message,
         }
@@ -195,7 +275,6 @@ class BootstrapNotifier:
 
     def __init__(self):
         self._event = asyncio.Event()
-        self._lock = asyncio.Lock()
 
     def notify(self) -> None:
         """Signal all SSE consumers that state changed."""
@@ -277,80 +356,83 @@ def get_model_total_bytes(model_id: str) -> int:
 
 
 async def run_bootstrap(app) -> None:
-    """Run remaining bootstrap steps.
+    """Run remaining bootstrap steps up to 'ready'.
 
     Called from server lifespan on startup (if not ready) or from
     ``POST /api/bootstrap/start``.  Each step is idempotent — re-running
-    after a crash picks up where it left off.
+    after a crash picks up where it left off because ``checkpoint`` tells
+    us exactly where we are.
+
+    Post-ready lifecycle (sync → onboarding → operational) is driven by
+    ``/api/session/stream`` when the UI connects.
     """
     state: BootstrapState = app.state.bootstrap
     notifier: BootstrapNotifier = app.state.bootstrap_notifier
     loop = asyncio.get_event_loop()
 
     # Step 1: Download default model (filter/bootstrap advisor)
-    if "default_model" not in state.steps_completed:
-        state.start_step("default_model", "downloading_default_model")
+    if not state.past("awaiting_model_selection"):
+        state.advance("downloading_default_model")
         notifier.notify()
 
         try:
             await _download_model_with_progress(
-                DEFAULT_MODEL, state, "default_model", notifier, loop
+                DEFAULT_MODEL, state, notifier, loop
             )
-            state.complete_step("default_model")
-            notifier.notify()
+            # Don't advance yet — next step decides checkpoint
         except Exception as e:
             log.error("Default model download failed: %s", e)
-            state.fail("default_model", str(e))
+            state.fail(str(e))
             notifier.notify()
             return
 
     # Step 2: Check if user has configured models
-    if "model_config" not in state.steps_completed:
+    if not state.past("downloading_user_models"):
         from giva.models import is_model_setup_complete
 
-        if is_model_setup_complete():
-            state.complete_step("model_config")
-            notifier.notify()
+        setup_done = is_model_setup_complete()
+        log.info(
+            "Bootstrap step 2: is_model_setup_complete=%s (checkpoint=%s)",
+            setup_done, state.checkpoint,
+        )
+        if setup_done:
+            # User already configured — skip selection
+            pass
         else:
             # Park here — wait for user to POST /api/models/select
-            state.start_step("model_config", "awaiting_model_selection")
+            state.advance("awaiting_model_selection")
             notifier.notify()
+            log.info("Bootstrap: parked at awaiting_model_selection")
             return  # Stop. resume_after_model_selection() continues.
 
     # Step 3: Download user-selected models
-    if "user_models" not in state.steps_completed:
+    if not state.past("validating"):
         await _download_user_models(app, state, notifier, loop)
         if state.checkpoint == "failed":
             return
 
     # Step 4: Validation
-    if "validation" not in state.steps_completed:
-        state.start_step("validation", "validating")
+    if not state.past("ready"):
+        state.advance("validating")
         notifier.notify()
         try:
             await _validate_models(app, loop)
-            state.complete_step("validation")
         except Exception as e:
             log.error("Model validation failed: %s", e)
-            state.fail("validation", str(e))
+            state.fail(str(e))
             notifier.notify()
             return
 
-    # All done!
+    # Models are ready — mark ready.
+    # Post-ready lifecycle is driven by /api/session/stream.
     state.mark_ready()
     notifier.notify()
-    log.info("Bootstrap complete — server is ready.")
+    log.info("Bootstrap: models ready. Post-ready lifecycle starts when UI connects.")
 
 
 async def resume_after_model_selection(app) -> None:
     """Called after POST /api/models/select to continue bootstrap."""
-    state: BootstrapState = app.state.bootstrap
-    notifier: BootstrapNotifier = app.state.bootstrap_notifier
-
-    state.complete_step("model_config")
-    notifier.notify()
-
-    # Continue with remaining steps
+    # Continue from user_models download step
     await run_bootstrap(app)
 
 
@@ -377,7 +459,6 @@ def _cleanup_stale_incomplete(model_id: str) -> None:
 async def _download_model_with_progress(
     model_id: str,
     state: BootstrapState,
-    step_name: str,
     notifier: BootstrapNotifier,
     loop: asyncio.AbstractEventLoop,
 ) -> None:
@@ -392,7 +473,6 @@ async def _download_model_with_progress(
         return
 
     # Clean up stale .incomplete files from previous interrupted downloads.
-    # The xet downloader can leave sparse files that block new downloads.
     await loop.run_in_executor(None, _cleanup_stale_incomplete, model_id)
 
     # Get total size
@@ -456,23 +536,21 @@ async def _download_user_models(
     models_to_download.add(config.llm.model)
     models_to_download.add(config.llm.filter_model)
 
-    state.start_step("user_models", "downloading_user_models")
-    state.progress = {}
+    state.advance("downloading_user_models")
     notifier.notify()
 
     for model_id in models_to_download:
         try:
             await _download_model_with_progress(
-                model_id, state, "user_models", notifier, loop
+                model_id, state, notifier, loop
             )
         except Exception as e:
             log.error("User model download failed (%s): %s", model_id, e)
-            state.fail("user_models", f"{model_id}: {e}")
+            state.fail(f"{model_id}: {e}")
             notifier.notify()
             return
 
-    state.complete_step("user_models")
-    notifier.notify()
+    # Don't advance — caller decides the next checkpoint
 
 
 async def _validate_models(app, loop: asyncio.AbstractEventLoop) -> None:
@@ -488,3 +566,21 @@ async def _validate_models(app, loop: asyncio.AbstractEventLoop) -> None:
             raise RuntimeError(f"Filter model not downloaded: {config.llm.filter_model}")
 
     await loop.run_in_executor(None, _check)
+
+
+# ---------------------------------------------------------------------------
+# Post-ready lifecycle helpers
+# ---------------------------------------------------------------------------
+
+
+def complete_onboarding(app) -> None:
+    """Called by the session endpoint when onboarding finishes."""
+    state: BootstrapState = app.state.bootstrap
+    notifier: BootstrapNotifier = app.state.bootstrap_notifier
+    state.mark_operational()
+    notifier.notify()
+    log.info("Bootstrap: onboarding complete — operational")
+
+    # Start the background scheduler now that we're fully operational
+    from giva.server import _start_scheduler
+    _start_scheduler(app)

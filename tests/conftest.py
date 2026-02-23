@@ -1,8 +1,6 @@
 """Shared test fixtures."""
 
 import pytest
-from pathlib import Path
-import tempfile
 
 from giva.db.store import Store
 from giva.config import GivaConfig

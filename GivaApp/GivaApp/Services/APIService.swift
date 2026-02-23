@@ -112,7 +112,24 @@ class APIService {
         return result.text
     }
 
-    // MARK: - Onboarding & Reset
+    // MARK: - Session (server-driven state machine)
+
+    func getSession() async throws -> SessionStateResponse {
+        return try await get("/api/session")
+    }
+
+    func streamSession() -> AsyncThrowingStream<SSEEvent, Error> {
+        let url = baseURL.appendingPathComponent("api/session/stream")
+        // Session stream is long-lived — must NOT close on "error" or "done" events
+        return sseStream(url: url, method: "GET", persistent: true)
+    }
+
+    func streamSessionRespond(response: String) -> AsyncThrowingStream<SSEEvent, Error> {
+        let url = baseURL.appendingPathComponent("api/session/respond")
+        return sseStream(url: url, method: "POST", body: OnboardingRequest(response: response))
+    }
+
+    // MARK: - Onboarding & Reset (legacy — use session endpoints instead)
 
     func getOnboardingStatus() async throws -> OnboardingStatusResponse {
         return try await get("/api/onboarding/status")
@@ -135,6 +152,128 @@ class APIService {
     func streamSuggest() -> AsyncThrowingStream<SSEEvent, Error> {
         let url = baseURL.appendingPathComponent("api/suggest")
         return sseStream(url: url, method: "GET")
+    }
+
+    // MARK: - Goals
+
+    func getGoals(tier: String? = nil, status: String? = nil) async throws -> GoalListResponse {
+        var components = URLComponents(
+            url: baseURL.appendingPathComponent("api/goals"),
+            resolvingAgainstBaseURL: false
+        )!
+        var queryItems: [URLQueryItem] = []
+        if let tier { queryItems.append(URLQueryItem(name: "tier", value: tier)) }
+        if let status { queryItems.append(URLQueryItem(name: "status", value: status)) }
+        if !queryItems.isEmpty { components.queryItems = queryItems }
+        guard let url = components.url else { throw APIError.networkError(URLError(.badURL)) }
+        return try await getURL(url)
+    }
+
+    func createGoal(request: GoalRequest) async throws -> GoalItem {
+        return try await post("api/goals", body: request)
+    }
+
+    func getGoal(id: Int) async throws -> GoalItem {
+        return try await get("/api/goals/\(id)")
+    }
+
+    func updateGoal(id: Int, request: GoalUpdateRequest) async throws -> GoalItem {
+        return try await put("api/goals/\(id)", body: request)
+    }
+
+    func updateGoalStatus(id: Int, status: String) async throws -> GoalItem {
+        return try await post("api/goals/\(id)/status", body: GoalStatusUpdateRequest(status: status))
+    }
+
+    func addGoalProgress(id: Int, note: String, source: String = "user") async throws -> GoalProgressItem {
+        return try await post("api/goals/\(id)/progress", body: GoalProgressRequest(note: note, source: source))
+    }
+
+    func getGoalProgress(id: Int, limit: Int = 20) async throws -> [GoalProgressItem] {
+        var components = URLComponents(
+            url: baseURL.appendingPathComponent("api/goals/\(id)/progress"),
+            resolvingAgainstBaseURL: false
+        )!
+        components.queryItems = [URLQueryItem(name: "limit", value: String(limit))]
+        guard let url = components.url else { throw APIError.networkError(URLError(.badURL)) }
+        return try await getURL(url)
+    }
+
+    func streamInferGoals() -> AsyncThrowingStream<SSEEvent, Error> {
+        let url = baseURL.appendingPathComponent("api/goals/infer")
+        return sseStream(url: url, method: "POST")
+    }
+
+    func streamStrategy(goalId: Int) -> AsyncThrowingStream<SSEEvent, Error> {
+        let url = baseURL.appendingPathComponent("api/goals/\(goalId)/strategy")
+        return sseStream(url: url, method: "POST")
+    }
+
+    func acceptStrategy(goalId: Int, strategyId: Int) async throws -> [String: Any] {
+        let url = baseURL.appendingPathComponent("api/goals/\(goalId)/strategy/\(strategyId)/accept")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        let (data, response) = try await session.data(for: request)
+        try checkResponse(response, data: data)
+        return (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+    }
+
+    func streamPlan(goalId: Int) -> AsyncThrowingStream<SSEEvent, Error> {
+        let url = baseURL.appendingPathComponent("api/goals/\(goalId)/plan")
+        return sseStream(url: url, method: "POST")
+    }
+
+    func acceptPlan(goalId: Int, planJson: String) async throws -> [String: Any] {
+        let url = baseURL.appendingPathComponent("api/goals/\(goalId)/plan/accept")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encoder.encode(PlanAcceptRequest(planJson: planJson))
+        let (data, response) = try await session.data(for: request)
+        try checkResponse(response, data: data)
+        return (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+    }
+
+    func streamPlanReview() -> AsyncThrowingStream<SSEEvent, Error> {
+        let url = baseURL.appendingPathComponent("api/goals/plan/review")
+        return sseStream(url: url, method: "POST")
+    }
+
+    func streamGoalChat(goalId: Int, query: String) -> AsyncThrowingStream<SSEEvent, Error> {
+        let url = baseURL.appendingPathComponent("api/goals/\(goalId)/chat")
+        return sseStream(url: url, method: "POST", body: GoalChatRequest(query: query))
+    }
+
+    func getGoalMessages(goalId: Int, limit: Int = 50) async throws -> GoalMessagesResponse {
+        return try await get("/api/goals/\(goalId)/messages?limit=\(limit)")
+    }
+
+    // MARK: - Daily Review
+
+    func getReviewStatus() async throws -> ReviewStatusResponse {
+        return try await get("/api/review/status")
+    }
+
+    func streamReviewStart() -> AsyncThrowingStream<SSEEvent, Error> {
+        let url = baseURL.appendingPathComponent("api/review/start")
+        return sseStream(url: url, method: "POST")
+    }
+
+    func respondReview(reviewId: Int, response: String) async throws -> ReviewSummaryResponse {
+        return try await post(
+            "api/review/respond",
+            body: ReviewRespondRequest(reviewId: reviewId, response: response)
+        )
+    }
+
+    func getReviewHistory(limit: Int = 7) async throws -> [ReviewHistoryItem] {
+        var components = URLComponents(
+            url: baseURL.appendingPathComponent("api/review/history"),
+            resolvingAgainstBaseURL: false
+        )!
+        components.queryItems = [URLQueryItem(name: "limit", value: String(limit))]
+        guard let url = components.url else { throw APIError.networkError(URLError(.badURL)) }
+        return try await getURL(url)
     }
 
     // MARK: - Model Management
@@ -184,7 +323,28 @@ class APIService {
 
     // MARK: - SSE Parser
 
-    private func sseStream(url: URL, method: String, body: (some Encodable)? = Optional<String>.none) -> AsyncThrowingStream<SSEEvent, Error> {
+    /// Parse an SSE stream from the server.
+    ///
+    /// - Parameters:
+    ///   - persistent: When `true`, the stream stays open even after "done" or
+    ///     "error" events (used by session stream which is long-lived).
+    ///     When `false` (default), "done"/"error" closes the stream.
+    /// Parse an SSE stream from the server using byte-level line splitting.
+    ///
+    /// **Why not `bytes.lines`?**  Swift's `AsyncLineSequence` silently drops
+    /// empty lines, but SSE uses empty lines as event delimiters.  We read raw
+    /// bytes and split on `\n` (stripping `\r`) to preserve empty lines.
+    ///
+    /// - Parameters:
+    ///   - persistent: When `true`, the stream stays open even after "done" or
+    ///     "error" events (used by session stream which is long-lived).
+    ///     When `false` (default), "done"/"error" closes the stream.
+    private func sseStream(
+        url: URL,
+        method: String,
+        body: (some Encodable)? = Optional<String>.none,
+        persistent: Bool = false
+    ) -> AsyncThrowingStream<SSEEvent, Error> {
         AsyncThrowingStream { continuation in
             Task {
                 var request = URLRequest(url: url)
@@ -208,30 +368,47 @@ class APIService {
 
                     var currentEvent = ""
                     var currentData = ""
+                    var lineBuffer = Data()
 
-                    for try await line in bytes.lines {
-                        if line.hasPrefix("event: ") {
-                            currentEvent = String(line.dropFirst(7))
-                        } else if line.hasPrefix("data: ") {
-                            currentData = String(line.dropFirst(6))
-                        } else if line == "data:" {
-                            currentData = ""
-                        } else if line.isEmpty {
-                            // End of event block
-                            if !currentEvent.isEmpty {
-                                let event = SSEEvent(event: currentEvent, data: currentData)
-                                continuation.yield(event)
+                    // Read raw bytes — preserves empty lines that bytes.lines drops.
+                    for try await byte in bytes {
+                        if byte == UInt8(ascii: "\n") {
+                            let line = String(decoding: lineBuffer, as: UTF8.self)
+                            lineBuffer.removeAll(keepingCapacity: true)
 
-                                if currentEvent == "done" || currentEvent == "error" {
-                                    continuation.finish()
-                                    return
+                            if line.hasPrefix("event: ") {
+                                currentEvent = String(line.dropFirst(7))
+                            } else if line.hasPrefix("data: ") {
+                                currentData = String(line.dropFirst(6))
+                            } else if line == "data:" {
+                                currentData = ""
+                            } else if line.hasPrefix(":") {
+                                // SSE comment / keepalive ping — ignore
+                            } else if line.isEmpty {
+                                // Empty line = end of event block
+                                if !currentEvent.isEmpty {
+                                    continuation.yield(SSEEvent(event: currentEvent, data: currentData))
+
+                                    // Finite streams close on terminal events;
+                                    // persistent (session) streams stay open.
+                                    if !persistent && (currentEvent == "done" || currentEvent == "error") {
+                                        continuation.finish()
+                                        return
+                                    }
                                 }
+                                currentEvent = ""
+                                currentData = ""
                             }
-                            currentEvent = ""
-                            currentData = ""
+                        } else if byte != UInt8(ascii: "\r") {
+                            lineBuffer.append(byte)
                         }
+                        // \r bytes are silently stripped
                     }
+
+                    // Stream ended (server closed connection)
                     continuation.finish()
+                } catch is CancellationError {
+                    continuation.finish(throwing: CancellationError())
                 } catch {
                     continuation.finish(throwing: error)
                 }
@@ -248,6 +425,22 @@ class APIService {
 
     private func getURL<T: Decodable>(_ url: URL) async throws -> T {
         let (data, response) = try await session.data(from: url)
+        try checkResponse(response, data: data)
+        do {
+            return try decoder.decode(T.self, from: data)
+        } catch {
+            throw APIError.decodingError(error)
+        }
+    }
+
+    private func put<B: Encodable, T: Decodable>(_ path: String, body: B) async throws -> T {
+        let url = baseURL.appendingPathComponent(path)
+        var request = URLRequest(url: url)
+        request.httpMethod = "PUT"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encoder.encode(body)
+
+        let (data, response) = try await session.data(for: request)
         try checkResponse(response, data: data)
         do {
             return try decoder.decode(T.self, from: data)

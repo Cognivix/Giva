@@ -640,6 +640,7 @@ def is_model_setup_complete() -> bool:
 
     config_path = Path("~/.config/giva/config.toml").expanduser()
     if not config_path.exists():
+        log.info("is_model_setup_complete: config %s does not exist → False", config_path)
         return False
     try:
         with open(config_path, "rb") as f:
@@ -648,11 +649,18 @@ def is_model_setup_complete() -> bool:
         model = llm.get("model")
         filter_model = llm.get("filter_model")
         if not model or not filter_model:
+            log.info("is_model_setup_complete: no model/filter in config → False")
             return False
         # Verify both models are actually downloaded
         downloaded = get_downloaded_model_ids()
-        return model in downloaded and filter_model in downloaded
-    except Exception:
+        result = model in downloaded and filter_model in downloaded
+        log.info(
+            "is_model_setup_complete: model=%s filter=%s → %s",
+            model, filter_model, result,
+        )
+        return result
+    except Exception as e:
+        log.warning("is_model_setup_complete: exception %s → False", e)
         return False
 
 

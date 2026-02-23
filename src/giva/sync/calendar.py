@@ -11,8 +11,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, timedelta
-from typing import Optional
+from datetime import datetime
 
 from giva.db.models import Event
 from giva.db.store import Store

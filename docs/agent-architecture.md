@@ -77,7 +77,7 @@ The three per-turn filter-model agents (Intent Detector, Conversation Tagger, Ch
 
 ```
 POST-CHAT AGENT (filter model, single call)
-├── Intent detection  → task/goal/draft/memory intents
+├── Intent detection  → create_task / create_objective / complete_task / progress / preference
 ├── Topic tagging     → conversation classification
 └── Progress signals  → goal progress from chat content
 ```
@@ -411,10 +411,11 @@ Zero cost, fixes broken fundamentals:
 
 First new LLM calls (filter model only):
 
-1. **Combined post-chat agent** — intent detection + tagging + progress, single filter-model call.
-2. **Action router** — process detected intents (create task, log progress, save fact).
-3. **UI feedback** — broadcast `agent_actions` SSE events for toast notifications.
-4. **Conversation compressor** — Tier 1 → Tier 2 when active window overflows.
+1. **Combined post-chat agent** — intent detection + tagging + progress, single filter-model call. ✅
+2. **Action router** — process detected intents (create task, create objective, log progress, save fact). ✅
+3. **UI feedback** — broadcast `agent_actions` SSE events for toast notifications. ✅
+4. **Conversation compressor** — Tier 1 → Tier 2 when active window overflows. ✅
+5. **Goal chat integration** — goal chat runs the same pipeline with goal_id context for auto-linking. ✅
 
 ### Phase 2 — Context Enrichment
 

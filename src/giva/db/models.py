@@ -128,6 +128,7 @@ class Task:
     priority: str = "medium"  # high, medium, low
     due_date: Optional[datetime] = None
     status: str = "pending"  # pending, in_progress, done, dismissed
+    goal_id: Optional[int] = None  # FK to goals table
     id: Optional[int] = None
     created_at: Optional[datetime] = None
 
@@ -172,6 +173,156 @@ class UserProfile:
             updated_at=(
                 datetime.fromisoformat(row["updated_at"])
                 if row.get("updated_at")
+                else None
+            ),
+        )
+
+
+# --- Goals & Objectives ---
+
+
+@dataclass
+class Goal:
+    """A goal at one of three tiers: long_term, mid_term, or short_term."""
+
+    title: str
+    tier: str  # 'long_term', 'mid_term', 'short_term'
+    description: str = ""
+    category: str = ""  # career, personal, health, financial, networking, learning
+    parent_id: Optional[int] = None  # mid_term→long_term, short_term→mid_term
+    status: str = "active"  # active, paused, completed, abandoned
+    priority: str = "medium"  # high, medium, low
+    target_date: Optional[datetime] = None
+    id: Optional[int] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    def to_row(self) -> dict:
+        return {
+            "title": self.title,
+            "tier": self.tier,
+            "description": self.description,
+            "category": self.category,
+            "parent_id": self.parent_id,
+            "status": self.status,
+            "priority": self.priority,
+            "target_date": self.target_date.isoformat() if self.target_date else None,
+        }
+
+    @classmethod
+    def from_row(cls, row: dict) -> Goal:
+        return cls(
+            id=row["id"],
+            title=row["title"],
+            tier=row["tier"],
+            description=row.get("description", ""),
+            category=row.get("category", ""),
+            parent_id=row.get("parent_id"),
+            status=row.get("status", "active"),
+            priority=row.get("priority", "medium"),
+            target_date=(
+                datetime.fromisoformat(row["target_date"])
+                if row.get("target_date")
+                else None
+            ),
+            created_at=(
+                datetime.fromisoformat(row["created_at"])
+                if row.get("created_at")
+                else None
+            ),
+            updated_at=(
+                datetime.fromisoformat(row["updated_at"])
+                if row.get("updated_at")
+                else None
+            ),
+        )
+
+
+@dataclass
+class GoalStrategy:
+    """An LLM-generated strategy for achieving a goal."""
+
+    goal_id: int
+    strategy_text: str
+    action_items: list[dict] = field(default_factory=list)  # [{description, timeframe}]
+    suggested_objectives: list[dict] = field(default_factory=list)  # [{title, tier, ...}]
+    status: str = "proposed"  # proposed, accepted, rejected, superseded
+    id: Optional[int] = None
+    created_at: Optional[datetime] = None
+
+    def to_row(self) -> dict:
+        return {
+            "goal_id": self.goal_id,
+            "strategy_text": self.strategy_text,
+            "action_items": json.dumps(self.action_items),
+            "suggested_objectives": json.dumps(self.suggested_objectives),
+            "status": self.status,
+        }
+
+    @classmethod
+    def from_row(cls, row: dict) -> GoalStrategy:
+        return cls(
+            id=row["id"],
+            goal_id=row["goal_id"],
+            strategy_text=row["strategy_text"],
+            action_items=json.loads(row.get("action_items", "[]")),
+            suggested_objectives=json.loads(row.get("suggested_objectives", "[]")),
+            status=row.get("status", "proposed"),
+            created_at=(
+                datetime.fromisoformat(row["created_at"])
+                if row.get("created_at")
+                else None
+            ),
+        )
+
+
+@dataclass
+class GoalProgress:
+    """A descriptive progress entry for a goal, rich enough for LLM context injection."""
+
+    goal_id: int
+    note: str
+    source: str = "user"  # 'user', 'sync', 'review', 'chat'
+    id: Optional[int] = None
+    created_at: Optional[datetime] = None
+
+    @classmethod
+    def from_row(cls, row: dict) -> GoalProgress:
+        return cls(
+            id=row["id"],
+            goal_id=row["goal_id"],
+            note=row["note"],
+            source=row.get("source", "user"),
+            created_at=(
+                datetime.fromisoformat(row["created_at"])
+                if row.get("created_at")
+                else None
+            ),
+        )
+
+
+@dataclass
+class DailyReview:
+    """A daily check-in record: Giva's prompt, user response, and LLM summary."""
+
+    review_date: str  # ISO date (YYYY-MM-DD)
+    prompt_text: str
+    user_response: str = ""
+    summary: str = ""
+    id: Optional[int] = None
+    created_at: Optional[datetime] = None
+
+    @classmethod
+    def from_row(cls, row: dict) -> DailyReview:
+        return cls(
+            id=row["id"],
+            review_date=row["review_date"],
+            prompt_text=row["prompt_text"],
+            user_response=row.get("user_response", ""),
+            summary=row.get("summary", ""),
+            created_at=(
+                datetime.fromisoformat(row["created_at"])
+                if row.get("created_at")
                 else None
             ),
         )

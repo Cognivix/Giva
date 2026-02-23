@@ -3,15 +3,27 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Iterator, Optional
 
-from giva.db.models import Email, Event, Task, UserProfile
+from giva.db.models import (
+    DailyReview,
+    Email,
+    Event,
+    Goal,
+    GoalProgress,
+    GoalStrategy,
+    Task,
+    UserProfile,
+)
 
-SCHEMA_VERSION = 1
+log = logging.getLogger(__name__)
+
+SCHEMA_VERSION = 4
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -88,9 +100,31 @@ CREATE TABLE IF NOT EXISTS tasks (
     due_date TEXT,
     status TEXT NOT NULL DEFAULT 'pending'
         CHECK(status IN ('pending', 'in_progress', 'done', 'dismissed')),
+    goal_id INTEGER REFERENCES goals(id) ON DELETE SET NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE VIRTUAL TABLE IF NOT EXISTS tasks_fts USING fts5(
+    title, description, content='tasks', content_rowid='id'
+);
+
+CREATE TRIGGER IF NOT EXISTS tasks_ai AFTER INSERT ON tasks BEGIN
+    INSERT INTO tasks_fts(rowid, title, description)
+    VALUES (new.id, new.title, new.description);
+END;
+
+CREATE TRIGGER IF NOT EXISTS tasks_ad AFTER DELETE ON tasks BEGIN
+    INSERT INTO tasks_fts(tasks_fts, rowid, title, description)
+    VALUES ('delete', old.id, old.title, old.description);
+END;
+
+CREATE TRIGGER IF NOT EXISTS tasks_au AFTER UPDATE ON tasks BEGIN
+    INSERT INTO tasks_fts(tasks_fts, rowid, title, description)
+    VALUES ('delete', old.id, old.title, old.description);
+    INSERT INTO tasks_fts(rowid, title, description)
+    VALUES (new.id, new.title, new.description);
+END;
 
 CREATE TABLE IF NOT EXISTS task_extraction_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -126,6 +160,53 @@ CREATE TABLE IF NOT EXISTS conversations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     role TEXT NOT NULL CHECK(role IN ('user', 'assistant', 'system')),
     content TEXT NOT NULL,
+    goal_id INTEGER REFERENCES goals(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS goals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    tier TEXT NOT NULL CHECK(tier IN ('long_term', 'mid_term', 'short_term')),
+    category TEXT DEFAULT '',
+    parent_id INTEGER,
+    status TEXT NOT NULL DEFAULT 'active'
+        CHECK(status IN ('active', 'paused', 'completed', 'abandoned')),
+    priority TEXT CHECK(priority IN ('high', 'medium', 'low')) DEFAULT 'medium',
+    target_date TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (parent_id) REFERENCES goals(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS goal_progress (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    goal_id INTEGER NOT NULL,
+    note TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'user',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (goal_id) REFERENCES goals(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS goal_strategies (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    goal_id INTEGER NOT NULL,
+    strategy_text TEXT NOT NULL,
+    action_items TEXT DEFAULT '[]',
+    suggested_objectives TEXT DEFAULT '[]',
+    status TEXT NOT NULL DEFAULT 'proposed'
+        CHECK(status IN ('proposed', 'accepted', 'rejected', 'superseded')),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (goal_id) REFERENCES goals(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS daily_reviews (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    review_date TEXT NOT NULL UNIQUE,
+    prompt_text TEXT NOT NULL,
+    user_response TEXT DEFAULT '',
+    summary TEXT DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 """
@@ -140,6 +221,11 @@ class Store:
         self._init_db()
 
     def _init_db(self):
+        # Run migrations for existing databases before creating schema
+        from giva.db.migrations import migrate
+
+        migrate(self.db_path)
+
         with self._conn() as conn:
             conn.executescript(SCHEMA_SQL)
             # Record schema version if not present
@@ -308,8 +394,8 @@ class Store:
         with self._conn() as conn:
             cursor = conn.execute(
                 """INSERT INTO tasks (title, description, source_type, source_id,
-                                      priority, due_date, status)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                                      priority, due_date, status, goal_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     task.title,
                     task.description,
@@ -318,6 +404,7 @@ class Store:
                     task.priority,
                     task.due_date.isoformat() if task.due_date else None,
                     task.status,
+                    task.goal_id,
                 ),
             )
             return cursor.lastrowid
@@ -356,6 +443,40 @@ class Store:
             )
             return cursor.rowcount > 0
 
+    def update_task(self, task_id: int, **kwargs) -> bool:
+        """Update task fields. Returns True if the task was found.
+
+        Allowed fields: title, description, priority, due_date, status, goal_id.
+        """
+        allowed = {"title", "description", "priority", "due_date", "status", "goal_id"}
+        fields = {k: v for k, v in kwargs.items() if k in allowed}
+        if not fields:
+            return False
+        if "due_date" in fields and fields["due_date"] is not None:
+            if isinstance(fields["due_date"], datetime):
+                fields["due_date"] = fields["due_date"].isoformat()
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        vals = list(fields.values()) + [task_id]
+        with self._conn() as conn:
+            cursor = conn.execute(
+                f"UPDATE tasks SET {sets}, updated_at = datetime('now') WHERE id = ?",
+                vals,
+            )
+            return cursor.rowcount > 0
+
+    def search_tasks(self, query: str, limit: int = 20) -> list[Task]:
+        """Search tasks using FTS5 full-text search."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT t.* FROM tasks t
+                   JOIN tasks_fts f ON t.id = f.rowid
+                   WHERE tasks_fts MATCH ?
+                   ORDER BY t.created_at DESC
+                   LIMIT ?""",
+                (query, limit),
+            ).fetchall()
+            return [self._task_from_row(dict(r)) for r in rows]
+
     @staticmethod
     def _task_from_row(row: dict) -> Task:
         return Task(
@@ -367,6 +488,7 @@ class Store:
             priority=row.get("priority", "medium"),
             due_date=datetime.fromisoformat(row["due_date"]) if row.get("due_date") else None,
             status=row["status"],
+            goal_id=row.get("goal_id"),
             created_at=datetime.fromisoformat(row["created_at"]) if row.get("created_at") else None,
         )
 
@@ -444,19 +566,41 @@ class Store:
 
     # --- Conversations ---
 
-    def add_message(self, role: str, content: str):
+    def add_message(
+        self, role: str, content: str, goal_id: Optional[int] = None
+    ):
         with self._conn() as conn:
             conn.execute(
-                "INSERT INTO conversations (role, content) VALUES (?, ?)", (role, content)
+                "INSERT INTO conversations (role, content, goal_id) VALUES (?, ?, ?)",
+                (role, content, goal_id),
             )
 
-    def get_recent_messages(self, limit: int = 20) -> list[dict]:
+    def get_recent_messages(
+        self, limit: int = 20, goal_id: Optional[int] = None
+    ) -> list[dict]:
+        """Get recent messages, scoped by goal_id.
+
+        When goal_id is None, returns only global (non-goal) messages.
+        When goal_id is set, returns only messages for that goal.
+        """
         with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT role, content, created_at FROM conversations ORDER BY id DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
+            if goal_id is not None:
+                rows = conn.execute(
+                    "SELECT role, content, created_at FROM conversations "
+                    "WHERE goal_id = ? ORDER BY id DESC LIMIT ?",
+                    (goal_id, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT role, content, created_at FROM conversations "
+                    "WHERE goal_id IS NULL ORDER BY id DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
             return [dict(r) for r in reversed(rows)]
+
+    def get_goal_messages(self, goal_id: int, limit: int = 50) -> list[dict]:
+        """Get conversation messages scoped to a specific goal."""
+        return self.get_recent_messages(limit=limit, goal_id=goal_id)
 
     # --- User Profile ---
 
@@ -518,17 +662,41 @@ class Store:
     # --- Reset ---
 
     def reset_all_data(self) -> None:
-        """Clear all user data for a full reset. Preserves the schema."""
-        with self._conn() as conn:
-            conn.execute("DELETE FROM emails")
-            conn.execute("DELETE FROM events")
-            conn.execute("DELETE FROM tasks")
-            conn.execute("DELETE FROM conversations")
-            conn.execute("DELETE FROM task_extraction_log")
-            conn.execute("DELETE FROM sync_state")
-            conn.execute("DELETE FROM user_profile")
-            # Rebuild FTS index after clearing emails
-            conn.execute("INSERT INTO emails_fts(emails_fts) VALUES('rebuild')")
+        """Clear all user data for a full reset. Preserves the schema.
+
+        If the DB is corrupt (malformed disk image), deletes the file
+        and recreates it from scratch.
+        """
+        try:
+            with self._conn() as conn:
+                conn.execute("DELETE FROM goal_progress")
+                conn.execute("DELETE FROM goal_strategies")
+                conn.execute("DELETE FROM daily_reviews")
+                conn.execute("DELETE FROM goals")
+                conn.execute("DELETE FROM emails")
+                conn.execute("DELETE FROM events")
+                conn.execute("DELETE FROM tasks")
+                conn.execute("DELETE FROM conversations")
+                conn.execute("DELETE FROM task_extraction_log")
+                conn.execute("DELETE FROM sync_state")
+                conn.execute("DELETE FROM user_profile")
+                # Rebuild FTS indexes after clearing data
+                conn.execute("INSERT INTO emails_fts(emails_fts) VALUES('rebuild')")
+                conn.execute("INSERT INTO tasks_fts(tasks_fts) VALUES('rebuild')")
+        except sqlite3.DatabaseError as e:
+            log.warning("DB corrupt during reset (%s) — deleting and recreating", e)
+            self._nuke_and_recreate()
+
+    def _nuke_and_recreate(self) -> None:
+        """Delete a corrupt DB file (+ WAL/SHM) and recreate from schema."""
+        for suffix in ("", "-wal", "-shm"):
+            p = Path(str(self.db_path) + suffix)
+            try:
+                p.unlink(missing_ok=True)
+            except OSError as e:
+                log.error("Failed to delete %s: %s", p, e)
+        log.info("Recreating DB at %s", self.db_path)
+        self._init_db()
 
     # --- Stats ---
 
@@ -539,6 +707,9 @@ class Store:
             tasks = conn.execute(
                 "SELECT COUNT(*) as c FROM tasks WHERE status = 'pending'"
             ).fetchone()["c"]
+            active_goals = conn.execute(
+                "SELECT COUNT(*) as c FROM goals WHERE status = 'active'"
+            ).fetchone()["c"]
             syncs = conn.execute(
                 "SELECT source, last_sync, last_count, last_status FROM sync_state"
             ).fetchall()
@@ -546,5 +717,216 @@ class Store:
                 "emails": emails,
                 "events": events,
                 "pending_tasks": tasks,
+                "active_goals": active_goals,
                 "syncs": [dict(s) for s in syncs],
             }
+
+    # --- Goals ---
+
+    def add_goal(self, goal: Goal) -> int:
+        """Insert a new goal. Returns the goal ID."""
+        row = goal.to_row()
+        with self._conn() as conn:
+            cursor = conn.execute(
+                """INSERT INTO goals (title, description, tier, category,
+                                     parent_id, status, priority, target_date)
+                   VALUES (:title, :description, :tier, :category,
+                           :parent_id, :status, :priority, :target_date)""",
+                row,
+            )
+            return cursor.lastrowid
+
+    def get_goal(self, goal_id: int) -> Optional[Goal]:
+        """Get a single goal by ID."""
+        with self._conn() as conn:
+            row = conn.execute("SELECT * FROM goals WHERE id = ?", (goal_id,)).fetchone()
+            return Goal.from_row(dict(row)) if row else None
+
+    def get_goals(
+        self,
+        tier: Optional[str] = None,
+        status: str = "active",
+        limit: int = 50,
+    ) -> list[Goal]:
+        """Get goals, optionally filtered by tier and status."""
+        with self._conn() as conn:
+            conditions = []
+            params: list = []
+            if status:
+                conditions.append("status = ?")
+                params.append(status)
+            if tier:
+                conditions.append("tier = ?")
+                params.append(tier)
+            where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+            order = (
+                "CASE tier WHEN 'long_term' THEN 0 WHEN 'mid_term' THEN 1 ELSE 2 END, "
+                "CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, "
+                "created_at DESC"
+            )
+            params.append(limit)
+            rows = conn.execute(
+                f"SELECT * FROM goals {where} ORDER BY {order} LIMIT ?", params
+            ).fetchall()
+            return [Goal.from_row(dict(r)) for r in rows]
+
+    def get_child_goals(self, parent_id: int) -> list[Goal]:
+        """Get child goals of a parent goal."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM goals WHERE parent_id = ? AND status = 'active' "
+                "ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END",
+                (parent_id,),
+            ).fetchall()
+            return [Goal.from_row(dict(r)) for r in rows]
+
+    def update_goal(self, goal_id: int, **kwargs) -> bool:
+        """Update goal fields. Returns True if goal was found."""
+        allowed = {
+            "title", "description", "tier", "category", "parent_id",
+            "status", "priority", "target_date",
+        }
+        fields = {k: v for k, v in kwargs.items() if k in allowed}
+        if not fields:
+            return False
+        if "target_date" in fields and fields["target_date"] is not None:
+            if isinstance(fields["target_date"], datetime):
+                fields["target_date"] = fields["target_date"].isoformat()
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        vals = list(fields.values()) + [goal_id]
+        with self._conn() as conn:
+            cursor = conn.execute(
+                f"UPDATE goals SET {sets}, updated_at = datetime('now') WHERE id = ?",
+                vals,
+            )
+            return cursor.rowcount > 0
+
+    def update_goal_status(self, goal_id: int, status: str) -> bool:
+        """Update a goal's status. Returns True if found."""
+        return self.update_goal(goal_id, status=status)
+
+    # --- Goal Progress ---
+
+    def add_goal_progress(self, goal_id: int, note: str, source: str = "user") -> int:
+        """Add a progress entry for a goal. Returns the entry ID."""
+        with self._conn() as conn:
+            cursor = conn.execute(
+                "INSERT INTO goal_progress (goal_id, note, source) VALUES (?, ?, ?)",
+                (goal_id, note, source),
+            )
+            return cursor.lastrowid
+
+    def get_goal_progress(self, goal_id: int, limit: int = 20) -> list[GoalProgress]:
+        """Get progress entries for a goal, most recent first."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM goal_progress WHERE goal_id = ? "
+                "ORDER BY id DESC LIMIT ?",
+                (goal_id, limit),
+            ).fetchall()
+            return [GoalProgress.from_row(dict(r)) for r in rows]
+
+    # --- Goal Strategies ---
+
+    def add_strategy(self, strategy: GoalStrategy) -> int:
+        """Insert a new strategy. Returns the strategy ID."""
+        row = strategy.to_row()
+        with self._conn() as conn:
+            cursor = conn.execute(
+                """INSERT INTO goal_strategies
+                   (goal_id, strategy_text, action_items, suggested_objectives, status)
+                   VALUES (:goal_id, :strategy_text, :action_items,
+                           :suggested_objectives, :status)""",
+                row,
+            )
+            return cursor.lastrowid
+
+    def get_strategies(
+        self, goal_id: int, status: Optional[str] = None
+    ) -> list[GoalStrategy]:
+        """Get strategies for a goal."""
+        with self._conn() as conn:
+            if status:
+                rows = conn.execute(
+                    "SELECT * FROM goal_strategies WHERE goal_id = ? AND status = ? "
+                    "ORDER BY created_at DESC",
+                    (goal_id, status),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM goal_strategies WHERE goal_id = ? "
+                    "ORDER BY created_at DESC",
+                    (goal_id,),
+                ).fetchall()
+            return [GoalStrategy.from_row(dict(r)) for r in rows]
+
+    def update_strategy_status(self, strategy_id: int, status: str) -> bool:
+        """Update a strategy's status. Returns True if found."""
+        with self._conn() as conn:
+            cursor = conn.execute(
+                "UPDATE goal_strategies SET status = ? WHERE id = ?",
+                (status, strategy_id),
+            )
+            return cursor.rowcount > 0
+
+    def get_strategy(self, strategy_id: int) -> Optional[GoalStrategy]:
+        """Get a single strategy by ID."""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM goal_strategies WHERE id = ?",
+                (strategy_id,),
+            ).fetchone()
+            return GoalStrategy.from_row(dict(row)) if row else None
+
+    # --- Daily Reviews ---
+
+    def add_daily_review(self, review: DailyReview) -> int:
+        """Insert a new daily review. Returns the review ID."""
+        with self._conn() as conn:
+            cursor = conn.execute(
+                """INSERT INTO daily_reviews (review_date, prompt_text, user_response, summary)
+                   VALUES (?, ?, ?, ?)""",
+                (review.review_date, review.prompt_text, review.user_response, review.summary),
+            )
+            return cursor.lastrowid
+
+    def get_daily_review(self, date: str) -> Optional[DailyReview]:
+        """Get the daily review for a specific date (YYYY-MM-DD)."""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM daily_reviews WHERE review_date = ?", (date,)
+            ).fetchone()
+            return DailyReview.from_row(dict(row)) if row else None
+
+    def get_recent_reviews(self, limit: int = 7) -> list[DailyReview]:
+        """Get recent daily reviews, most recent first."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM daily_reviews ORDER BY review_date DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return [DailyReview.from_row(dict(r)) for r in rows]
+
+    def update_daily_review(
+        self, review_id: int, user_response: str, summary: str
+    ) -> bool:
+        """Update a daily review with user response and summary."""
+        with self._conn() as conn:
+            cursor = conn.execute(
+                "UPDATE daily_reviews SET user_response = ?, summary = ? WHERE id = ?",
+                (user_response, summary, review_id),
+            )
+            return cursor.rowcount > 0
+
+    # --- Tasks for Goals ---
+
+    def get_tasks_for_goal(self, goal_id: int) -> list[Task]:
+        """Get all tasks linked to a specific goal."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM tasks WHERE goal_id = ? "
+                "ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, "
+                "created_at DESC",
+                (goal_id,),
+            ).fetchall()
+            return [self._task_from_row(dict(r)) for r in rows]

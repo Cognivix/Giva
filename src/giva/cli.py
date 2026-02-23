@@ -185,6 +185,18 @@ def _handle_command(cmd: str, store: Store, config: GivaConfig):
     elif command == "/reset":
         _cmd_reset(store)
 
+    elif command == "/goals":
+        _cmd_goals(args, store, config)
+
+    elif command == "/strategy":
+        _cmd_strategy(args, store, config)
+
+    elif command == "/plan":
+        _cmd_plan(args, store, config)
+
+    elif command == "/review":
+        _cmd_review(store, config)
+
     elif command == "/voice":
         _cmd_voice(args, config)
 
@@ -633,6 +645,488 @@ def _cmd_listen(store: Store, config: GivaConfig):
         log.exception("Listen failed")
 
 
+def _cmd_goals(args: str, store: Store, config: GivaConfig):
+    """Manage goals: list, add, detail, infer, edit, progress, status changes."""
+    parts = args.strip().split(maxsplit=1)
+    action = parts[0].lower() if parts else ""
+    rest = parts[1] if len(parts) > 1 else ""
+
+    if not action:
+        # /goals — list active goals
+        _show_goals(store)
+        return
+
+    if action == "add":
+        _goals_add(rest, store)
+    elif action == "infer":
+        _goals_infer(store, config)
+    elif action == "detail" and rest:
+        _goals_detail(rest, store)
+    elif action in ("done", "pause", "abandon") and rest:
+        _goals_status_change(action, rest, store)
+    elif action == "progress" and rest:
+        _goals_progress(rest, store)
+    elif action == "edit" and rest:
+        _goals_edit(rest, store)
+    else:
+        console.print(
+            "Usage: /goals [add|infer|detail N|done N|pause N|abandon N"
+            "|progress N \"note\"|edit N]",
+            style="yellow",
+        )
+
+
+def _show_goals(store: Store):
+    """Display active goals in a rich table."""
+    goals = store.get_goals(status="active")
+    if not goals:
+        console.print("No active goals. Use /goals add or /goals infer.", style="dim")
+        return
+
+    table = Table(title="Active Goals")
+    table.add_column("ID", style="dim", width=4)
+    table.add_column("Tier", width=10)
+    table.add_column("Pri", width=4)
+    table.add_column("Title", style="white", min_width=30)
+    table.add_column("Category", style="cyan", width=12)
+    table.add_column("Target", style="dim", width=12)
+    table.add_column("Children", style="dim", width=8)
+
+    tier_styles = {"long_term": "bold blue", "mid_term": "cyan", "short_term": "white"}
+    priority_styles = {"high": "bold red", "medium": "yellow", "low": "dim"}
+
+    for g in goals:
+        children = store.get_child_goals(g.id)
+        tier_label = g.tier.replace("_", "-")
+        tier_style = tier_styles.get(g.tier, "white")
+        pri_style = priority_styles.get(g.priority, "white")
+        target = g.target_date.strftime("%Y-%m-%d") if g.target_date else "-"
+
+        table.add_row(
+            str(g.id),
+            f"[{tier_style}]{tier_label}[/{tier_style}]",
+            f"[{pri_style}]{g.priority[0].upper()}[/{pri_style}]",
+            g.title,
+            g.category or "-",
+            target,
+            str(len(children)) if children else "-",
+        )
+
+    console.print(table)
+
+
+def _goals_add(args: str, store: Store):
+    """Interactive goal creation."""
+    from giva.db.models import Goal
+    from datetime import datetime
+
+    try:
+        title = input("Goal title: ").strip()
+        if not title:
+            console.print("Cancelled.", style="dim")
+            return
+
+        console.print("Tier: (1) long-term  (2) mid-term  (3) short-term")
+        tier_choice = input("Tier [1]: ").strip()
+        tier = {"1": "long_term", "2": "mid_term", "3": "short_term"}.get(
+            tier_choice, "long_term"
+        )
+
+        category = input("Category (career/personal/health/financial/networking/learning): ").strip()
+
+        console.print("Priority: (1) high  (2) medium  (3) low")
+        pri_choice = input("Priority [2]: ").strip()
+        priority = {"1": "high", "2": "medium", "3": "low"}.get(pri_choice, "medium")
+
+        target_str = input("Target date (YYYY-MM-DD, or blank): ").strip()
+        target_date = None
+        if target_str:
+            try:
+                target_date = datetime.fromisoformat(target_str)
+            except ValueError:
+                console.print("Invalid date format, skipping.", style="yellow")
+
+        parent_str = input("Parent goal ID (or blank): ").strip()
+        parent_id = int(parent_str) if parent_str.isdigit() else None
+
+        description = input("Description (optional): ").strip()
+
+    except (EOFError, KeyboardInterrupt):
+        console.print("\nCancelled.", style="dim")
+        return
+
+    goal = Goal(
+        title=title, tier=tier, description=description,
+        category=category, priority=priority,
+        target_date=target_date, parent_id=parent_id,
+    )
+    goal_id = store.add_goal(goal)
+    console.print(f"Goal #{goal_id} created: {title}", style="bold green")
+
+
+def _goals_infer(store: Store, config: GivaConfig):
+    """Run LLM goal inference and present for confirmation."""
+    from giva.intelligence.goals import infer_goals
+    from giva.db.models import Goal
+
+    console.print("Analyzing your data to infer goals...", style="dim")
+    try:
+        inferred = infer_goals(store, config)
+    except Exception as e:
+        console.print(f"Goal inference error: {e}", style="red")
+        return
+
+    if not inferred:
+        console.print("No goals inferred. More data may be needed.", style="dim")
+        return
+
+    console.print(f"\nInferred {len(inferred)} potential goal(s):\n", style="bold")
+    for i, g in enumerate(inferred, 1):
+        tier_label = g.get("tier", "long_term").replace("_", "-")
+        console.print(
+            f"  {i}. [{tier_label}] {g.get('title', '?')} "
+            f"({g.get('category', 'general')})",
+            style="cyan",
+        )
+        if g.get("description"):
+            console.print(f"     {g['description']}", style="dim")
+
+    try:
+        answer = input("\nAccept these goals? [y/N/select numbers e.g. 1,3] ").strip()
+    except (EOFError, KeyboardInterrupt):
+        console.print("\nCancelled.", style="dim")
+        return
+
+    if answer.lower() in ("y", "yes"):
+        indices = list(range(len(inferred)))
+    elif answer.lower() in ("n", "no", ""):
+        console.print("Goals discarded.", style="dim")
+        return
+    else:
+        try:
+            indices = [int(x.strip()) - 1 for x in answer.split(",")]
+        except ValueError:
+            console.print("Invalid selection.", style="red")
+            return
+
+    count = 0
+    for idx in indices:
+        if 0 <= idx < len(inferred):
+            g = inferred[idx]
+            from datetime import datetime
+
+            target = None
+            if g.get("target_date"):
+                try:
+                    target = datetime.fromisoformat(g["target_date"])
+                except (ValueError, TypeError):
+                    pass
+
+            goal = Goal(
+                title=g.get("title", ""),
+                tier=g.get("tier", "long_term"),
+                category=g.get("category", ""),
+                description=g.get("description", ""),
+                priority=g.get("priority", "medium"),
+                target_date=target,
+            )
+            store.add_goal(goal)
+            count += 1
+
+    console.print(f"Created {count} goal(s).", style="bold green")
+
+
+def _goals_detail(args: str, store: Store):
+    """Show detailed view of a specific goal."""
+    try:
+        goal_id = int(args.strip())
+    except ValueError:
+        console.print(f"Invalid goal ID: {args}", style="red")
+        return
+
+    goal = store.get_goal(goal_id)
+    if not goal:
+        console.print(f"Goal #{goal_id} not found.", style="red")
+        return
+
+    # Build detail panel
+    lines = []
+    lines.append(f"[bold]{goal.title}[/bold]")
+    lines.append(f"Tier: {goal.tier.replace('_', '-')} | Category: {goal.category or 'N/A'}")
+    lines.append(f"Status: {goal.status} | Priority: {goal.priority}")
+    if goal.target_date:
+        lines.append(f"Target: {goal.target_date.strftime('%Y-%m-%d')}")
+    if goal.description:
+        lines.append(f"\n{goal.description}")
+
+    # Children
+    children = store.get_child_goals(goal_id)
+    if children:
+        lines.append(f"\n[bold]Sub-objectives ({len(children)}):[/bold]")
+        for c in children:
+            lines.append(f"  - [{c.priority[0].upper()}] {c.title} ({c.status})")
+
+    # Strategies
+    strategies = store.get_strategies(goal_id)
+    if strategies:
+        lines.append(f"\n[bold]Strategies ({len(strategies)}):[/bold]")
+        for s in strategies:
+            status_style = "green" if s.status == "accepted" else "dim"
+            lines.append(
+                f"  [{status_style}][{s.status}][/{status_style}] {s.strategy_text[:100]}"
+            )
+
+    # Tasks
+    tasks = store.get_tasks_for_goal(goal_id)
+    if tasks:
+        pending = [t for t in tasks if t.status == "pending"]
+        done = [t for t in tasks if t.status == "done"]
+        lines.append(f"\n[bold]Tasks ({len(done)} done, {len(pending)} pending):[/bold]")
+        for t in tasks[:10]:
+            status_mark = "[green]✓[/green]" if t.status == "done" else "○"
+            lines.append(f"  {status_mark} [{t.priority[0].upper()}] {t.title}")
+
+    # Progress
+    progress = store.get_goal_progress(goal_id, limit=5)
+    if progress:
+        lines.append("\n[bold]Recent Progress:[/bold]")
+        for p in progress:
+            date_str = p.created_at.strftime("%b %d") if p.created_at else "?"
+            lines.append(f"  > {date_str} [{p.source}]: {p.note}")
+
+    console.print(Panel("\n".join(lines), title=f"Goal #{goal_id}", border_style="cyan"))
+
+
+def _goals_status_change(action: str, args: str, store: Store):
+    """Change goal status: done, pause, abandon."""
+    try:
+        goal_id = int(args.strip())
+    except ValueError:
+        console.print(f"Invalid goal ID: {args}", style="red")
+        return
+
+    status_map = {"done": "completed", "pause": "paused", "abandon": "abandoned"}
+    new_status = status_map.get(action, action)
+
+    if store.update_goal_status(goal_id, new_status):
+        console.print(f"Goal #{goal_id} marked as {new_status}.", style="green")
+    else:
+        console.print(f"Goal #{goal_id} not found.", style="red")
+
+
+def _goals_progress(args: str, store: Store):
+    """Add a progress note: /goals progress N "note"."""
+    import re as _re
+
+    match = _re.match(r'(\d+)\s+["\']?(.+?)["\']?\s*$', args)
+    if not match:
+        console.print('Usage: /goals progress N "progress note"', style="yellow")
+        return
+
+    goal_id = int(match.group(1))
+    note = match.group(2)
+
+    goal = store.get_goal(goal_id)
+    if not goal:
+        console.print(f"Goal #{goal_id} not found.", style="red")
+        return
+
+    store.add_goal_progress(goal_id, note, "user")
+    console.print(f"Progress added to goal #{goal_id}.", style="green")
+
+
+def _goals_edit(args: str, store: Store):
+    """Interactive edit of a goal."""
+    try:
+        goal_id = int(args.strip())
+    except ValueError:
+        console.print(f"Invalid goal ID: {args}", style="red")
+        return
+
+    goal = store.get_goal(goal_id)
+    if not goal:
+        console.print(f"Goal #{goal_id} not found.", style="red")
+        return
+
+    console.print(f"Editing goal #{goal_id}: {goal.title}", style="bold")
+    console.print("(Press Enter to keep current value)\n", style="dim")
+
+    try:
+        title = input(f"Title [{goal.title}]: ").strip() or goal.title
+        description = input(f"Description [{goal.description or 'N/A'}]: ").strip()
+        if not description:
+            description = goal.description
+        category = input(f"Category [{goal.category or 'N/A'}]: ").strip()
+        if not category:
+            category = goal.category
+        target_str = input(
+            f"Target date [{goal.target_date.strftime('%Y-%m-%d') if goal.target_date else 'N/A'}]: "
+        ).strip()
+    except (EOFError, KeyboardInterrupt):
+        console.print("\nCancelled.", style="dim")
+        return
+
+    updates = {}
+    if title != goal.title:
+        updates["title"] = title
+    if description != goal.description:
+        updates["description"] = description
+    if category != goal.category:
+        updates["category"] = category
+    if target_str:
+        updates["target_date"] = target_str
+
+    if updates:
+        store.update_goal(goal_id, **updates)
+        console.print(f"Goal #{goal_id} updated.", style="green")
+    else:
+        console.print("No changes.", style="dim")
+
+
+def _cmd_strategy(args: str, store: Store, config: GivaConfig):
+    """Generate strategy for a goal: /strategy N."""
+    if not args.strip():
+        console.print("Usage: /strategy <goal_id>", style="yellow")
+        return
+
+    try:
+        goal_id = int(args.strip())
+    except ValueError:
+        console.print(f"Invalid goal ID: {args}", style="red")
+        return
+
+    from giva.intelligence.goals import generate_strategy
+
+    console.print()
+    full_text = []
+    try:
+        with Live(console=console, refresh_per_second=8) as live:
+            for token in generate_strategy(goal_id, store, config):
+                full_text.append(token)
+                live.update(Markdown("".join(full_text)))
+    except Exception as e:
+        console.print(f"Strategy error: {e}", style="red")
+        return
+    console.print()
+
+    # Offer to accept
+    strategies = store.get_strategies(goal_id, status="proposed")
+    if strategies:
+        try:
+            answer = input("Accept this strategy? [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return
+        if answer in ("y", "yes"):
+            # Supersede old accepted strategies
+            for s in store.get_strategies(goal_id, status="accepted"):
+                store.update_strategy_status(s.id, "superseded")
+            store.update_strategy_status(strategies[0].id, "accepted")
+            console.print("Strategy accepted.", style="bold green")
+        else:
+            console.print("Strategy kept as proposed.", style="dim")
+
+
+def _cmd_plan(args: str, store: Store, config: GivaConfig):
+    """Generate or review tactical plans: /plan N or /plan review."""
+    if not args.strip():
+        console.print("Usage: /plan <objective_id> | /plan review", style="yellow")
+        return
+
+    if args.strip().lower() == "review":
+        _plan_review(store, config)
+        return
+
+    try:
+        objective_id = int(args.strip())
+    except ValueError:
+        console.print(f"Invalid objective ID: {args}", style="red")
+        return
+
+    from giva.intelligence.goals import generate_tactical_plan, accept_plan
+
+    console.print()
+    full_text = []
+    try:
+        with Live(console=console, refresh_per_second=8) as live:
+            for token in generate_tactical_plan(objective_id, store, config):
+                full_text.append(token)
+                live.update(Markdown("".join(full_text)))
+    except Exception as e:
+        console.print(f"Plan error: {e}", style="red")
+        return
+    console.print()
+
+    # Offer to accept and create tasks
+    plan_json = "".join(full_text)
+    try:
+        answer = input("Create tasks from this plan? [y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return
+
+    if answer in ("y", "yes"):
+        count = accept_plan(plan_json, objective_id, store)
+        if count > 0:
+            console.print(f"Created {count} task(s) linked to goal #{objective_id}.", style="bold green")
+        else:
+            console.print("Could not parse tasks from plan.", style="yellow")
+    else:
+        console.print("Plan noted but no tasks created.", style="dim")
+
+
+def _plan_review(store: Store, config: GivaConfig):
+    """Review status of active tactical plans."""
+    from giva.intelligence.daily_review import review_tactical_plans
+
+    console.print()
+    full_text = []
+    try:
+        with Live(console=console, refresh_per_second=8) as live:
+            for token in review_tactical_plans(store, config):
+                full_text.append(token)
+                live.update(Markdown("".join(full_text)))
+    except Exception as e:
+        console.print(f"Plan review error: {e}", style="red")
+    console.print()
+
+
+def _cmd_review(store: Store, config: GivaConfig):
+    """Run daily review: /review."""
+    from giva.intelligence.daily_review import generate_review, save_review_response
+
+    console.print()
+    full_text = []
+    review_id = None
+    try:
+        gen = generate_review(store, config)
+        with Live(console=console, refresh_per_second=8) as live:
+            for token in gen:
+                full_text.append(token)
+                live.update(Markdown("".join(full_text)))
+        # Try to get the return value (review_id)
+        try:
+            review_id = gen.send(None)
+        except StopIteration as e:
+            review_id = e.value
+    except Exception as e:
+        console.print(f"Review error: {e}", style="red")
+        return
+    console.print()
+
+    # Prompt for user response
+    try:
+        console.print("How did your day go? (type your response, or Enter to skip)", style="bold cyan")
+        response = input("Response> ").strip()
+    except (EOFError, KeyboardInterrupt):
+        console.print("\nReview saved without response.", style="dim")
+        return
+
+    if response and review_id:
+        summary = save_review_response(review_id, response, store, config)
+        console.print(f"\nSummary: {summary}", style="green")
+    elif not response:
+        console.print("Review saved without response.", style="dim")
+
+
 def _cmd_help():
     """Show help."""
     help_text = """
@@ -650,6 +1144,17 @@ def _cmd_help():
 | `/profile` | Show your auto-detected user profile |
 | `/onboard` | Run (or re-run) the personalization interview |
 | `/reset` | Clear all data and start fresh |
+| `/goals` | List active goals |
+| `/goals add` | Interactive goal creation |
+| `/goals infer` | Infer goals from your data via LLM |
+| `/goals detail N` | Show goal N with strategies, tasks, progress |
+| `/goals done\\|pause\\|abandon N` | Update goal status |
+| `/goals progress N "note"` | Add a progress note to goal N |
+| `/goals edit N` | Edit goal title/description/category/target |
+| `/strategy N` | Generate strategy for goal N |
+| `/plan N` | Generate tactical plan for objective N |
+| `/plan review` | Review status of active tactical plans |
+| `/review` | Run daily review |
 | `/voice` | Toggle voice mode (TTS on responses) |
 | `/voice on\\|off` | Explicitly enable/disable voice mode |
 | `/listen` | Record from mic, transcribe, and query |

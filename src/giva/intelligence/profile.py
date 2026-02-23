@@ -139,6 +139,25 @@ def get_profile_summary(store: Store) -> str:
         if pd.get("preferences"):
             lines.append(f"Preferences: {', '.join(pd['preferences'])}")
 
+    # Goal counts
+    try:
+        goals = store.get_goals(status="active")
+        if goals:
+            by_tier: dict[str, int] = {}
+            for g in goals:
+                by_tier[g.tier] = by_tier.get(g.tier, 0) + 1
+            parts = []
+            if by_tier.get("long_term"):
+                parts.append(f"{by_tier['long_term']} long-term")
+            if by_tier.get("mid_term"):
+                parts.append(f"{by_tier['mid_term']} mid-term")
+            if by_tier.get("short_term"):
+                parts.append(f"{by_tier['short_term']} short-term")
+            if parts:
+                lines.append(f"Active goals: {', '.join(parts)}")
+    except Exception:
+        pass
+
     return "\n".join(lines)
 
 

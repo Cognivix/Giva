@@ -26,6 +26,16 @@ temperature = 0.7
 top_p = 0.9
 context_budget_tokens = 8000
 
+[goals]
+# Background strategy generation interval (hours)
+strategy_interval_hours = 6
+# Hour of day (0-23) to trigger daily review prompt
+daily_review_hour = 18
+# Max strategies to generate per background run
+max_strategies_per_run = 1
+# Tactical plan horizon in days
+plan_horizon_days = 7
+
 [voice]
 # Voice mode: TTS (text-to-speech) and STT (speech-to-text)
 enabled = false

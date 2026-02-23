@@ -47,6 +47,14 @@ class VoiceConfig:
 
 
 @dataclass(frozen=True)
+class GoalsConfig:
+    strategy_interval_hours: int = 6
+    daily_review_hour: int = 18
+    max_strategies_per_run: int = 1
+    plan_horizon_days: int = 7
+
+
+@dataclass(frozen=True)
 class GivaConfig:
     data_dir: Path = field(default_factory=lambda: Path("~/.local/share/giva").expanduser())
     log_level: str = "INFO"
@@ -54,6 +62,7 @@ class GivaConfig:
     calendar: CalendarConfig = field(default_factory=CalendarConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     voice: VoiceConfig = field(default_factory=VoiceConfig)
+    goals: GoalsConfig = field(default_factory=GoalsConfig)
 
     @property
     def db_path(self) -> Path:
@@ -94,6 +103,8 @@ def _apply_env(raw: dict) -> dict:
         "GIVA_VOICE_ENABLED": ("voice", "enabled"),
         "GIVA_VOICE_TTS_MODEL": ("voice", "tts_model"),
         "GIVA_VOICE_STT_MODEL": ("voice", "stt_model"),
+        "GIVA_GOALS_STRATEGY_INTERVAL": ("goals", "strategy_interval_hours"),
+        "GIVA_GOALS_REVIEW_HOUR": ("goals", "daily_review_hour"),
     }
     for env_key, path in env_map.items():
         val = os.environ.get(env_key)
@@ -213,5 +224,15 @@ def load_config() -> GivaConfig:
             tts_voice=raw.get("voice", {}).get("tts_voice", "af_heart"),
             stt_model=raw.get("voice", {}).get("stt_model", "distil-medium.en"),
             sample_rate=int(raw.get("voice", {}).get("sample_rate", 24000)),
+        ),
+        goals=GoalsConfig(
+            strategy_interval_hours=int(
+                raw.get("goals", {}).get("strategy_interval_hours", 6)
+            ),
+            daily_review_hour=int(raw.get("goals", {}).get("daily_review_hour", 18)),
+            max_strategies_per_run=int(
+                raw.get("goals", {}).get("max_strategies_per_run", 1)
+            ),
+            plan_horizon_days=int(raw.get("goals", {}).get("plan_horizon_days", 7)),
         ),
     )

@@ -18,10 +18,10 @@
 // part of the Markov chain — they overlay it until the action completes and
 // the server pushes a new phase.
 
-import os
+import AppKit
 import SwiftUI
 
-private let log = Logger(subsystem: "com.giva.app", category: "Session")
+private let log = Log.make(category: "Session")
 
 enum AppTab: String, CaseIterable {
     case chat = "Chat"
@@ -432,12 +432,29 @@ class GivaViewModel: ObservableObject {
         isRecording = true
 
         Task {
-            guard let audioData = await audioService.recordAudio(duration: 5.0) else {
+            let audioData: Data?
+            do {
+                audioData = try await audioService.recordAudio(duration: 5.0)
+            } catch is AudioPlaybackService.RecordingError {
                 isRecording = false
-                errorMessage = "Could not record audio. Check microphone permissions."
+                errorMessage = "Microphone access denied. Opening Privacy Settings…"
+                // Open System Settings → Privacy → Microphone
+                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
+                    NSWorkspace.shared.open(url)
+                }
+                return
+            } catch {
+                isRecording = false
+                errorMessage = "Could not record audio."
                 return
             }
+
             isRecording = false
+
+            guard let audioData, !audioData.isEmpty else {
+                errorMessage = "No audio recorded. Try again."
+                return
+            }
 
             guard let api = apiService else {
                 errorMessage = "Server is not running."
@@ -609,8 +626,8 @@ class GivaViewModel: ObservableObject {
         streamTask = nil
         serverManager.markOffline()
 
-        // 2. Restart the daemon via launchctl
-        bootstrap.restartDaemon()
+        // 2. Restart the daemon via launchctl (waits for port to free)
+        await bootstrap.restartDaemon()
 
         // 3. Wait for server to come back
         serverManager.markConnecting()
@@ -650,7 +667,13 @@ class GivaViewModel: ObservableObject {
 
         // 2. Tell server to wipe DB + roll checkpoint to 'unknown'
         if let api = apiService {
-            do { _ = try await api.triggerReset() } catch { /* server may restart */ }
+            do {
+                _ = try await api.triggerReset()
+                log.info("Reset: server API succeeded")
+            } catch {
+                log.error("Reset: server API failed — \(error.localizedDescription)")
+                // Proceed anyway — daemon restart will pick up a clean state
+            }
         }
 
         // 3. Clear local UI state

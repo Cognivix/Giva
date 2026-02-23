@@ -126,17 +126,51 @@ def test_filter_hides_tag():
     assert done is False
 
 
-def test_filter_done_when_tag_closes():
-    """Should signal done when closing tag is found."""
+def test_filter_tag_block_no_text_after():
+    """After closing tag with no following text, should return None."""
     # First call yields "Hi"
     visible, done = _filter_visible_token(["Hi"], [])
     assert visible == "Hi"
     assert done is False
 
-    # With full text including closing tag
+    # With full text including closing tag — nothing after it
     all_tokens = ["Hi<profile_update>{}</profile_update>"]
     visible2, done2 = _filter_visible_token(all_tokens, ["Hi"])
-    assert done2 is True
+    assert visible2 is None
+    assert done2 is False
+
+
+def test_filter_text_after_tag():
+    """Should yield visible text around the tag block, skipping the tag."""
+    tokens = ["Hello<profile_update>{}</profile_update>\nNext question?"]
+    # All visible text returned at once (before tag + after tag)
+    visible, done = _filter_visible_token(tokens, [])
+    assert visible == "Hello\nNext question?"
+    assert done is False
+
+    # Incremental: tag block arrives mid-stream
+    t1 = ["Hello"]
+    v1, _ = _filter_visible_token(t1, [])
+    assert v1 == "Hello"
+
+    # Tag arrives but isn't closed yet — hold back
+    t2 = ["Hello", "<profile_update>{\"role\":"]
+    v2, _ = _filter_visible_token(t2, ["Hello"])
+    assert v2 is None
+
+    # Tag closes, text follows
+    t3 = ["Hello", "<profile_update>{}</profile_update>", " Next?"]
+    v3, _ = _filter_visible_token(t3, ["Hello"])
+    assert v3 == " Next?"
+
+
+def test_filter_tag_first_then_text():
+    """When the tag block comes first, should yield text after it."""
+    tokens = ["<profile_update>{}</profile_update>Here is my question."]
+    # First call: tag is at start, text comes after — yield it
+    visible, done = _filter_visible_token(tokens, [])
+    assert visible == "Here is my question."
+    assert done is False
 
 
 def test_filter_inside_tag_no_close():

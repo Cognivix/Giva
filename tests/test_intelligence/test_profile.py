@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from giva.db.models import Email, Event, UserProfile
+from giva.db.models import Email, UserProfile
 from giva.intelligence.profile import (
     _compute_active_hours,
     _compute_avg_response_time,

@@ -215,6 +215,7 @@ def write_plist() -> None:
         "KeepAlive": {
             "SuccessfulExit": False,
         },
+        "ExitTimeOut": 5,  # SIGKILL after 5s if SIGTERM doesn't terminate
         "StandardOutPath": str(log_dir / "server.log"),
         "StandardErrorPath": str(log_dir / "server.err"),
         "EnvironmentVariables": {

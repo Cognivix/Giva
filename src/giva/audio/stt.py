@@ -2,11 +2,17 @@
 
 Provides mic recording via sounddevice and transcription via Whisper on Apple Silicon.
 Lazy-loads the model on first use.
+
+NOTE: LightningWhisperMLX hardcodes relative paths (``./mlx_models/``) for model
+downloads and loading.  When running under launchd the cwd is ``/`` (read-only),
+so we ``os.chdir`` to the Giva data directory before any Whisper call.  All Whisper
+calls are serialised by ``_voice_lock`` in ``server.py``, so this is safe.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import tempfile
 from pathlib import Path
 
@@ -15,6 +21,9 @@ import numpy as np
 from giva.config import VoiceConfig
 
 log = logging.getLogger(__name__)
+
+# Directory where LightningWhisperMLX will store ``./mlx_models/``.
+_WHISPER_HOME = Path("~/.local/share/giva").expanduser()
 
 
 class STTEngine:
@@ -31,6 +40,11 @@ class STTEngine:
         log.info("Loading STT model %s ...", self._config.stt_model)
         from lightning_whisper_mlx import LightningWhisperMLX
 
+        # LightningWhisperMLX downloads to ./mlx_models/ relative to cwd.
+        # Under launchd cwd is "/" (read-only), so we chdir first.
+        _WHISPER_HOME.mkdir(parents=True, exist_ok=True)
+        os.chdir(_WHISPER_HOME)
+
         self._whisper = LightningWhisperMLX(
             model=self._config.stt_model,
             batch_size=12,
@@ -40,6 +54,8 @@ class STTEngine:
     def transcribe_file(self, path: str | Path) -> str:
         """Transcribe an audio file (WAV, MP3, etc.) to text."""
         self._ensure_loaded()
+        # Library resolves model weights via ./mlx_models/ relative to cwd.
+        os.chdir(_WHISPER_HOME)
         result = self._whisper.transcribe(str(path))
         return result.get("text", "").strip()
 

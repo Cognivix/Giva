@@ -10,6 +10,8 @@
 
 import Foundation
 
+private let log = Log.make(category: "Bootstrap")
+
 /// Setup script progress (JSON lines from giva-setup.py stdout)
 struct SetupProgress: Codable {
     let step: String
@@ -155,7 +157,7 @@ class BootstrapManager: ObservableObject {
             let response = try await api.triggerUpgrade(projectRoot: projectRoot)
             if response.restartRequired {
                 displayMessage = "Restarting server..."
-                restartDaemon()
+                await restartDaemon()
                 isServerReachable = false
                 apiService = nil
                 serverStatus = nil
@@ -326,22 +328,60 @@ class BootstrapManager: ObservableObject {
     }
 
     /// Bootout the service only if it is currently loaded.
+    /// Waits for the old process to release port 7483 before returning.
     /// Returns true if the service was booted out (or wasn't loaded).
-    private func bootoutIfLoaded() -> Bool {
-        guard isServiceLoaded() else { return true }
-
+    ///
+    /// NOTE: This method blocks the calling thread (Process.waitUntilExit + port poll).
+    /// Call from a background queue, not the main thread.
+    private nonisolated func bootoutIfLoaded() -> Bool {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        proc.arguments = ["bootout", "gui/\(getuid())/\(Self.launchdLabel)"]
+        proc.arguments = ["print", "gui/\(getuid())/\(Self.launchdLabel)"]
         proc.standardOutput = FileHandle.nullDevice
         proc.standardError = FileHandle.nullDevice
         try? proc.run()
         proc.waitUntilExit()
+        guard proc.terminationStatus == 0 else { return true } // not loaded
 
-        // Give launchd a moment to clean up
-        Thread.sleep(forTimeInterval: 0.5)
+        let bootout = Process()
+        bootout.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        bootout.arguments = ["bootout", "gui/\(getuid())/\(Self.launchdLabel)"]
+        bootout.standardOutput = FileHandle.nullDevice
+        bootout.standardError = FileHandle.nullDevice
+        try? bootout.run()
+        bootout.waitUntilExit()
 
-        return proc.terminationStatus == 0
+        // Wait for the old process to release port 7483 (up to 15s).
+        // launchctl bootout is async w.r.t. process termination — the CLI
+        // returns immediately, but uvicorn may take seconds to finish its
+        // shutdown (close SSE connections, release MLX models, etc.).
+        // Starting the new process before the port is free → EADDRINUSE.
+        let deadline = Date().addingTimeInterval(15.0)
+        while Date() < deadline {
+            if !Self.isPortInUse(7483) { return true }
+            Thread.sleep(forTimeInterval: 0.25)
+        }
+
+        return true // proceed anyway — launchd will retry on failure
+    }
+
+    /// Check if a TCP port is currently in use on localhost.
+    private nonisolated static func isPortInUse(_ port: UInt16) -> Bool {
+        let sock = socket(AF_INET, SOCK_STREAM, 0)
+        guard sock >= 0 else { return false }
+        defer { Darwin.close(sock) }
+
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = port.bigEndian
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+
+        let result = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { ptr in
+                Darwin.bind(sock, ptr, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        return result != 0  // bind fails → port in use
     }
 
     private func ensureLaunchdLoaded() {
@@ -381,9 +421,45 @@ class BootstrapManager: ObservableObject {
         }
     }
 
-    private func restartDaemon() {
-        _ = bootoutIfLoaded()
-        ensureLaunchdLoaded()
+    /// Restart the launchd daemon (bootout + re-load).
+    /// Public so ViewModel can trigger a restart without a full upgrade.
+    /// Runs blocking launchctl + port-polling on a background queue to keep
+    /// the UI responsive.
+    func restartDaemon() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global(qos: .userInitiated).async {
+                _ = self.bootoutIfLoaded()
+                DispatchQueue.main.async {
+                    self.ensureLaunchdLoaded()
+                    continuation.resume()
+                }
+            }
+        }
+    }
+
+    /// Full reset: cancel observation, restart daemon, re-enter the bootstrap
+    /// observation loop from scratch.  The server-side state machine drives
+    /// the UI through model selection → sync → onboarding → operational.
+    func resetAndRestart() async {
+        // Cancel existing observation
+        observeTask?.cancel()
+        observeTask = nil
+        pollTask?.cancel()
+        pollTask = nil
+
+        // Reset published state so UI transitions away from MainPanelView
+        isReady = false
+        isServerReachable = false
+        serverStatus = nil
+        apiService = nil
+        displayMessage = "Restarting..."
+        errorMessage = nil
+        downloadProgress = [:]
+
+        // Restart daemon and re-enter the full start() flow
+        await restartDaemon()
+        isSettingUp = false  // allow start() guard to pass
+        await start()
     }
 
     // MARK: - Phase 3: Health Check
@@ -417,21 +493,12 @@ class BootstrapManager: ObservableObject {
             errorMessage = error
         }
 
-        // Extract download progress from steps
-        var newProgress: [String: BootstrapStepProgress] = [:]
-        for step in status.steps {
-            if let progress = step.progress {
-                for (modelId, info) in progress {
-                    newProgress[modelId] = info
-                }
-            }
-        }
-        if !newProgress.isEmpty {
-            downloadProgress = newProgress
-            // Debug: log every progress update
-            for (modelId, info) in newProgress {
+        // Extract download progress from the flat progress dict
+        if let progress = status.progress, !progress.isEmpty {
+            downloadProgress = progress
+            for (modelId, info) in progress {
                 let short = modelId.replacingOccurrences(of: "mlx-community/", with: "")
-                print("[Bootstrap:\(source)] \(short): \(String(format: "%.1f", info.percent))% (\(Int(info.downloadedMb ?? 0)) MB)")
+                log.debug("[\(source)] \(short): \(String(format: "%.1f", info.percent))% (\(Int(info.downloadedMb ?? 0)) MB)")
             }
         }
     }
@@ -439,18 +506,18 @@ class BootstrapManager: ObservableObject {
     private func observeBootstrapStream() {
         observeTask?.cancel()
         guard let api = apiService else {
-            print("[Bootstrap:SSE] No apiService — cannot observe")
+            log.warning("No apiService — cannot observe SSE")
             return
         }
 
-        print("[Bootstrap:SSE] Starting SSE observation")
+        log.info("Starting SSE observation")
         observeTask = Task {
             var retryDelay: UInt64 = 2_000_000_000  // Start at 2s
             var connectionCount = 0
 
             while !Task.isCancelled && !isReady {
                 connectionCount += 1
-                print("[Bootstrap:SSE] Connecting (attempt \(connectionCount))...")
+                log.info("SSE connecting (attempt \(connectionCount))")
                 do {
                     let stream = api.streamBootstrapStatus()
                     retryDelay = 2_000_000_000  // Reset on successful connection
@@ -458,7 +525,7 @@ class BootstrapManager: ObservableObject {
 
                     for try await event in stream {
                         guard !Task.isCancelled else {
-                            print("[Bootstrap:SSE] Task cancelled during stream")
+                            log.info("SSE task cancelled during stream")
                             return
                         }
                         eventCount += 1
@@ -467,23 +534,23 @@ class BootstrapManager: ObservableObject {
                            let status = try? JSONDecoder().decode(BootstrapStatusResponse.self, from: data) {
                             applyServerStatus(status, source: "SSE")
                         } else {
-                            print("[Bootstrap:SSE] Failed to decode event #\(eventCount): \(event.event)")
+                            log.warning("SSE failed to decode event #\(eventCount): \(event.event)")
                         }
 
                         if event.event == "ready" || event.event == "error" {
-                            print("[Bootstrap:SSE] Terminal event: \(event.event)")
+                            log.info("SSE terminal event: \(event.event)")
                             pollTask?.cancel()
                             return
                         }
                     }
                     // Stream ended normally (server closed it) — reconnect
-                    print("[Bootstrap:SSE] Stream ended after \(eventCount) events — reconnecting")
+                    log.info("SSE stream ended after \(eventCount) events — reconnecting")
                 } catch {
                     if Task.isCancelled {
-                        print("[Bootstrap:SSE] Task cancelled during error handling")
+                        log.info("SSE task cancelled during error handling")
                         return
                     }
-                    print("[Bootstrap:SSE] Error: \(error.localizedDescription) — reconnecting")
+                    log.error("SSE error: \(error.localizedDescription) — reconnecting")
                 }
 
                 // Reconnect after delay (with backoff up to 10s)
@@ -493,7 +560,7 @@ class BootstrapManager: ObservableObject {
                 // Refresh status via REST in case we missed updates
                 if !Task.isCancelled, !isReady {
                     if let status = try? await api.getBootstrapStatus() {
-                        print("[Bootstrap:SSE] REST fallback during reconnect")
+                        log.info("SSE REST fallback during reconnect")
                         applyServerStatus(status, source: "SSE-REST")
                         if status.ready {
                             pollTask?.cancel()
@@ -502,7 +569,7 @@ class BootstrapManager: ObservableObject {
                     }
                 }
             }
-            print("[Bootstrap:SSE] Exited loop (cancelled=\(Task.isCancelled) ready=\(isReady))")
+            log.info("SSE exited loop (cancelled=\(Task.isCancelled) ready=\(self.isReady))")
         }
     }
 
@@ -512,7 +579,7 @@ class BootstrapManager: ObservableObject {
         pollTask?.cancel()
         guard let api = apiService else { return }
 
-        print("[Bootstrap:Poll] Starting REST polling fallback")
+        log.info("Starting REST polling fallback")
         pollTask = Task {
             while !Task.isCancelled && !isReady {
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
@@ -521,14 +588,14 @@ class BootstrapManager: ObservableObject {
                 if let status = try? await api.getBootstrapStatus() {
                     applyServerStatus(status, source: "Poll")
                     if status.ready {
-                        print("[Bootstrap:Poll] Server ready — stopping poll")
+                        log.info("Poll: server ready — stopping")
                         break
                     }
                 } else {
-                    print("[Bootstrap:Poll] REST fetch failed")
+                    log.debug("Poll: REST fetch failed")
                 }
             }
-            print("[Bootstrap:Poll] Exited (cancelled=\(Task.isCancelled) ready=\(isReady))")
+            log.info("Poll exited (cancelled=\(Task.isCancelled) ready=\(self.isReady))")
         }
     }
 

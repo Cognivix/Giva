@@ -7,14 +7,13 @@ unread emails, and user profile context.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Generator
 
 from giva.config import GivaConfig
 from giva.db.store import Store
 from giva.intelligence.profile import get_profile_summary
 from giva.llm import engine
-from giva.llm.prompts import build_system_prompt
 
 log = logging.getLogger(__name__)
 
@@ -114,6 +113,16 @@ def _build_suggestion_context(store: Store) -> str:
             start = ev.dtstart.strftime("%I:%M %p") if ev.dtstart else "?"
             lines.append(f"- {ev.summary} at {start}")
         parts.append("\n".join(lines))
+
+    # Active goals with recent progress
+    try:
+        from giva.intelligence.goals import get_goals_summary
+
+        goals_summary = get_goals_summary(store, include_progress=True)
+        if goals_summary:
+            parts.append("## Active Goals\n" + goals_summary)
+    except Exception as e:
+        log.debug("Could not fetch goals summary: %s", e)
 
     # Unread emails (most recent 10)
     try:
