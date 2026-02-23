@@ -27,6 +27,11 @@ struct MainPanelView: View {
             // Header
             headerBar
 
+            // Inline confirmation banner (right below the gear menu that triggers it)
+            if let action = pendingAction {
+                confirmationBanner(for: action)
+            }
+
             Divider()
 
             // Phase-aware status banner
@@ -61,11 +66,6 @@ struct MainPanelView: View {
             // Error banner
             if let errorMessage = viewModel.errorMessage {
                 errorBanner(errorMessage)
-            }
-
-            // Inline confirmation banner (replaces system dialogs which break in menu bar apps)
-            if let action = pendingAction {
-                confirmationBanner(for: action)
             }
 
             Divider()
@@ -382,6 +382,6 @@ struct MainPanelView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(isDestructive ? Color.red.opacity(0.06) : Color.orange.opacity(0.06))
-        .transition(.move(edge: .bottom).combined(with: .opacity))
+        .transition(.move(edge: .top).combined(with: .opacity))
     }
 }
