@@ -1,10 +1,63 @@
 // GivaViewModel.swift - Central state management for the Giva menu bar app.
+//
+// The ViewModel is a thin display layer. All orchestration (sync, onboarding,
+// periodic updates) is driven by the server's state machine. The UI connects
+// to /api/session on startup, replays conversation history, and then listens
+// to the /api/session/stream SSE for server-pushed events (phase changes,
+// sync results, onboarding questions, review notifications, etc.).
+//
+// --- State machine ---
+//
+// There is ONE authoritative status: the server's `checkpoint` (delivered
+// via the session stream as "phase" events).  The ViewModel mirrors it in
+// `serverPhase`.  Every piece of UI derives from `serverPhase` — there are
+// no shadow booleans like "isOnboarding".
+//
+// Transient client-side action flags (isRestarting, isUpgrading, isResetting)
+// indicate that a client-initiated operation is in progress; they are NOT
+// part of the Markov chain — they overlay it until the action completes and
+// the server pushes a new phase.
 
+import os
 import SwiftUI
+
+private let log = Logger(subsystem: "com.giva.app", category: "Session")
 
 enum AppTab: String, CaseIterable {
     case chat = "Chat"
     case tasks = "Tasks"
+}
+
+/// Live sync progress pushed by the server.
+struct SyncProgress {
+    var stage: String = "emails"  // emails | events | profile
+    var mailSynced: Int = 0
+    var mailFiltered: Int = 0
+    var mailTotal: Int = 0
+    var eventsSynced: Int = 0
+    var eventsTotal: Int = 0
+
+    /// Human-readable summary, e.g. "40/400 emails, 12 events"
+    var displayText: String {
+        switch stage {
+        case "emails":
+            let processed = mailSynced + mailFiltered
+            if mailTotal > 0 {
+                return "Syncing emails (\(processed)/\(mailTotal))..."
+            }
+            return "Syncing emails..."
+        case "events":
+            let mailDone = mailSynced + mailFiltered
+            if mailDone > 0 {
+                return "Synced \(mailSynced) emails (\(mailFiltered) filtered). Syncing calendar..."
+            }
+            return "Syncing calendar..."
+        case "profile":
+            return "Synced \(mailSynced) emails, \(eventsSynced) events. Building profile..."
+        default:
+            return "Syncing..."
+        }
+    }
 }
 
 @MainActor
@@ -13,10 +66,43 @@ class GivaViewModel: ObservableObject {
     @Published var serverManager = ServerManager()
     var apiService: APIService?
 
+    // ─── Single authoritative state ───
+    // Mirrors the server's checkpoint.  Everything derives from this.
+    @Published var serverPhase: String = "unknown"
+
+    /// Live sync progress (populated during syncing phase)
+    @Published var syncProgress: SyncProgress?
+
+    // ─── Computed properties derived from serverPhase ───
+
+    /// True when serverPhase == "onboarding"
+    var isOnboarding: Bool { serverPhase == "onboarding" }
+
+    /// True when serverPhase == "operational"
+    var isOperational: Bool { serverPhase == "operational" }
+
+    /// True when the server is syncing (initial or on-demand)
+    var isSyncing: Bool { serverPhase == "syncing" || isSyncingManual }
+
+    /// True when any system action is in progress
+    var isSystemBusy: Bool { isRestarting || isResetting || isUpgrading }
+
+    /// True when chat input should be enabled
+    var isChatEnabled: Bool {
+        (serverPhase == "operational" || serverPhase == "onboarding")
+        && !isSystemBusy
+    }
+
+    /// True when primary actions (sync, suggest, extract) should be enabled
+    var areActionsEnabled: Bool {
+        serverPhase == "operational" && !isSystemBusy
+    }
+
     // Chat
     @Published var messages: [ChatMessage] = []
     @Published var currentInput: String = ""
     @Published var isStreaming: Bool = false
+    @Published var isLoadingModel: Bool = false
 
     // Voice
     @Published var isVoiceEnabled: Bool = false
@@ -31,12 +117,17 @@ class GivaViewModel: ObservableObject {
     @Published var status: StatusResponse?
     @Published var profile: ProfileResponse?
 
-    // Onboarding
-    @Published var isOnboarding: Bool = false
-    @Published var onboardingCompleted: Bool = false
+    // Goals
+    @Published var isDailyReviewDue: Bool = false
+    var goalsViewModel: GoalsViewModel?
 
-    // Reset
+    // Transient action flags (client-side only, not part of the Markov chain)
+    @Published var isRestarting: Bool = false
     @Published var isResetting: Bool = false
+    @Published var isUpgrading: Bool = false
+
+    /// Manual sync in progress (user-triggered via Sync button, NOT the initial sync)
+    @Published var isSyncingManual: Bool = false
 
     // Model Setup
     @Published var isModelSetupNeeded: Bool = false
@@ -50,7 +141,6 @@ class GivaViewModel: ObservableObject {
     @Published var currentTab: AppTab = .chat
     @Published var isLoading: Bool = false
     @Published var errorMessage: String?
-    @Published var isUpgrading: Bool = false
 
     // Reference to bootstrap manager (set from GivaApp)
     weak var bootstrapManager: BootstrapManager?
@@ -58,15 +148,211 @@ class GivaViewModel: ObservableObject {
     // Active streaming task (for cancellation)
     private var streamTask: Task<Void, Never>?
 
+    // Session stream task (long-lived connection to server)
+    private var sessionStreamTask: Task<Void, Never>?
+
     /// Connect to the server using the bootstrap manager's API service.
-    /// Called after bootstrap reports ready.
+    /// Called after bootstrap reports ready (models downloaded).
+    /// Fetches session state from server, replays history, and connects to session stream.
     func connectToServer(from bootstrap: BootstrapManager) async {
         guard let api = bootstrap.apiService else { return }
+        log.info("connectToServer (phase=\(self.serverPhase))")
         apiService = api
-        serverManager.isRunning = true
+        serverManager.recordHeartbeat()
+        goalsViewModel = GoalsViewModel(apiService: api)
+
+        await fetchSessionState()
         await refreshStatus()
         await loadProfile()
-        await checkOnboarding()
+        await checkReviewDue()
+        connectSessionStream()
+    }
+
+    // MARK: - Session (server-driven state machine)
+
+    /// Fetch session state from server and replay conversation history.
+    private func fetchSessionState() async {
+        guard let api = apiService else { return }
+        do {
+            let session = try await api.getSession()
+            serverPhase = session.phase
+            log.info("fetchSessionState → phase=\(session.phase)")
+
+            switch session.phase {
+            case "syncing":
+                if messages.isEmpty {
+                    appendSystemMessage("Syncing your emails and calendar...")
+                }
+            case "onboarding":
+                messages.removeAll()
+                for msg in session.messages {
+                    messages.append(ChatMessage(role: msg.role, content: msg.content))
+                }
+            default:
+                break
+            }
+        } catch {
+            log.error("fetchSessionState failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// Connect to the long-lived session SSE stream.
+    /// The server pushes: phase changes, sync results, onboarding tokens,
+    /// review notifications, stats updates, etc.
+    /// On reconnect, re-fetches session state to pick up missed messages.
+    private func connectSessionStream() {
+        sessionStreamTask?.cancel()
+        guard let api = apiService else { return }
+
+        sessionStreamTask = Task {
+            var isFirstConnect = true
+            while !Task.isCancelled {
+                if !isFirstConnect {
+                    serverManager.markConnecting()
+                    await fetchSessionState()
+                    await refreshStatus()
+                }
+                isFirstConnect = false
+
+                do {
+                    log.info("SSE stream connecting...")
+                    for try await event in api.streamSession() {
+                        guard !Task.isCancelled else { return }
+                        serverManager.recordHeartbeat()
+                        handleSessionEvent(event)
+                    }
+                    log.warning("SSE stream ended (server closed)")
+                    serverManager.recordDisconnect()
+                } catch is CancellationError {
+                    return
+                } catch {
+                    log.error("SSE stream error: \(error.localizedDescription)")
+                    serverManager.recordDisconnect()
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                }
+            }
+        }
+    }
+
+    /// Handle a server-pushed event from the session stream.
+    /// The "phase" event is the ONLY way serverPhase changes.
+    private func handleSessionEvent(_ event: SSEEvent) {
+        if event.event != "heartbeat" {
+            log.debug("event=\(event.event) data=\(event.data.prefix(120))")
+        }
+
+        switch event.event {
+        case "phase":
+            let oldPhase = serverPhase
+            serverPhase = event.data
+            log.info("phase: \(oldPhase) → \(event.data)")
+
+            switch event.data {
+            case "syncing":
+                syncProgress = SyncProgress()
+            case "onboarding":
+                syncProgress = nil
+            case "operational":
+                syncProgress = nil
+                isSyncingManual = false
+                if oldPhase == "onboarding" {
+                    appendSystemMessage("Onboarding complete! Your preferences have been saved.")
+                    Task { await loadProfile() }
+                }
+                Task {
+                    await refreshStatus()
+                    await loadTasks()
+                }
+            default:
+                break
+            }
+
+        case "sync_progress":
+            if let data = event.data.data(using: .utf8),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                var p = syncProgress ?? SyncProgress()
+                p.stage = json["stage"] as? String ?? p.stage
+                p.mailSynced = json["mail_synced"] as? Int ?? p.mailSynced
+                p.mailFiltered = json["mail_filtered"] as? Int ?? p.mailFiltered
+                p.mailTotal = json["mail_total"] as? Int ?? p.mailTotal
+                p.eventsSynced = json["events_synced"] as? Int ?? p.eventsSynced
+                p.eventsTotal = json["events_total"] as? Int ?? p.eventsTotal
+                syncProgress = p
+            }
+
+        case "model_loading":
+            // Skip if the direct respond/chat stream is handling model loading
+            guard streamTask == nil else { break }
+            isLoadingModel = true
+            // Create a streaming placeholder so the "Loading AI model..." indicator shows
+            if messages.isEmpty || messages.last?.role != "assistant" || messages.last?.isStreaming != true {
+                messages.append(ChatMessage(role: "assistant", content: "", isStreaming: true))
+                isStreaming = true
+            }
+
+        case "onboarding_token":
+            // Skip session-stream broadcast if the direct respond stream is active
+            // (sendOnboardingResponse handles those tokens directly).
+            if streamTask != nil {
+                log.debug("session: skipping broadcast onboarding_token (respond active)")
+                break
+            }
+            isLoadingModel = false
+            if messages.isEmpty || messages.last?.role != "assistant" || messages.last?.isStreaming != true {
+                messages.append(ChatMessage(role: "assistant", content: "", isStreaming: true))
+                isStreaming = true
+            }
+            appendToLastMessage(event.data)
+
+        case "onboarding_thinking":
+            if streamTask != nil { break }
+            if messages.isEmpty || messages.last?.role != "assistant" || messages.last?.isStreaming != true {
+                messages.append(ChatMessage(role: "assistant", content: "", isStreaming: true))
+                isStreaming = true
+            }
+            appendThinkingToLastMessage(event.data)
+
+        case "onboarding_done":
+            if streamTask != nil {
+                log.debug("session: skipping broadcast onboarding_done (respond active)")
+                break
+            }
+            finalizeLastMessage()
+            isStreaming = false
+
+        case "onboarding_complete":
+            finalizeLastMessage()
+            isStreaming = false
+            // Server will push "phase: operational" next.
+
+        case "sync_started":
+            isSyncingManual = true
+            syncProgress = SyncProgress()
+
+        case "sync_complete":
+            isSyncingManual = false
+            syncProgress = nil
+            Task {
+                await refreshStatus()
+                await loadTasks()
+            }
+
+        case "stats":
+            Task { await refreshStatus() }
+
+        case "review_due":
+            isDailyReviewDue = true
+            goalsViewModel?.isDailyReviewDue = true
+
+        case "error":
+            errorMessage = event.data
+
+        case "heartbeat":
+            break
+
+        default:
+            break
+        }
     }
 
     // MARK: - Chat
@@ -78,7 +364,7 @@ class GivaViewModel: ObservableObject {
         currentInput = ""
         errorMessage = nil
 
-        // Route through onboarding if active
+        // Route through onboarding if active (server-driven)
         if isOnboarding {
             sendOnboardingResponse(query)
             return
@@ -102,14 +388,19 @@ class GivaViewModel: ObservableObject {
             do {
                 let stream = api.streamChat(query: query, voice: useVoice)
                 for try await event in stream {
-                    if event.event == "thinking" {
+                    if event.event == "model_loading" {
+                        isLoadingModel = true
+                    } else if event.event == "thinking" {
+                        isLoadingModel = false
                         appendThinkingToLastMessage(event.data)
                     } else if event.event == "token" {
+                        isLoadingModel = false
                         finishThinkingIfNeeded()
                         appendToLastMessage(event.data)
                     } else if event.event == "audio_chunk" {
                         audioService.enqueueAudioChunk(event.data)
                     } else if event.event == "error" {
+                        isLoadingModel = false
                         errorMessage = event.data
                     }
                 }
@@ -119,8 +410,10 @@ class GivaViewModel: ObservableObject {
                 errorMessage = error.localizedDescription
             }
 
+            isLoadingModel = false
             finalizeLastMessage()
             isStreaming = false
+            streamTask = nil
         }
     }
 
@@ -168,8 +461,9 @@ class GivaViewModel: ObservableObject {
     // MARK: - Quick Actions
 
     func triggerSync() async {
-        guard let api = apiService else { return }
-        isLoading = true
+        guard let api = apiService, !isSyncing else { return }
+        isSyncingManual = true
+        syncProgress = SyncProgress()
         errorMessage = nil
         do {
             let result = try await api.triggerSync()
@@ -179,14 +473,11 @@ class GivaViewModel: ObservableObject {
                 + "\(result.eventsSynced) events synced."
             )
             await refreshStatus()
-            // Auto-trigger onboarding if needed
-            if result.needsOnboarding {
-                startOnboarding()
-            }
         } catch {
             errorMessage = error.localizedDescription
         }
-        isLoading = false
+        isSyncingManual = false
+        syncProgress = nil
     }
 
     func triggerExtract() async {
@@ -234,59 +525,16 @@ class GivaViewModel: ObservableObject {
         }
     }
 
-    // MARK: - Onboarding
+    // MARK: - Onboarding (server-driven, UI just sends responses)
 
-    func checkOnboarding() async {
-        guard let api = apiService else { return }
-        do {
-            let status = try await api.getOnboardingStatus()
-            onboardingCompleted = status.onboardingCompleted
-            if status.needsOnboarding {
-                startOnboarding()
-            }
-        } catch {
-            // Non-critical
+    /// Send a user response during onboarding. The server drives the conversation.
+    private func sendOnboardingResponse(_ text: String) {
+        guard !isStreaming, apiService != nil else {
+            log.warning("sendOnboardingResponse: blocked (isStreaming=\(self.isStreaming) api=\(self.apiService != nil))")
+            return
         }
-    }
 
-    func startOnboarding() {
-        guard !isStreaming, apiService != nil else { return }
-        isOnboarding = true
-        errorMessage = nil
-
-        // Add system message announcing onboarding
-        appendSystemMessage("Let me ask you a few questions to personalize your experience.")
-
-        // Add placeholder for the first question
-        messages.append(ChatMessage(role: "assistant", content: "", isStreaming: true))
-        isStreaming = true
-
-        streamTask = Task {
-            guard let api = apiService else { return }
-            do {
-                let stream = api.streamOnboardingStart()
-                for try await event in stream {
-                    if event.event == "thinking" {
-                        appendThinkingToLastMessage(event.data)
-                    } else if event.event == "token" {
-                        finishThinkingIfNeeded()
-                        appendToLastMessage(event.data)
-                    } else if event.event == "error" {
-                        errorMessage = event.data
-                    }
-                }
-            } catch is CancellationError {
-                // cancelled
-            } catch {
-                errorMessage = error.localizedDescription
-            }
-            finalizeLastMessage()
-            isStreaming = false
-        }
-    }
-
-    func sendOnboardingResponse(_ text: String) {
-        guard !isStreaming, apiService != nil else { return }
+        log.info("sendOnboardingResponse: sending '\(text.prefix(50))'")
 
         // Add user message
         messages.append(ChatMessage(role: "user", content: text))
@@ -296,73 +544,148 @@ class GivaViewModel: ObservableObject {
         isStreaming = true
 
         streamTask = Task {
-            guard let api = apiService else { return }
+            guard let api = apiService else {
+                log.error("sendOnboardingResponse: no apiService in task")
+                return
+            }
+            var eventCount = 0
+            var tokenCount = 0
             do {
-                let stream = api.streamOnboardingRespond(response: text)
+                log.info("sendOnboardingResponse: opening respond stream")
+                let stream = api.streamSessionRespond(response: text)
                 for try await event in stream {
-                    if event.event == "thinking" {
+                    eventCount += 1
+                    if event.event == "model_loading" {
+                        log.info("respond: model_loading")
+                        isLoadingModel = true
+                    } else if event.event == "onboarding_thinking" {
+                        isLoadingModel = false
                         appendThinkingToLastMessage(event.data)
-                    } else if event.event == "token" {
+                    } else if event.event == "onboarding_token" {
+                        isLoadingModel = false
+                        tokenCount += 1
                         finishThinkingIfNeeded()
                         appendToLastMessage(event.data)
+                    } else if event.event == "onboarding_done" {
+                        log.info("respond: onboarding_done (tokens=\(tokenCount))")
+                    } else if event.event == "onboarding_complete" {
+                        log.info("respond: onboarding_complete")
+                        break
                     } else if event.event == "error" {
+                        log.error("respond: error=\(event.data)")
+                        isLoadingModel = false
                         errorMessage = event.data
+                    } else {
+                        log.info("respond: unhandled event=\(event.event)")
                     }
                 }
+                log.info("respond: stream ended (events=\(eventCount) tokens=\(tokenCount))")
             } catch is CancellationError {
-                // cancelled
+                log.info("respond: cancelled")
             } catch {
+                log.error("respond: error=\(error.localizedDescription)")
                 errorMessage = error.localizedDescription
             }
+
+            isLoadingModel = false
             finalizeLastMessage()
             isStreaming = false
-
-            // Check if onboarding is now complete
-            do {
-                let status = try await api.getOnboardingStatus()
-                if status.onboardingCompleted {
-                    isOnboarding = false
-                    onboardingCompleted = true
-                    appendSystemMessage("Onboarding complete! Your preferences have been saved.")
-                    await loadProfile()
-                }
-            } catch {
-                // Non-critical
-            }
+            streamTask = nil
+            log.info("respond: finalized (msgCount=\(self.messages.count) lastContent=\(self.messages.last?.content.prefix(50) ?? "nil"))")
         }
     }
 
-    // MARK: - Reset (tabula rasa)
+    // MARK: - Restart (daemon restart, no data loss)
+
+    func triggerRestart() async {
+        guard let bootstrap = bootstrapManager, !isRestarting else { return }
+        isRestarting = true
+        errorMessage = nil
+
+        // 1. Disconnect our streams
+        sessionStreamTask?.cancel()
+        sessionStreamTask = nil
+        streamTask?.cancel()
+        streamTask = nil
+        serverManager.markOffline()
+
+        // 2. Restart the daemon via launchctl
+        bootstrap.restartDaemon()
+
+        // 3. Wait for server to come back
+        serverManager.markConnecting()
+        let healthy = await serverManager.waitForHealth(timeout: 60)
+
+        if healthy {
+            serverManager.recordHeartbeat()
+            apiService = bootstrap.apiService ?? APIService(baseURL: serverManager.baseURL)
+
+            // 4. Reconnect session stream + refresh UI
+            await fetchSessionState()
+            await refreshStatus()
+            await loadProfile()
+            connectSessionStream()
+            appendSystemMessage("Server restarted.")
+        } else {
+            serverManager.connectionState = .offline
+            errorMessage = "Server didn't restart. Check logs."
+        }
+
+        isRestarting = false
+    }
+
+    // MARK: - Reset (wipe all data, fresh start)
 
     func triggerReset() async {
+        guard let bootstrap = bootstrapManager, !isResetting else { return }
+        log.info("Reset: starting")
         isResetting = true
         errorMessage = nil
 
-        // Tell server to wipe DB, caches, and user config
+        // 1. Disconnect streams
+        sessionStreamTask?.cancel()
+        sessionStreamTask = nil
+        streamTask?.cancel()
+        streamTask = nil
+
+        // 2. Tell server to wipe DB + roll checkpoint to 'unknown'
         if let api = apiService {
-            do {
-                _ = try await api.triggerReset()
-            } catch {
-                // Server may already be shutting down — continue anyway
-            }
+            do { _ = try await api.triggerReset() } catch { /* server may restart */ }
         }
 
-        // Clear all local state
+        // 3. Clear local UI state
         messages.removeAll()
         tasks.removeAll()
-        isOnboarding = false
-        onboardingCompleted = false
+        serverPhase = "unknown"
+        syncProgress = nil
         profile = nil
         status = nil
+        apiService = nil
+        goalsViewModel = nil
         availableModels = nil
         downloadProgress = [:]
         isDownloadingModels = false
         modelSetupError = nil
         isModelSetupNeeded = false
+        serverManager.markOffline()
 
-        // Server-side bootstrap will re-enter model setup.
-        // The bootstrap manager's SSE stream will pick up the state change.
+        // 4. Restart daemon and wait for it to come back.
+        //    resetAndRestart() re-enters the full bootstrap observation loop
+        //    (model check → sync → onboarding → operational).
+        await bootstrap.resetAndRestart()
+
         isResetting = false
+
+        // 5. Reconnect if the server came back ready.
+        //    We can't rely on GivaApp.onChange(bootstrap.isReady) because
+        //    isReady flipped true while isResetting was still true (blocking
+        //    the guard), and onChange won't re-fire once isResetting clears.
+        if bootstrap.isReady {
+            log.info("Reset: server ready, reconnecting")
+            await connectToServer(from: bootstrap)
+        } else {
+            log.info("Reset: server not ready yet (bootstrap will drive UI)")
+        }
     }
 
     // MARK: - Model Setup
@@ -403,16 +726,44 @@ class GivaViewModel: ObservableObject {
         Task { await triggerSync() }
     }
 
-    // MARK: - Upgrade
+    // MARK: - Upgrade (pip install + daemon restart, data preserved)
 
-    func triggerUpgrade() {
+    func triggerUpgrade() async {
         guard let bootstrap = bootstrapManager, !isUpgrading else { return }
+        log.info("Upgrade starting")
         isUpgrading = true
+        errorMessage = nil
 
-        Task {
-            await bootstrap.triggerUpgrade()
-            isUpgrading = false
+        // 1. Disconnect our streams
+        sessionStreamTask?.cancel()
+        sessionStreamTask = nil
+        streamTask?.cancel()
+        streamTask = nil
+        serverManager.markOffline()
+
+        // 2. Run the upgrade (pip install + daemon restart)
+        await bootstrap.triggerUpgrade()
+        log.info("Upgrade done (reachable=\(bootstrap.isServerReachable), ready=\(bootstrap.isReady))")
+
+        // 3. Reconnect if server came back
+        if bootstrap.isServerReachable {
+            let api = bootstrap.apiService ?? APIService(baseURL: serverManager.baseURL)
+            apiService = api
+            goalsViewModel = GoalsViewModel(apiService: api)
+            serverManager.recordHeartbeat()
+
+            // 4. Reconnect session stream (will resume lifecycle if needed)
+            await fetchSessionState()
+            await refreshStatus()
+            await loadProfile()
+            connectSessionStream()
+            appendSystemMessage("Upgrade complete.")
+        } else {
+            serverManager.connectionState = .offline
+            errorMessage = bootstrap.errorMessage ?? "Server didn't restart after upgrade."
         }
+
+        isUpgrading = false
     }
 
     // MARK: - Tasks
@@ -472,6 +823,28 @@ class GivaViewModel: ObservableObject {
         process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
         process.arguments = ["-e", script]
         try? process.run()
+    }
+
+    // MARK: - Goals
+
+    func checkReviewDue() async {
+        guard let api = apiService else { return }
+        do {
+            let status = try await api.getReviewStatus()
+            isDailyReviewDue = status.due
+            goalsViewModel?.isDailyReviewDue = status.due
+        } catch {
+            // Non-critical
+        }
+    }
+
+    func openGoalsWindow() {
+        NSApp.activate(ignoringOtherApps: true)
+        for window in NSApp.windows where window.title == "Goals & Objectives" {
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
+        // The Window scene will be created by SwiftUI when openWindow is called
     }
 
     // MARK: - Helpers
