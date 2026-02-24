@@ -4,6 +4,7 @@ from datetime import datetime
 from unittest.mock import patch, MagicMock
 
 from giva.sync.mail import (
+    _escape_jxa_string,
     _extract_name,
     _mailbox_accessor,
     _make_message_id,
@@ -67,6 +68,67 @@ class TestExtractName:
         assert _extract_name("") == ""
 
 
+class TestEscapeJxaString:
+    """Test _escape_jxa_string prevents command injection."""
+
+    def test_plain_string_unchanged(self):
+        assert _escape_jxa_string("hello world") == "hello world"
+
+    def test_escapes_double_quotes(self):
+        result = _escape_jxa_string('test"injection')
+        assert result == 'test\\"injection'
+
+    def test_escapes_single_quotes(self):
+        result = _escape_jxa_string("test'injection")
+        assert result == "test\\'injection"
+
+    def test_escapes_backslash(self):
+        result = _escape_jxa_string("test\\path")
+        assert result == "test\\\\path"
+
+    def test_escapes_newlines(self):
+        result = _escape_jxa_string("line1\nline2")
+        assert result == "line1\\nline2"
+
+    def test_escapes_carriage_return(self):
+        result = _escape_jxa_string("line1\rline2")
+        assert result == "line1\\rline2"
+
+    def test_escapes_tab(self):
+        result = _escape_jxa_string("col1\tcol2")
+        assert result == "col1\\tcol2"
+
+    def test_strips_null_bytes(self):
+        result = _escape_jxa_string("abc\x00def")
+        assert result == "abcdef"
+
+    def test_jxa_injection_attempt(self):
+        """A malicious mailbox name should not break out of the JS string."""
+        malicious = 'test"); throw("hacked'
+        result = _escape_jxa_string(malicious)
+        # All double quotes must be escaped with backslash
+        assert result == 'test\\"); throw(\\"hacked'
+        # When embedded in JS: "test\"); throw(\"hacked" — the \" are
+        # escaped, so JS sees a literal string, not code execution.
+        import re
+        unescaped_quotes = re.findall(r'(?<!\\)"', result)
+        assert len(unescaped_quotes) == 0
+
+    def test_complex_injection_payload(self):
+        payload = '"); var x = ObjC.import("Cocoa"); //'
+        result = _escape_jxa_string(payload)
+        # Every double quote in the result should be preceded by backslash
+        import re
+        unescaped_quotes = re.findall(r'(?<!\\)"', result)
+        assert len(unescaped_quotes) == 0, f"Found unescaped quotes in: {result}"
+
+    def test_empty_string(self):
+        assert _escape_jxa_string("") == ""
+
+    def test_unicode_preserved(self):
+        assert _escape_jxa_string("日本語") == "日本語"
+
+
 class TestMailboxAccessor:
 
     def test_builtin_inbox(self):
@@ -93,6 +155,21 @@ class TestMailboxAccessor:
 
     def test_custom_with_spaces(self):
         assert _mailbox_accessor("My Folder") == 'mail.mailboxes.byName("My Folder")'
+
+    def test_custom_mailbox_escapes_quotes(self):
+        """A mailbox name with quotes must be escaped to prevent JXA injection."""
+        result = _mailbox_accessor('My "Special" Folder')
+        assert result == 'mail.mailboxes.byName("My \\"Special\\" Folder")'
+
+    def test_injection_via_mailbox_name(self):
+        """Malicious mailbox name must not break out of the JS string."""
+        result = _mailbox_accessor('test"); throw("hacked')
+        # The inner quotes should be escaped so JS interprets them as literals.
+        # The result looks like: mail.mailboxes.byName("test\"); throw(\"hacked")
+        # In JS, \" is a literal quote character inside the string, not a delimiter.
+        assert 'byName("test\\"' in result
+        # The malicious throw should have its quote escaped
+        assert 'throw(\\"hacked' in result
 
 
 class TestParseFilterResponse:

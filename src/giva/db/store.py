@@ -704,7 +704,11 @@ class Store:
                 "SELECT profile_data FROM user_profile WHERE id = 1"
             ).fetchone()
             if row:
-                existing = json.loads(row["profile_data"] or "{}")
+                try:
+                    existing = json.loads(row["profile_data"] or "{}")
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    log.warning("Corrupted profile_data JSON, starting fresh")
+                    existing = {}
                 existing.update(data)
                 conn.execute(
                     "UPDATE user_profile SET profile_data = ?, updated_at = datetime('now') "

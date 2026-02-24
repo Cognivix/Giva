@@ -42,7 +42,11 @@ def run_jxa_json(script: str, timeout: int = 120) -> list | dict:
     raw = run_jxa(script, timeout=timeout)
     if not raw:
         return []
-    return json.loads(raw)
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, ValueError) as e:
+        log.warning("Failed to parse JXA JSON output: %s (raw: %s)", e, raw[:200])
+        return []
 
 
 def check_fda_access() -> bool:

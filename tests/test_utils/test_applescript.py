@@ -76,10 +76,24 @@ class TestRunJxaJson:
         assert result == []
 
     @patch("giva.utils.applescript.run_jxa")
-    def test_invalid_json_raises(self, mock_jxa):
+    def test_invalid_json_returns_empty_list(self, mock_jxa):
+        """Invalid JSON is now handled gracefully instead of crashing."""
         mock_jxa.return_value = "not json"
-        with pytest.raises(json.JSONDecodeError):
-            run_jxa_json("some script")
+        result = run_jxa_json("some script")
+        assert result == []
+
+    @patch("giva.utils.applescript.run_jxa")
+    def test_truncated_json_returns_empty_list(self, mock_jxa):
+        mock_jxa.return_value = '{"key": "val'
+        result = run_jxa_json("some script")
+        assert result == []
+
+    @patch("giva.utils.applescript.run_jxa")
+    def test_html_error_output_returns_empty_list(self, mock_jxa):
+        """JXA sometimes returns error HTML instead of JSON."""
+        mock_jxa.return_value = "<html><body>Error</body></html>"
+        result = run_jxa_json("some script")
+        assert result == []
 
 
 class TestCheckFdaAccess:

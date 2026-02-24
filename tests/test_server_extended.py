@@ -1,10 +1,10 @@
-"""Extended server tests: _ThinkParser edge cases, Pydantic models, _goal_to_response."""
+"""Extended server tests: _ThinkParser edge cases, Pydantic models, _goal_to_response, CORS."""
 
 import pytest
 from unittest.mock import MagicMock
 from datetime import datetime
 
-from giva.server import _ThinkParser
+from giva.server import _ThinkParser, app
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -403,3 +403,41 @@ class TestGoalToResponse:
         assert resp.target_date is None
         assert resp.created_at is None
         assert resp.updated_at is None
+
+
+# ═══════════════════════════════════════════════════════════════
+# CORS configuration
+# ═══════════════════════════════════════════════════════════════
+
+class TestCORSConfiguration:
+    """Verify CORS is restricted to localhost origins, not wildcard."""
+
+    def test_no_wildcard_origin(self):
+        """CORS must not allow '*' (wildcard) origins."""
+        from starlette.middleware.cors import CORSMiddleware
+
+        cors_middleware = None
+        for mw in app.user_middleware:
+            if mw.cls is CORSMiddleware:
+                cors_middleware = mw
+                break
+
+        assert cors_middleware is not None, "CORSMiddleware not found on app"
+        origins = cors_middleware.kwargs.get("allow_origins", [])
+        assert "*" not in origins, "CORS should not allow wildcard origins"
+
+    def test_localhost_origins_allowed(self):
+        """CORS should allow localhost origins for the native app."""
+        from starlette.middleware.cors import CORSMiddleware
+
+        cors_middleware = None
+        for mw in app.user_middleware:
+            if mw.cls is CORSMiddleware:
+                cors_middleware = mw
+                break
+
+        origins = cors_middleware.kwargs.get("allow_origins", [])
+        assert any("127.0.0.1" in o for o in origins), \
+            "CORS should allow 127.0.0.1"
+        assert any("localhost" in o for o in origins), \
+            "CORS should allow localhost"

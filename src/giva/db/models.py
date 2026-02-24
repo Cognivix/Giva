@@ -3,9 +3,27 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
+
+log = logging.getLogger(__name__)
+
+
+def _safe_json_loads(raw: str, default=None):
+    """Parse JSON with a safe fallback on malformed data.
+
+    Returns *default* (or ``[]`` if not specified) when parsing fails,
+    instead of crashing on corrupted DB entries.
+    """
+    if default is None:
+        default = []
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        log.warning("Malformed JSON in DB field, using default: %s", str(raw)[:100])
+        return default
 
 
 @dataclass
@@ -56,16 +74,16 @@ class Email:
             folder=row["folder"],
             from_addr=row["from_addr"],
             from_name=row.get("from_name", ""),
-            to_addrs=json.loads(row.get("to_addrs", "[]")),
-            cc_addrs=json.loads(row.get("cc_addrs", "[]")),
+            to_addrs=_safe_json_loads(row.get("to_addrs", "[]")),
+            cc_addrs=_safe_json_loads(row.get("cc_addrs", "[]")),
             subject=row["subject"],
             date_sent=datetime.fromisoformat(row["date_sent"]),
             body_plain=row.get("body_plain", ""),
             body_html=row.get("body_html", ""),
             has_attachments=bool(row.get("has_attachments", 0)),
-            attachment_names=json.loads(row.get("attachment_names", "[]")),
+            attachment_names=_safe_json_loads(row.get("attachment_names", "[]")),
             in_reply_to=row.get("in_reply_to", ""),
-            references_list=json.loads(row.get("references_list", "[]")),
+            references_list=_safe_json_loads(row.get("references_list", "[]")),
             is_read=bool(row.get("is_read", 0)),
             is_flagged=bool(row.get("is_flagged", 0)),
         )
@@ -114,7 +132,7 @@ class Event:
             dtend=datetime.fromisoformat(row["dtend"]) if row.get("dtend") else None,
             all_day=bool(row.get("all_day", 0)),
             organizer=row.get("organizer", ""),
-            attendees=json.loads(row.get("attendees", "[]")),
+            attendees=_safe_json_loads(row.get("attendees", "[]")),
             status=row.get("status", "CONFIRMED"),
         )
 
@@ -164,12 +182,12 @@ class UserProfile:
         return cls(
             display_name=row.get("display_name", ""),
             email_address=row.get("email_address", ""),
-            top_contacts=json.loads(row.get("top_contacts", "[]")),
-            top_topics=json.loads(row.get("top_topics", "[]")),
-            active_hours=json.loads(row.get("active_hours", "{}")),
+            top_contacts=_safe_json_loads(row.get("top_contacts", "[]")),
+            top_topics=_safe_json_loads(row.get("top_topics", "[]")),
+            active_hours=_safe_json_loads(row.get("active_hours", "{}"), default={}),
             avg_response_time_min=float(row.get("avg_response_time_min", 0)),
             email_volume_daily=float(row.get("email_volume_daily", 0)),
-            profile_data=json.loads(row.get("profile_data", "{}")),
+            profile_data=_safe_json_loads(row.get("profile_data", "{}"), default={}),
             updated_at=(
                 datetime.fromisoformat(row["updated_at"])
                 if row.get("updated_at")
@@ -265,8 +283,8 @@ class GoalStrategy:
             id=row["id"],
             goal_id=row["goal_id"],
             strategy_text=row["strategy_text"],
-            action_items=json.loads(row.get("action_items", "[]")),
-            suggested_objectives=json.loads(row.get("suggested_objectives", "[]")),
+            action_items=_safe_json_loads(row.get("action_items", "[]")),
+            suggested_objectives=_safe_json_loads(row.get("suggested_objectives", "[]")),
             status=row.get("status", "proposed"),
             created_at=(
                 datetime.fromisoformat(row["created_at"])

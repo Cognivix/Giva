@@ -51,6 +51,24 @@ def _extract_name(sender: str) -> str:
     return ""
 
 
+def _escape_jxa_string(value: str) -> str:
+    """Escape a string for safe embedding in JXA JavaScript code.
+
+    Prevents command injection by escaping backslashes, quotes, newlines,
+    and other control characters that could break out of a JS string literal.
+    """
+    return (
+        value
+        .replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("'", "\\'")
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+        .replace("\0", "")
+    )
+
+
 def _mailbox_accessor(mailbox_name: str) -> str:
     """Get the JXA accessor expression for a named mailbox."""
     name_lower = mailbox_name.lower()
@@ -63,7 +81,8 @@ def _mailbox_accessor(mailbox_name: str) -> str:
     }
     if name_lower in builtin:
         return builtin[name_lower]
-    return f'mail.mailboxes.byName("{mailbox_name}")'
+    safe_name = _escape_jxa_string(mailbox_name)
+    return f'mail.mailboxes.byName("{safe_name}")'
 
 
 # ---------------------------------------------------------------------------
@@ -311,11 +330,13 @@ def fetch_email_body(message_id: str, folder: str = "INBOX") -> Optional[str]:
     """
     accessor = _mailbox_accessor(folder)
 
+    safe_message_id = _escape_jxa_string(message_id)
+
     # Try specific folder first (fast)
     script = f"""
 var mail = Application("Mail");
 var mailbox = {accessor};
-var msgs = mailbox.messages.whose({{messageId: "{message_id}"}})();
+var msgs = mailbox.messages.whose({{messageId: "{safe_message_id}"}})();
 if (msgs.length > 0) {{
     JSON.stringify({{content: msgs[0].content() || ""}});
 }} else {{
@@ -340,7 +361,7 @@ for (var a = 0; a < accounts.length && !body; a++) {{
     var mboxes = accounts[a].mailboxes();
     for (var b = 0; b < mboxes.length && !body; b++) {{
         try {{
-            var msgs = mboxes[b].messages.whose({{messageId: "{message_id}"}})();
+            var msgs = mboxes[b].messages.whose({{messageId: "{safe_message_id}"}})();
             if (msgs.length > 0) {{
                 body = msgs[0].content() || "";
             }}
@@ -377,10 +398,11 @@ def _fetch_headers_since(
         ``(messages_list, total_matching)`` — the chunk and the total count
         of messages matching the date filter in this mailbox.
     """
+    safe_cutoff = _escape_jxa_string(cutoff_iso)
     script = f"""
 var mail = Application("Mail");
 var mailbox = {accessor};
-var cutoff = new Date("{cutoff_iso}");
+var cutoff = new Date("{safe_cutoff}");
 var allMsgs = mailbox.messages.whose({{dateReceived: {{_greaterThan: cutoff}}}})();
 var total = allMsgs.length;
 var start = {offset};
