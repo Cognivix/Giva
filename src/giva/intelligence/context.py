@@ -189,6 +189,40 @@ def retrieve_context(
         if goals_summary:
             goals_text = truncate_to_budget(goals_summary, remaining)
             parts.append("Active goals:\n" + goals_text)
+            remaining -= estimate_tokens(goals_text)
+    except Exception:
+        pass
+
+    # 7. Relevant notes via MCP (live search)
+    try:
+        from giva.intelligence.mcp_observations import fetch_relevant_notes
+
+        notes_budget = int(remaining * 0.40)
+        notes_text = fetch_relevant_notes(query, budget=notes_budget)
+        if notes_text:
+            parts.append("Relevant notes:\n" + notes_text)
+            remaining -= estimate_tokens(notes_text)
+    except Exception:
+        pass
+
+    # 8. Recent files (Apple Recents, keyword-matched)
+    try:
+        from giva.utils.recents import format_recent_files, get_recent_files
+
+        recent_files = get_recent_files(hours=72, limit=15)
+        if recent_files:
+            query_words = {w.lower() for w in query.split() if len(w) > 2}
+            matched = [
+                f for f in recent_files
+                if any(w in f.name.lower() for w in query_words)
+            ]
+            if matched:
+                files_budget = int(remaining * 0.30)
+                files_text = truncate_to_budget(
+                    format_recent_files(matched, max_items=5), files_budget
+                )
+                parts.append(files_text)
+                remaining -= estimate_tokens(files_text)
     except Exception:
         pass
 
@@ -296,7 +330,8 @@ def _ensure_bodies(emails: list, store: Store) -> None:
     for email in emails:
         if email.body_plain:
             continue
-        body = fetch_email_body(email.message_id)
+        folder = getattr(email, "folder", "INBOX") or "INBOX"
+        body = fetch_email_body(email.message_id, folder=folder)
         if body:
             email.body_plain = body
             store.update_email_body(email.message_id, body)

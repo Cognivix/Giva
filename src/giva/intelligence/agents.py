@@ -2,6 +2,9 @@
 
 Runs after every chat response using the filter model in a single combined call.
 Detects intents (create task, create objective, log progress, save fact) and routes actions.
+
+Also provides the Progress Aggregator — pure code (no LLM) that auto-logs goal
+progress when a linked task is completed.
 """
 
 from __future__ import annotations
@@ -322,6 +325,8 @@ def _handle_complete_task(
         if title in t.title.lower() or t.title.lower() in title:
             store.update_task_status(t.id, "done")
             log.info("Post-chat agent completed task #%d: %s", t.id, t.title)
+            # Auto-aggregate progress on linked goal
+            aggregate_task_progress(t.id, store)
             return {
                 "type": "task_completed",
                 "task_id": t.id,
@@ -329,6 +334,43 @@ def _handle_complete_task(
             }
 
     return None
+
+
+def aggregate_task_progress(task_id: int, store: Store) -> Optional[dict]:
+    """Auto-log goal progress when a linked task is completed.
+
+    Pure code — no LLM call. Called whenever a task transitions to "done".
+    Counts completed vs total tasks for the parent goal and logs a progress
+    entry. Returns an action dict for SSE broadcasting, or None.
+    """
+    task = store.get_task(task_id)
+    if not task or not task.goal_id:
+        return None
+
+    goal = store.get_goal(task.goal_id)
+    if not goal:
+        return None
+
+    # Count tasks for this goal
+    all_tasks = store.get_tasks_for_goal(task.goal_id)
+    done_count = sum(1 for t in all_tasks if t.status == "done")
+    total = len(all_tasks)
+
+    note = f"Task completed: \"{task.title}\" ({done_count}/{total} tasks done)"
+    store.add_goal_progress(task.goal_id, note, "task")
+    log.info(
+        "Progress aggregator: goal #%d — %d/%d tasks done (completed: %s)",
+        task.goal_id, done_count, total, task.title,
+    )
+
+    return {
+        "type": "goal_progress",
+        "goal_id": task.goal_id,
+        "goal_title": goal.title,
+        "note": note,
+        "tasks_done": done_count,
+        "tasks_total": total,
+    }
 
 
 def _handle_preference(intent: dict, store: Store) -> Optional[dict]:

@@ -190,6 +190,12 @@ class SyncScheduler:
         except Exception as e:
             log.error("Background goal progress error: %s", e)
 
+        # Incremental deep sync (extend email history over time)
+        try:
+            self._maybe_deepen_sync()
+        except Exception as e:
+            log.error("Deep sync check error: %s", e)
+
         # Broadcast sync completion with stats
         stats = self.store.get_stats()
         self._broadcast({
@@ -220,6 +226,15 @@ class SyncScheduler:
         except Exception as e:
             log.debug("Review check error: %s", e)
 
+        # Check if weekly reflection is due
+        try:
+            from giva.intelligence.daily_review import is_reflection_due
+
+            if is_reflection_due(self.store, self.config):
+                self._broadcast({"event": "reflection_due", "data": "true"})
+        except Exception as e:
+            log.debug("Reflection check error: %s", e)
+
         self._schedule(interval)
 
     def _run_strategy(self, interval: float):
@@ -237,6 +252,116 @@ class SyncScheduler:
             self._schedule_strategy(interval)
 
     # ------------------------------------------------------------------
+    # Incremental deep sync — extend email history post-bootstrap
+    # ------------------------------------------------------------------
+
+    # Deepening tiers (months): bootstrap → incremental expansion
+    _DEEPENING_TIERS = [4, 8, 12, 18, 24]
+
+    def _maybe_deepen_sync(self) -> None:
+        """Incrementally extend email history if conditions are met.
+
+        Guards:
+        - ≥24h since last deepening attempt
+        - Hasn't reached ``deep_sync_max_months`` yet
+        - Only one tier advancement per invocation
+
+        Runs ``sync_mail_initial`` at the next tier, then re-profiles.
+        """
+        from datetime import datetime, timedelta
+
+        import json as _json
+
+        from giva.sync.mail import sync_mail_initial
+
+        max_months = self.config.mail.deep_sync_max_months
+
+        # Check last deepening timestamp
+        state = self.store.get_sync_state("deep_sync")
+        if state and state.get("last_sync"):
+            try:
+                last_sync = datetime.fromisoformat(state["last_sync"])
+                if datetime.now() - last_sync < timedelta(hours=24):
+                    return  # Too soon
+            except (ValueError, TypeError):
+                pass
+
+        # Determine current depth (worst-case across mailboxes)
+        current_months = 0
+        for mailbox in self.config.mail.mailboxes:
+            mbox_state = self.store.get_sync_state(f"mail_depth:{mailbox}")
+            if mbox_state and mbox_state.get("last_status"):
+                status = mbox_state["last_status"]
+                # Parse "initial_Xmo" or "deep_Xmo" format
+                for prefix in ("initial_", "deep_"):
+                    if status.startswith(prefix) and status.endswith("mo"):
+                        try:
+                            depth = int(status[len(prefix):-2])
+                            current_months = max(current_months, depth)
+                        except ValueError:
+                            pass
+
+        if current_months >= max_months:
+            log.debug("Deep sync: already at max depth (%d months)", max_months)
+            return
+
+        # Find next tier
+        next_months = None
+        for tier in self._DEEPENING_TIERS:
+            if tier > current_months and tier <= max_months:
+                next_months = tier
+                break
+
+        if next_months is None:
+            return
+
+        log.info(
+            "Deep sync: extending from %d to %d months",
+            current_months, next_months,
+        )
+
+        try:
+            with self._acquire_llm():
+                synced, filtered = sync_mail_initial(
+                    self.store, self.config.mail.mailboxes,
+                    months=next_months, config=self.config,
+                )
+
+            # Update depth state for each mailbox
+            for mailbox in self.config.mail.mailboxes:
+                self.store.update_sync_state(
+                    f"mail_depth:{mailbox}", synced, f"deep_{next_months}mo"
+                )
+
+            self.store.update_sync_state("deep_sync", synced, f"deep_{next_months}mo")
+
+            # Re-profile after deepening (includes writing style re-analysis)
+            try:
+                from giva.intelligence.profile import update_profile
+
+                with self._acquire_llm():
+                    update_profile(self.store, self.config)
+            except Exception as e:
+                log.warning("Post-deep-sync profile update failed: %s", e)
+
+            log.info(
+                "Deep sync complete: %d synced, %d filtered, now at %d months",
+                synced, filtered, next_months,
+            )
+
+            self._broadcast({
+                "event": "deep_sync_complete",
+                "data": _json.dumps({
+                    "months": next_months,
+                    "synced": synced,
+                    "filtered": filtered,
+                }),
+            })
+
+        except Exception as e:
+            log.error("Deep sync to %d months failed: %s", next_months, e)
+
+    # ------------------------------------------------------------------
     # Agent tasks (third timer — periodic agent work)
     # ------------------------------------------------------------------
 
@@ -252,19 +377,30 @@ class SyncScheduler:
     def _run_agent_tasks(self, interval: float):
         """Check for automated agent work. Runs periodically when enabled.
 
-        This is infrastructure — specific triggers will be added as agents
-        are built.  Currently a no-op placeholder that logs and reschedules.
-
-        Future triggers could include:
-        - Stale tasks (no progress in N days) → auto-brainstorm
-        - Unactioned important emails → draft response
-        - Goal check-ins → progress review
+        Current triggers:
+        - Weekly goal inference: re-analyze profile + data to suggest new goals
         """
         try:
             log.debug("Scheduler agent tasks: checking for automated work")
-            # Placeholder — add specific agent task triggers here as agents
-            # are built. Each trigger would create an AgentJob with
-            # source="scheduler" and priority=2 (low, behind user work).
+
+            # Weekly goal inference — only runs when reflection is due
+            # (same schedule: target day + hour), preventing redundant runs.
+            try:
+                from giva.intelligence.daily_review import is_reflection_due
+
+                if is_reflection_due(self.store, self.config):
+                    from giva.intelligence.goals import infer_goals
+
+                    with self._acquire_llm():
+                        result = infer_goals(self.store, self.config)
+                    if result:
+                        log.info(
+                            "Scheduler: weekly goal inference returned %d suggestions",
+                            len(result.goals) if hasattr(result, "goals") else 0,
+                        )
+            except Exception as e:
+                log.debug("Scheduler goal inference error: %s", e)
+
         except Exception as e:
             log.error("Scheduler agent tasks error: %s", e)
         finally:

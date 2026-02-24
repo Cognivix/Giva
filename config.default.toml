@@ -4,11 +4,17 @@ log_level = "INFO"
 
 [mail]
 # Mailboxes to sync (Apple Mail mailbox names)
-mailboxes = ["INBOX", "Sent"]
-# Max messages to fetch per sync via AppleScript
+mailboxes = ["INBOX", "Sent", "Drafts", "Archive"]
+# Max messages to fetch per periodic sync via AppleScript
 batch_size = 50
 # Sync interval in minutes (for background scheduler)
 sync_interval_minutes = 15
+# Months of email history for initial bootstrap sync
+initial_sync_months = 4
+# Max months to backfill during incremental deepening (post-bootstrap)
+deep_sync_max_months = 24
+# Number of sent email bodies to sample for writing style analysis
+writing_style_sample_size = 20
 
 [calendar]
 # Sync window
@@ -35,6 +41,9 @@ daily_review_hour = 18
 max_strategies_per_run = 1
 # Tactical plan horizon in days
 plan_horizon_days = 7
+# Weekly reflection: day of week (0=Monday, 6=Sunday) and hour
+weekly_reflection_day = 6
+weekly_reflection_hour = 18
 
 [agents]
 # Pluggable agent system
@@ -52,26 +61,44 @@ max_execution_seconds = 60
 # Scheduler: how often to check for automated agent work (minutes)
 # scheduler_agent_interval_minutes = 60
 
-# --- MCP Servers (optional, requires `pip install giva[mcp]`) ---
-# Each [mcp_servers.<name>] section configures one MCP server.
-# Servers are auto-discovered at startup and appear as pluggable agents.
+# --- MCP Servers (optional, requires `pip install giva[mcp]` + Node.js for npx) ---
+# Uncomment and adjust paths/tokens. Servers auto-register as agents at startup.
 #
 # [mcp_servers.filesystem]
 # transport = "stdio"
 # command = "npx"
-# args = ["-y", "@modelcontextprotocol/server-filesystem", "/Users/me/Documents"]
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "~/Documents", "~/Desktop"]
 # timeout_seconds = 30
+# description = "Read, write, and search files on disk"
 #
-# [mcp_servers.github]
+# [mcp_servers.fetch]
+# transport = "stdio"
+# command = "python3"
+# args = ["-m", "mcp_server_fetch"]
+# timeout_seconds = 30
+# description = "Fetch web pages and convert to markdown"
+#
+# [mcp_servers.messages]
 # transport = "stdio"
 # command = "npx"
-# args = ["-y", "@modelcontextprotocol/server-github"]
-# env = { GITHUB_PERSONAL_ACCESS_TOKEN = "ghp_..." }
+# args = ["-y", "@foxychat-mcp/apple-imessages"]
+# timeout_seconds = 30
+# description = "Send and read iMessages, search contacts"
 #
-# [mcp_servers.remote_api]
-# transport = "http"
-# url = "http://localhost:8080/mcp"
-# timeout_seconds = 60
+# [mcp_servers.notes]
+# transport = "stdio"
+# command = "npx"
+# args = ["apple-notes-mcp"]
+# timeout_seconds = 30
+# description = "Create, read, update, and search Apple Notes"
+#
+# [mcp_servers.discord]
+# transport = "stdio"
+# command = "npx"
+# args = ["-y", "discord-mcp"]
+# env = { DISCORD_BOT_TOKEN = "Bot your_token_here" }  # prefix with "Bot " for bot tokens
+# timeout_seconds = 30
+# description = "Send and receive Discord messages"
 
 [voice]
 # Voice mode: TTS (text-to-speech) and STT (speech-to-text)

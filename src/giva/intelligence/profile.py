@@ -42,9 +42,21 @@ def update_profile(store: Store, config: Optional[GivaConfig] = None) -> UserPro
         except Exception as e:
             log.warning("Topic extraction failed (non-fatal): %s", e)
 
+    # Writing style analysis from sent emails
+    writing_style: dict = {}
+    if config:
+        try:
+            writing_style = _analyze_writing_style(store, config)
+        except Exception as e:
+            log.warning("Writing style analysis failed (non-fatal): %s", e)
+
     # Preserve existing profile_data (onboarding answers, preferences, etc.)
     existing = store.get_profile()
     preserved_data = existing.profile_data if existing else {}
+
+    # Merge writing style into preserved data
+    if writing_style:
+        preserved_data["writing_style"] = writing_style
 
     profile = UserProfile(
         display_name=display_name,
@@ -138,6 +150,24 @@ def get_profile_summary(store: Store) -> str:
             lines.append(f"Schedule notes: {ws['notes']}")
         if pd.get("preferences"):
             lines.append(f"Preferences: {', '.join(pd['preferences'])}")
+
+    # Writing style (from sent email analysis)
+    ws = pd.get("writing_style", {})
+    if ws:
+        if ws.get("tone"):
+            lines.append(f"Writing tone: {ws['tone']}")
+        if ws.get("communication_style"):
+            lines.append(f"Style: {ws['communication_style']}")
+        if ws.get("greeting_patterns"):
+            lines.append(f"Greetings: {', '.join(ws['greeting_patterns'][:3])}")
+        if ws.get("signoff_patterns"):
+            lines.append(f"Signoffs: {', '.join(ws['signoff_patterns'][:3])}")
+        if ws.get("key_phrases"):
+            lines.append(f"Key phrases: {', '.join(ws['key_phrases'][:5])}")
+        if ws.get("topics_initiated"):
+            lines.append(f"Proactive topics: {', '.join(ws['topics_initiated'][:4])}")
+        if ws.get("priority_signals"):
+            lines.append(f"Priority signals: {', '.join(ws['priority_signals'][:3])}")
 
     # Goal counts
     try:
@@ -353,3 +383,81 @@ def _extract_topics(store: Store, config: GivaConfig) -> list[str]:
 
     log.warning("Could not parse topic extraction response")
     return []
+
+
+def _analyze_writing_style(store: Store, config: GivaConfig) -> dict:
+    """Analyze the user's writing style from sent email bodies.
+
+    Samples sent emails, formats them for the LLM, and extracts
+    tone, greeting/signoff patterns, key phrases, and communication style.
+
+    Returns a dict suitable for storage in ``profile_data["writing_style"]``.
+    Returns ``{}`` if not enough data.
+    """
+    import re
+
+    from giva.llm.engine import manager
+    from giva.llm.prompts import WRITING_STYLE_SYSTEM, WRITING_STYLE_USER
+    from giva.sync.mail import fetch_sent_bodies_sample
+
+    sample_size = config.mail.writing_style_sample_size
+    samples = fetch_sent_bodies_sample(store, sample_size=sample_size)
+
+    if len(samples) < 3:
+        log.debug("Not enough sent emails for writing style analysis (%d)", len(samples))
+        return {}
+
+    # Format samples for the prompt
+    formatted = []
+    for i, s in enumerate(samples):
+        formatted.append(
+            f"--- Email {i + 1} ---\n"
+            f"Subject: {s['subject']}\n"
+            f"Date: {s['date_sent']}\n"
+            f"Body:\n{s['body']}\n"
+        )
+    samples_block = "\n".join(formatted)
+
+    messages = [
+        {"role": "system", "content": WRITING_STYLE_SYSTEM},
+        {
+            "role": "user",
+            "content": WRITING_STYLE_USER.format(
+                count=len(samples), samples=samples_block,
+            ),
+        },
+    ]
+
+    response = manager.generate(
+        config.llm.filter_model,
+        messages,
+        max_tokens=512,
+        temp=0.3,
+        top_p=0.9,
+    )
+
+    # Parse JSON from response
+    # Strip think tags first
+    response = re.sub(r"<think>.*?</think>\s*", "", response, flags=re.DOTALL)
+
+    try:
+        result = json.loads(response.strip())
+        if isinstance(result, dict):
+            log.info("Writing style analysis complete: tone=%s", result.get("tone", "?"))
+            return result
+    except json.JSONDecodeError:
+        pass
+
+    # Try extracting JSON object from markdown fencing
+    match = re.search(r"\{.*\}", response, re.DOTALL)
+    if match:
+        try:
+            result = json.loads(match.group())
+            if isinstance(result, dict):
+                log.info("Writing style analysis complete: tone=%s", result.get("tone", "?"))
+                return result
+        except json.JSONDecodeError:
+            pass
+
+    log.warning("Could not parse writing style analysis response")
+    return {}

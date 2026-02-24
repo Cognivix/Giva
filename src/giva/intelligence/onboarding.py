@@ -246,6 +246,56 @@ def _gather_observations(store: Store) -> str:
     stats = store.get_stats()
     lines.append(f"\nTotal: {stats['emails']} emails, {stats['events']} events synced")
 
+    # MCP source observations (Notes, iMessages, Discord)
+    try:
+        from giva.intelligence.mcp_observations import gather_all_mcp_observations
+
+        mcp_obs = gather_all_mcp_observations()
+        if mcp_obs:
+            lines.append(f"\n{mcp_obs}")
+    except Exception as exc:
+        log.debug("MCP observations failed: %s", exc)
+
+    # Apple Recents (recently used files via Spotlight)
+    try:
+        from giva.utils.recents import format_recent_files, get_recent_files
+
+        recent_files = get_recent_files(hours=48, limit=10)
+        if recent_files:
+            lines.append(f"\n{format_recent_files(recent_files)}")
+    except Exception as exc:
+        log.debug("Apple Recents failed: %s", exc)
+
+    # Writing style analysis (from sent email profiling)
+    try:
+        profile = store.get_profile()
+        if profile and profile.profile_data:
+            ws = profile.profile_data.get("writing_style", {})
+            if ws:
+                lines.append("\nWriting style (from sent emails):")
+                if ws.get("tone"):
+                    lines.append(f"  Tone: {ws['tone']}")
+                if ws.get("communication_style"):
+                    lines.append(f"  Style: {ws['communication_style']}")
+                if ws.get("greeting_patterns"):
+                    lines.append(
+                        f"  Greetings: {', '.join(ws['greeting_patterns'][:3])}"
+                    )
+                if ws.get("signoff_patterns"):
+                    lines.append(
+                        f"  Signoffs: {', '.join(ws['signoff_patterns'][:3])}"
+                    )
+                if ws.get("topics_initiated"):
+                    lines.append(
+                        f"  Proactive topics: {', '.join(ws['topics_initiated'][:4])}"
+                    )
+                if ws.get("priority_signals"):
+                    lines.append(
+                        f"  Priority signals: {', '.join(ws['priority_signals'][:3])}"
+                    )
+    except Exception as exc:
+        log.debug("Writing style observations failed: %s", exc)
+
     return "\n".join(lines)
 
 

@@ -294,3 +294,69 @@ def test_update_profile_full(tmp_db):
     stored = tmp_db.get_profile()
     assert stored is not None
     assert stored.email_address == "alice@work.com"
+
+
+# --- Writing style in profile summary ---
+
+
+def test_profile_summary_includes_writing_style(tmp_db):
+    """get_profile_summary should include writing style fields when available."""
+    profile = UserProfile(
+        display_name="Alice Smith",
+        email_address="alice@example.com",
+        profile_data={
+            "writing_style": {
+                "tone": "casual, warm",
+                "communication_style": "proactive — often initiates",
+                "greeting_patterns": ["Hi", "Hey there"],
+                "signoff_patterns": ["Best,", "Cheers,"],
+                "key_phrases": ["sounds good", "let me know"],
+                "topics_initiated": ["project planning", "team updates"],
+                "priority_signals": ["budget discussions", "deadlines"],
+            },
+        },
+    )
+    tmp_db.upsert_profile(profile)
+
+    summary = get_profile_summary(tmp_db)
+    assert "casual, warm" in summary
+    assert "proactive" in summary
+    assert "Hi" in summary
+    assert "Best," in summary
+    assert "sounds good" in summary
+    assert "project planning" in summary
+    assert "budget discussions" in summary
+
+
+def test_profile_summary_without_writing_style(tmp_db):
+    """get_profile_summary should work fine without writing style data."""
+    profile = UserProfile(
+        display_name="Bob Jones",
+        email_address="bob@example.com",
+        profile_data={},
+    )
+    tmp_db.upsert_profile(profile)
+
+    summary = get_profile_summary(tmp_db)
+    assert "Bob Jones" in summary
+    # Should not crash or contain style-related content
+    assert "Writing tone" not in summary
+
+
+def test_profile_summary_partial_writing_style(tmp_db):
+    """Should handle partial writing style data gracefully."""
+    profile = UserProfile(
+        display_name="Carol Davis",
+        email_address="carol@example.com",
+        profile_data={
+            "writing_style": {
+                "tone": "formal",
+                # Missing other fields — should not crash
+            },
+        },
+    )
+    tmp_db.upsert_profile(profile)
+
+    summary = get_profile_summary(tmp_db)
+    assert "formal" in summary
+    assert "Carol Davis" in summary

@@ -249,7 +249,8 @@ def _ensure_bodies(emails: list, store: Store) -> None:
     for email in emails:
         if email.body_plain:
             continue
-        body = fetch_email_body(email.message_id)
+        folder = getattr(email, "folder", "INBOX") or "INBOX"
+        body = fetch_email_body(email.message_id, folder=folder)
         if body:
             email.body_plain = body
             store.update_email_body(email.message_id, body)

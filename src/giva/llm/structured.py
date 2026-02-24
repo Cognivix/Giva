@@ -104,6 +104,31 @@ class DailyReviewResult(BaseModel):
     suggested_focus: list[str] = Field(default_factory=list)
 
 
+# --- Weekly Reflection ---
+
+
+class WeeklyReflectionResult(BaseModel):
+    """Structured weekly reflection output."""
+
+    summary: str = Field(description="Summary of the week's progress")
+    retire_goals: list[dict] = Field(
+        default_factory=list,
+        description="Goals to suggest retiring [{goal_id, reason}]",
+    )
+    suggest_goals: list[dict] = Field(
+        default_factory=list,
+        description="New goals to suggest [{title, tier, category, reason}]",
+    )
+    strategy_updates: list[dict] = Field(
+        default_factory=list,
+        description="Strategy adjustments [{goal_id, suggestion}]",
+    )
+    highlights: list[str] = Field(
+        default_factory=list,
+        description="Key achievements this week",
+    )
+
+
 # --- Orchestrator models ---
 
 

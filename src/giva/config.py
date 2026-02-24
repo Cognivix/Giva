@@ -15,9 +15,14 @@ _USER_CONFIG = Path("~/.config/giva/config.toml").expanduser()
 
 @dataclass(frozen=True)
 class MailConfig:
-    mailboxes: list[str] = field(default_factory=lambda: ["INBOX", "Sent"])
+    mailboxes: list[str] = field(
+        default_factory=lambda: ["INBOX", "Sent", "Drafts", "Archive"]
+    )
     batch_size: int = 50
     sync_interval_minutes: int = 15
+    initial_sync_months: int = 4        # months of history for bootstrap sync
+    deep_sync_max_months: int = 24      # max lookback for incremental deepening
+    writing_style_sample_size: int = 20  # sent emails to sample for style analysis
 
 
 @dataclass(frozen=True)
@@ -52,6 +57,9 @@ class GoalsConfig:
     daily_review_hour: int = 18
     max_strategies_per_run: int = 1
     plan_horizon_days: int = 7
+    # Weekly reflection: day (0=Mon..6=Sun) and hour
+    weekly_reflection_day: int = 6  # Sunday
+    weekly_reflection_hour: int = 18
 
 
 @dataclass(frozen=True)
@@ -225,9 +233,20 @@ def load_config() -> GivaConfig:
         data_dir=data_dir,
         log_level=giva_raw.get("log_level", "INFO"),
         mail=MailConfig(
-            mailboxes=raw.get("mail", {}).get("mailboxes", ["INBOX", "Sent"]),
+            mailboxes=raw.get("mail", {}).get(
+                "mailboxes", ["INBOX", "Sent", "Drafts", "Archive"]
+            ),
             batch_size=int(raw.get("mail", {}).get("batch_size", 50)),
             sync_interval_minutes=int(raw.get("mail", {}).get("sync_interval_minutes", 15)),
+            initial_sync_months=int(
+                raw.get("mail", {}).get("initial_sync_months", 4)
+            ),
+            deep_sync_max_months=int(
+                raw.get("mail", {}).get("deep_sync_max_months", 24)
+            ),
+            writing_style_sample_size=int(
+                raw.get("mail", {}).get("writing_style_sample_size", 20)
+            ),
         ),
         calendar=CalendarConfig(
             sync_window_past_days=int(raw.get("calendar", {}).get("sync_window_past_days", 7)),

@@ -849,6 +849,25 @@ async def update_task_status(
     if not success:
         raise HTTPException(status_code=404, detail="Task not found")
 
+    # Auto-aggregate progress on linked goal when a task is completed
+    if req.status == "done":
+        try:
+            from giva.intelligence.agents import aggregate_task_progress
+
+            action = aggregate_task_progress(task_id, store)
+            if action:
+                event = {
+                    "event": "agent_actions",
+                    "data": json.dumps([action]),
+                }
+                for q in getattr(request.app.state, "session_queues", []):
+                    try:
+                        q.put_nowait(event)
+                    except Exception:
+                        pass
+        except Exception as e:
+            log.debug("Progress aggregation error for task %d: %s", task_id, e)
+
     return UpdateStatusResponse(success=True, task_id=task_id, status=req.status)
 
 
@@ -2177,23 +2196,25 @@ async def _run_sync_in_executor(
     def _run():
         from giva.intelligence.profile import update_profile
         from giva.sync.calendar import sync_calendar
-        from giva.sync.mail import sync_mail_jxa
+        from giva.sync.mail import sync_mail_initial
 
-        log.info("Sync executor started")
+        log.info("Sync executor started (initial sync, %d months)",
+                 config.mail.initial_sync_months)
 
-        # --- Email sync with progress callback ---
-        total_est = config.mail.batch_size * len(config.mail.mailboxes)
+        # --- Email sync with progress callback (date-filtered initial sync) ---
+        total_est = 100  # placeholder until JXA reports actual count
 
         def _on_mail_progress(synced, filtered, total):
             nonlocal total_est
-            total_est = total  # JXA returns actual mailbox size
+            total_est = total
             _emit_progress(synced, filtered, total_est, 0, 0, "emails")
 
         _emit_progress(0, 0, total_est, 0, 0, "emails")
 
         with _llm_lock:
-            mail_synced, mail_filtered = sync_mail_jxa(
-                store, config.mail.mailboxes, config.mail.batch_size,
+            mail_synced, mail_filtered = sync_mail_initial(
+                store, config.mail.mailboxes,
+                months=config.mail.initial_sync_months,
                 on_progress=_on_mail_progress, config=config,
             )
         log.info("Email sync done: %d synced, %d filtered", mail_synced, mail_filtered)
@@ -3077,6 +3098,37 @@ async def review_history(
         }
         for r in reviews
     ]
+
+
+# --- Weekly Reflection Endpoints ---
+
+
+@app.get("/api/reflection/status")
+async def reflection_status(request: Request) -> dict:
+    """Check if a weekly reflection is due."""
+    store: Store = request.app.state.store
+    config = request.app.state.config
+
+    from giva.intelligence.daily_review import is_reflection_due
+
+    return {"due": is_reflection_due(store, config)}
+
+
+@app.post("/api/reflection/start")
+async def reflection_start(request: Request):
+    """Start a weekly reflection. Returns SSE stream."""
+    store: Store = request.app.state.store
+    config = request.app.state.config
+
+    from giva.intelligence.daily_review import generate_weekly_reflection
+
+    async def event_generator():
+        async for event in _sync_gen_to_sse(
+            generate_weekly_reflection, store, config
+        ):
+            yield event
+
+    return EventSourceResponse(event_generator())
 
 
 # --- Entry point ---
