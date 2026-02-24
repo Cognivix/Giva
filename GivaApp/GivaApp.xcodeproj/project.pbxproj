@@ -35,6 +35,7 @@
 		B1000004 /* ServerManagerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000004 /* ServerManagerTests.swift */; };
 		B1000005 /* GivaViewModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000005 /* GivaViewModelTests.swift */; };
 		B1000006 /* GoalsViewModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000006 /* GoalsViewModelTests.swift */; };
+		B1000007 /* APIModelsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000008 /* APIModelsTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -78,6 +79,7 @@
 		B2000004 /* ServerManagerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerManagerTests.swift; sourceTree = "<group>"; };
 		B2000005 /* GivaViewModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GivaViewModelTests.swift; sourceTree = "<group>"; };
 		B2000006 /* GoalsViewModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GoalsViewModelTests.swift; sourceTree = "<group>"; };
+		B2000008 /* APIModelsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIModelsTests.swift; sourceTree = "<group>"; };
 		B2000007 /* GivaAppTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = GivaAppTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -188,6 +190,7 @@
 				B2000004 /* ServerManagerTests.swift */,
 				B2000005 /* GivaViewModelTests.swift */,
 				B2000006 /* GoalsViewModelTests.swift */,
+				B2000008 /* APIModelsTests.swift */,
 			);
 			path = GivaAppTests;
 			sourceTree = "<group>";
@@ -325,6 +328,7 @@
 				B1000004 /* ServerManagerTests.swift in Sources */,
 				B1000005 /* GivaViewModelTests.swift in Sources */,
 				B1000006 /* GoalsViewModelTests.swift in Sources */,
+				B1000007 /* APIModelsTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
