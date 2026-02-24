@@ -7,7 +7,7 @@
 import SwiftUI
 
 struct BootstrapView: View {
-    @ObservedObject var bootstrap: BootstrapManager
+    var bootstrap: BootstrapManager
 
     @State private var dotCount = 0
     private let dotTimer = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()

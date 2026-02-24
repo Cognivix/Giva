@@ -2,6 +2,24 @@
 
 import Foundation
 
+// MARK: - Server Phase
+
+enum ServerPhase: String, Equatable {
+    case unknown
+    case ready
+    case downloadingDefaultModel = "downloading_default_model"
+    case awaitingModelSelection = "awaiting_model_selection"
+    case downloadingUserModels = "downloading_user_models"
+    case validating
+    case syncing
+    case onboarding
+    case operational
+
+    init(serverString: String) {
+        self = ServerPhase(rawValue: serverString) ?? .unknown
+    }
+}
+
 // MARK: - Request Models
 
 struct ChatRequest: Encodable {

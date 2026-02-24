@@ -22,7 +22,7 @@ enum APIError: LocalizedError {
     }
 }
 
-class APIService {
+class APIService: APIServiceProtocol {
     let baseURL: URL
     private let session: URLSession
     /// Dedicated session for SSE streams — long/no timeout so downloads can report for hours.

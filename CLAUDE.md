@@ -57,9 +57,11 @@ src/giva/
 
 GivaApp/                    # SwiftUI macOS menu bar app (Xcode project)
 ├── Services/
+│   ├── APIService.swift        # URLSession wrapper + SSE streaming
+│   ├── APIServiceProtocol.swift # Protocol for dependency injection + testing
+│   ├── AgentActionHandler.swift # Shared agent action parsing (used by both ViewModels)
 │   ├── BootstrapManager.swift  # First-run: venv creation, pip install, launchd daemon
 │   ├── ServerManager.swift     # Connects to launchd-managed daemon (health polling)
-│   ├── APIService.swift        # URLSession wrapper + SSE streaming
 │   └── FileLogger.swift        # Dual-destination logger: os.Logger + file (~/.local/share/giva/logs/)
 ├── Views/
 │   ├── BootstrapView.swift     # Cooking spinner shown during first-run setup
@@ -69,11 +71,20 @@ GivaApp/                    # SwiftUI macOS menu bar app (Xcode project)
 │   ├── GoalsWindowView.swift   # Goals detail window (strategy, objectives, goal chat)
 │   └── QuickActionsView.swift  # Bottom action bar
 ├── ViewModels/
-│   ├── GivaViewModel.swift     # Central state management
-│   └── GoalsViewModel.swift    # Goals window state (CRUD, chat, strategies)
+│   ├── GivaViewModel.swift     # Central state management (@Observable)
+│   └── GoalsViewModel.swift    # Goals window state (@Observable)
 ├── Models/
-│   └── APIModels.swift         # Codable structs for API responses
+│   └── APIModels.swift         # Codable structs + ServerPhase enum
 └── GivaApp.swift               # App entry point (bootstrap → main UI)
+
+GivaAppTests/               # Swift Testing test suite
+├── Mocks/
+│   └── MockAPIService.swift    # Configurable mock (stubs + call counting)
+├── ServerPhaseTests.swift
+├── AgentActionHandlerTests.swift
+├── ServerManagerTests.swift
+├── GivaViewModelTests.swift
+└── GoalsViewModelTests.swift
 
 scripts/                # One-shot utility scripts
 tests/                  # pytest test suite mirroring src/ structure
@@ -141,6 +152,7 @@ Key env overrides: `GIVA_LLM_MODEL`, `GIVA_LLM_FILTER_MODEL`, `GIVA_DATA_DIR`, `
 
 ## Testing
 
+### Python
 ```bash
 pytest                       # all tests
 pytest tests/test_db/        # DB layer only
@@ -148,6 +160,14 @@ pytest -x -q                 # stop on first failure, quiet
 ```
 
 Tests use `tmp_path` fixtures for isolated SQLite DBs. No real LLM or Apple Mail calls in tests.
+
+### Swift (GivaAppTests)
+```bash
+xcodebuild test -project GivaApp/GivaApp.xcodeproj -scheme GivaApp \
+  -destination 'platform=macOS' -only-testing:GivaAppTests
+```
+
+Uses the **Swift Testing** framework (`@Test`, `#expect`, `@Suite`). Test target is a hosted unit test bundle (`TEST_HOST` = app binary). Mock API via `MockAPIService` conforming to `APIServiceProtocol`.
 
 ## Conventions
 
@@ -160,8 +180,12 @@ Tests use `tmp_path` fixtures for isolated SQLite DBs. No real LLM or Apple Mail
 - **Prompt design**: chat prompts enforce brevity and reference background agents. Onboarding prompts require visible text BEFORE any `<profile_update>` tag block.
 - **Agent design**: new agents use the filter model unless they need reasoning/synthesis. Post-chat agents are batched into a single LLM call to minimize lock contention. See `docs/agent-architecture.md` for routing tables.
 - **SwiftUI UI**: Apple HIG — progressive disclosure (system actions in gear menu, daily actions in bottom bar), content-first layout, `serverPhase` as single source of truth. Full guidelines in `docs/agent-architecture.md` § 7.
+- **`@Observable` pattern (macOS 26+)**: All ViewModels and managers use `@Observable` (not `ObservableObject`/`@Published`). Owned objects use `@State` (not `@StateObject`). Environment injection uses `.environment(obj)` / `@Environment(Type.self)` (not `.environmentObject` / `@EnvironmentObject`). For two-way bindings on `@Observable` objects, use `@Bindable var viewModel = viewModel` as a local variable inside `body` or `@ViewBuilder` computed properties.
+- **`ServerPhase` enum**: All server phase comparisons use the `ServerPhase` enum (in `APIModels.swift`), never raw strings. Convert from server strings via `ServerPhase(serverString:)`.
+- **`APIServiceProtocol`**: All ViewModels reference `any APIServiceProtocol`, never concrete `APIService`. This enables mock injection for testing. Default parameter values are provided via protocol extension.
+- **`AgentActionHandler`**: Shared agent action parsing (actions, confirmations, queued agent names) lives in `AgentActionHandler.swift`. Both `GivaViewModel` and `GoalsViewModel` use it — never duplicate parsing logic.
 - **No system dialogs in menu bar apps**: `.confirmationDialog`, `.alert`, and `.sheet` do not work reliably inside `MenuBarExtra(.window)` popovers — they appear behind the popover, fail to dismiss, or never show at all. **Always use inline confirmation banners** embedded in the view hierarchy instead. See `MainPanelView.confirmationBanner(for:)` for the pattern.
-- **Xcode project file**: When adding or removing `.swift` files outside of Xcode, you **must** manually update `GivaApp.xcodeproj/project.pbxproj`. Each new file requires entries in four places: (1) `PBXBuildFile` — a build reference pointing to the file reference, (2) `PBXFileReference` — the file's identity and type, (3) `PBXGroup` — add the file reference to its parent group's `children` list, (4) `PBXSourcesBuildPhase` — add the build reference to the `files` list. Follow the ID convention of existing entries (e.g., `A1xxxxxx` for build files, `A2xxxxxx` for file references). Forgetting any of these causes "Cannot find X in scope" build errors.
+- **Xcode project file**: When adding or removing `.swift` files outside of Xcode, you **must** manually update `GivaApp.xcodeproj/project.pbxproj`. Each new file requires entries in four places: (1) `PBXBuildFile` — a build reference pointing to the file reference, (2) `PBXFileReference` — the file's identity and type, (3) `PBXGroup` — add the file reference to its parent group's `children` list, (4) `PBXSourcesBuildPhase` — add the build reference to the `files` list. App source files use `A1xxxxxx`/`A2xxxxxx` IDs; test files use `B1xxxxxx`/`B2xxxxxx`. Forgetting any of these causes "Cannot find X in scope" build errors.
 
 ## Logging
 

@@ -8,7 +8,7 @@ import SwiftUI
 // MARK: - Main Window View
 
 struct GoalsWindowView: View {
-    @ObservedObject var viewModel: GoalsViewModel
+    @Bindable var viewModel: GoalsViewModel
 
     // Selection is owned by the view via @State — safe for List binding.
     // The viewModel never stores the selected ID; it only loads data via
@@ -100,7 +100,7 @@ struct GoalsWindowView: View {
 // MARK: - Sidebar
 
 struct GoalsSidebarView: View {
-    @ObservedObject var viewModel: GoalsViewModel
+    @Bindable var viewModel: GoalsViewModel
     @Binding var selection: Int?
 
     var body: some View {
@@ -183,7 +183,7 @@ struct GoalsSidebarView: View {
 struct GoalDetailView: View {
     let goal: GoalItem
     let goalId: Int
-    @ObservedObject var viewModel: GoalsViewModel
+    @Bindable var viewModel: GoalsViewModel
 
     var body: some View {
         ScrollView {
@@ -692,7 +692,7 @@ struct GoalDetailView: View {
 
 struct AddProgressButton: View {
     let goalId: Int
-    @ObservedObject var viewModel: GoalsViewModel
+    @Bindable var viewModel: GoalsViewModel
     @State private var showPopover = false
     @State private var noteText = ""
 
@@ -737,7 +737,7 @@ struct AddProgressButton: View {
 // MARK: - Create Sheet
 
 struct GoalCreateSheet: View {
-    @ObservedObject var viewModel: GoalsViewModel
+    @Bindable var viewModel: GoalsViewModel
     @Environment(\.dismiss) private var dismiss
 
     @State private var title = ""
@@ -830,7 +830,7 @@ struct GoalCreateSheet: View {
 
 struct GoalEditSheet: View {
     let goal: GoalItem
-    @ObservedObject var viewModel: GoalsViewModel
+    @Bindable var viewModel: GoalsViewModel
     @Environment(\.dismiss) private var dismiss
 
     @State private var title: String
@@ -905,7 +905,7 @@ struct GoalEditSheet: View {
 // MARK: - Daily Review Banner
 
 struct DailyReviewBanner: View {
-    @ObservedObject var viewModel: GoalsViewModel
+    @Bindable var viewModel: GoalsViewModel
     @State private var showReviewSheet = false
 
     var body: some View {
@@ -933,7 +933,7 @@ struct DailyReviewBanner: View {
 // MARK: - Daily Review Sheet
 
 struct DailyReviewSheet: View {
-    @ObservedObject var viewModel: GoalsViewModel
+    @Bindable var viewModel: GoalsViewModel
     @Environment(\.dismiss) private var dismiss
 
     @State private var userResponse = ""
@@ -1026,7 +1026,7 @@ struct DailyReviewSheet: View {
 // MARK: - Infer Overlay
 
 struct InferOverlay: View {
-    @ObservedObject var viewModel: GoalsViewModel
+    @Bindable var viewModel: GoalsViewModel
 
     var body: some View {
         ZStack {

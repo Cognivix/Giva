@@ -12,7 +12,7 @@
 import SwiftUI
 
 struct QuickActionsView: View {
-    @EnvironmentObject var viewModel: GivaViewModel
+    @Environment(GivaViewModel.self) private var viewModel
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {

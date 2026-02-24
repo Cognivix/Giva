@@ -7,6 +7,7 @@
 // Three states: connected (green), connecting (yellow), offline (red).
 
 import Foundation
+import Observation
 
 enum ConnectionState: String {
     case connected = "Connected"
@@ -22,10 +23,10 @@ enum ConnectionState: String {
     }
 }
 
-@MainActor
-class ServerManager: ObservableObject {
-    @Published var connectionState: ConnectionState = .offline
-    @Published var lastError: String?
+@MainActor @Observable
+class ServerManager {
+    var connectionState: ConnectionState = .offline
+    var lastError: String?
 
     /// Shorthand for backward compatibility
     var isRunning: Bool {

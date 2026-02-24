@@ -7,7 +7,7 @@
 import SwiftUI
 
 struct AgentActivityPanel: View {
-    @EnvironmentObject var viewModel: GivaViewModel
+    @Environment(GivaViewModel.self) private var viewModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {

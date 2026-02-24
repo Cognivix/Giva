@@ -10,7 +10,7 @@
 import SwiftUI
 
 struct GivaMainWindowView: View {
-    @EnvironmentObject var viewModel: GivaViewModel
+    @Environment(GivaViewModel.self) private var viewModel
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
@@ -21,7 +21,7 @@ struct GivaMainWindowView: View {
             // Agent activity sidebar (only when agents are active)
             if !viewModel.activeJobs.isEmpty {
                 AgentActivityPanel()
-                    .environmentObject(viewModel)
+                    .environment(viewModel)
             }
         }
         .navigationTitle("Giva")
@@ -59,7 +59,10 @@ struct GivaMainWindowView: View {
 
     // MARK: - Main Content
 
+    @ViewBuilder
     private var mainContent: some View {
+        @Bindable var viewModel = viewModel
+
         VStack(spacing: 0) {
             // Phase-aware status banner
             if showPhaseBanner {
@@ -90,13 +93,13 @@ struct GivaMainWindowView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .environmentObject(viewModel)
+        .environment(viewModel)
     }
 
     // MARK: - Phase Banner
 
     private var showPhaseBanner: Bool {
-        viewModel.serverPhase == "syncing"
+        viewModel.serverPhase == .syncing
             || viewModel.isSyncingManual
             || viewModel.isLoadingModel
     }

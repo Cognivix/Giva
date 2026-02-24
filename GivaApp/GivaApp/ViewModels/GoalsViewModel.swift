@@ -1,53 +1,51 @@
 // GoalsViewModel.swift - State management for the Goals window.
 
 import SwiftUI
+import Observation
 
-@MainActor
-class GoalsViewModel: ObservableObject {
-    let apiService: APIService
+@MainActor @Observable
+class GoalsViewModel {
+    let apiService: any APIServiceProtocol
 
     // Goal list
-    @Published var goals: [GoalItem] = []
-    @Published var isLoading: Bool = false
-    @Published var errorMessage: String?
+    var goals: [GoalItem] = []
+    var isLoading: Bool = false
+    var errorMessage: String?
 
-    // Selection — detail data keyed by goal ID.
-    // The sidebar List binds to a @State in the view; the viewModel only holds
-    // fetched detail + chat for the currently selected goal.
-    @Published var goalDetail: GoalItem?
-    @Published var isLoadingDetail: Bool = false
+    // Selection
+    var goalDetail: GoalItem?
+    var isLoadingDetail: Bool = false
 
     // Daily review
-    @Published var isDailyReviewDue: Bool = false
-    @Published var isReviewStreaming: Bool = false
-    @Published var reviewStreamText: String = ""
-    @Published var reviewId: Int?
+    var isDailyReviewDue: Bool = false
+    var isReviewStreaming: Bool = false
+    var reviewStreamText: String = ""
+    var reviewId: Int?
 
     // Intelligence streaming
-    @Published var isInferring: Bool = false
-    @Published var inferStreamText: String = ""
-    @Published var isStrategyStreaming: Bool = false
-    @Published var strategyStreamText: String = ""
-    @Published var isPlanStreaming: Bool = false
-    @Published var planStreamText: String = ""
-    @Published var isPlanReviewStreaming: Bool = false
-    @Published var planReviewStreamText: String = ""
+    var isInferring: Bool = false
+    var inferStreamText: String = ""
+    var isStrategyStreaming: Bool = false
+    var strategyStreamText: String = ""
+    var isPlanStreaming: Bool = false
+    var planStreamText: String = ""
+    var isPlanReviewStreaming: Bool = false
+    var planReviewStreamText: String = ""
 
     // Goal chat
-    @Published var goalChatMessages: [ChatMessage] = []
-    @Published var isGoalChatStreaming: Bool = false
-    @Published var goalChatInput: String = ""
+    var goalChatMessages: [ChatMessage] = []
+    var isGoalChatStreaming: Bool = false
+    var goalChatInput: String = ""
 
     // Create/Edit sheet
-    @Published var showCreateSheet: Bool = false
-    @Published var showEditSheet: Bool = false
+    var showCreateSheet: Bool = false
+    var showEditSheet: Bool = false
 
     // Agent state for goal chat
-    @Published var pendingConfirmation: AgentConfirmation?
+    var pendingConfirmation: AgentConfirmation?
 
-    // Programmatic selection (set after createGoal, child tap, etc.)
-    // The view observes this and syncs it to its own @State.
-    @Published var pendingSelection: Int?
+    // Programmatic selection
+    var pendingSelection: Int?
 
     // Active streaming task (for cancellation)
     private var streamTask: Task<Void, Never>?
@@ -56,7 +54,7 @@ class GoalsViewModel: ObservableObject {
     // The goal ID we're currently loading detail for
     private var loadingGoalId: Int?
 
-    init(apiService: APIService) {
+    init(apiService: any APIServiceProtocol) {
         self.apiService = apiService
     }
 
@@ -399,27 +397,20 @@ class GoalsViewModel: ObservableObject {
     // MARK: - Agent Action Handling
 
     private func handleAgentActions(_ json: String) {
-        guard let data = json.data(using: .utf8),
-              let actions = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
-        else { return }
-
-        for action in actions {
-            guard let type = action["type"] as? String else { continue }
-            switch type {
+        for action in AgentActionHandler.parseActions(json) {
+            switch action.type {
             case "task_created":
-                if let title = action["title"] as? String {
-                    appendSystemChatMessage("✓ Created task: \(title)")
-                }
+                if let title = action.title { appendSystemChatMessage("✓ Created task: \(title)") }
             case "objective_created":
-                if let title = action["title"] as? String {
+                if let title = action.title {
                     appendSystemChatMessage("✓ Created objective: \(title)")
                 }
             case "task_completed":
-                if let title = action["title"] as? String {
+                if let title = action.title {
                     appendSystemChatMessage("✓ Completed task: \(title)")
                 }
             case "goal_progress":
-                if let note = action["note"] as? String {
+                if let note = action.note {
                     appendSystemChatMessage("✓ Progress logged: \(note)")
                 }
             default:
@@ -432,24 +423,17 @@ class GoalsViewModel: ObservableObject {
         goalChatMessages.append(ChatMessage(role: "system", content: text))
     }
 
-    /// Handle agent_confirm event — an agent wants user approval.
     private func handleAgentConfirmation(_ json: String) {
-        guard let confirmation = AgentConfirmation(from: json) else { return }
+        guard let confirmation = AgentActionHandler.parseConfirmation(json) else { return }
         pendingConfirmation = confirmation
         goalChatMessages.append(ChatMessage(
-            role: "system",
-            content: "[AGENT_CONFIRM:\(confirmation.id)]"
+            role: "system", content: "[AGENT_CONFIRM:\(confirmation.id)]"
         ))
     }
 
-    /// Handle agent_queued event — agent enqueued for background execution.
     private func handleAgentQueued(_ json: String) {
-        guard let data = json.data(using: .utf8),
-              let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let agentName = dict["agent_name"] as? String
-        else { return }
-
-        appendSystemChatMessage("⚡ \(agentName) is working in the background…")
+        guard let name = AgentActionHandler.parseQueuedAgentName(json) else { return }
+        appendSystemChatMessage("⚡ \(name) is working in the background…")
     }
 
     /// Approve a pending agent confirmation in goal chat.

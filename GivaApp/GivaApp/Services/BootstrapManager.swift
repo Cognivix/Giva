@@ -9,6 +9,7 @@
 // bootstrap state via REST/SSE and mirrors it for SwiftUI.
 
 import Foundation
+import Observation
 
 private let log = Log.make(category: "Bootstrap")
 
@@ -21,36 +22,36 @@ struct SetupProgress: Codable {
     var version: String?
 }
 
-@MainActor
-class BootstrapManager: ObservableObject {
-    // --- Published state for the UI ---
+@MainActor @Observable
+class BootstrapManager {
+    // --- Observable state for the UI ---
 
     /// Server-reported bootstrap status (nil until server is reachable)
-    @Published var serverStatus: BootstrapStatusResponse?
+    var serverStatus: BootstrapStatusResponse?
 
     /// True once the server reports ready
-    @Published var isReady = false
+    var isReady = false
 
     /// True while giva-setup.py is running (pre-server phase)
-    @Published var isSettingUp = false
+    var isSettingUp = false
 
     /// True once the server is reachable (health check passes)
-    @Published var isServerReachable = false
+    var isServerReachable = false
 
     /// Current display message for the UI
-    @Published var displayMessage = "Starting..."
+    var displayMessage = "Starting..."
 
     /// Error message (setup script or server)
-    @Published var errorMessage: String?
+    var errorMessage: String?
 
     /// Log lines from the setup script (pre-server phase)
-    @Published var logLines: [String] = []
+    var logLines: [String] = []
 
     /// Download progress from server bootstrap (model_id → progress info)
-    @Published var downloadProgress: [String: BootstrapStepProgress] = [:]
+    var downloadProgress: [String: BootstrapStepProgress] = [:]
 
     /// API service (created once server is reachable)
-    private(set) var apiService: APIService?
+    private(set) var apiService: (any APIServiceProtocol)?
 
     /// SSE observation task
     private var observeTask: Task<Void, Never>?

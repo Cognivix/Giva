@@ -19,6 +19,7 @@
 // the server pushes a new phase.
 
 import AppKit
+import Observation
 import SwiftUI
 
 private let log = Log.make(category: "Session")
@@ -60,91 +61,84 @@ struct SyncProgress {
     }
 }
 
-@MainActor
-class GivaViewModel: ObservableObject {
+@MainActor @Observable
+class GivaViewModel {
     // Server — apiService is provided by BootstrapManager once server is reachable
-    @Published var serverManager = ServerManager()
-    var apiService: APIService?
+    var serverManager = ServerManager()
+    var apiService: (any APIServiceProtocol)?
 
     // ─── Single authoritative state ───
-    // Mirrors the server's checkpoint.  Everything derives from this.
-    @Published var serverPhase: String = "unknown"
+    var serverPhase: ServerPhase = .unknown
 
     /// Live sync progress (populated during syncing phase)
-    @Published var syncProgress: SyncProgress?
+    var syncProgress: SyncProgress?
 
     // ─── Computed properties derived from serverPhase ───
 
-    /// True when serverPhase == "onboarding"
-    var isOnboarding: Bool { serverPhase == "onboarding" }
+    var isOnboarding: Bool { serverPhase == .onboarding }
 
-    /// True when serverPhase == "operational"
-    var isOperational: Bool { serverPhase == "operational" }
+    var isOperational: Bool { serverPhase == .operational }
 
-    /// True when the server is syncing (initial or on-demand)
-    var isSyncing: Bool { serverPhase == "syncing" || isSyncingManual }
+    var isSyncing: Bool { serverPhase == .syncing || isSyncingManual }
 
-    /// True when any system action is in progress
     var isSystemBusy: Bool { isRestarting || isResetting || isUpgrading }
 
-    /// True when chat input should be enabled
     var isChatEnabled: Bool {
-        (serverPhase == "operational" || serverPhase == "onboarding")
+        (serverPhase == .operational || serverPhase == .onboarding)
         && !isSystemBusy
     }
 
-    /// True when primary actions (sync, suggest, extract) should be enabled
     var areActionsEnabled: Bool {
-        serverPhase == "operational" && !isSystemBusy
+        serverPhase == .operational && !isSystemBusy
     }
 
     // Chat
-    @Published var messages: [ChatMessage] = []
-    @Published var currentInput: String = ""
-    @Published var isStreaming: Bool = false
-    @Published var isLoadingModel: Bool = false
+    var messages: [ChatMessage] = []
+    var currentInput: String = ""
+    var isStreaming: Bool = false
+    var isLoadingModel: Bool = false
 
     // Voice
-    @Published var isVoiceEnabled: Bool = false
-    @Published var isRecording: Bool = false
+    var isVoiceEnabled: Bool = false
+    var isRecording: Bool = false
     let audioService = AudioPlaybackService()
 
     // Tasks
-    @Published var tasks: [TaskItem] = []
-    @Published var isLoadingTasks: Bool = false
+    var tasks: [TaskItem] = []
+    var isLoadingTasks: Bool = false
 
     // Status & Profile
-    @Published var status: StatusResponse?
-    @Published var profile: ProfileResponse?
+    var status: StatusResponse?
+    var profile: ProfileResponse?
 
     // Goals
-    @Published var isDailyReviewDue: Bool = false
+    var isDailyReviewDue: Bool = false
     var goalsViewModel: GoalsViewModel?
 
     // Transient action flags (client-side only, not part of the Markov chain)
-    @Published var isRestarting: Bool = false
-    @Published var isResetting: Bool = false
-    @Published var isUpgrading: Bool = false
+    var isRestarting: Bool = false
+    var isResetting: Bool = false
+    var isUpgrading: Bool = false
 
     /// Manual sync in progress (user-triggered via Sync button, NOT the initial sync)
-    @Published var isSyncingManual: Bool = false
+    var isSyncingManual: Bool = false
 
     // Model Setup
-    @Published var isModelSetupNeeded: Bool = false
-    @Published var isSettingUpModels: Bool = false
-    @Published var availableModels: AvailableModelsResponse?
-    @Published var downloadProgress: [String: Double] = [:]
-    @Published var isDownloadingModels: Bool = false
-    @Published var modelSetupError: String?
+    var isModelSetupNeeded: Bool = false
+    var isSettingUpModels: Bool = false
+    var availableModels: AvailableModelsResponse?
+    var downloadProgress: [String: Double] = [:]
+    var isDownloadingModels: Bool = false
+    var modelSetupError: String?
 
     // UI
-    @Published var currentTab: AppTab = .chat
-    @Published var isLoading: Bool = false
-    @Published var errorMessage: String?
+    var currentTab: AppTab = .chat
+    var isLoading: Bool = false
+    var errorMessage: String?
 
     // Agent queue state
-    @Published var pendingConfirmation: AgentConfirmation?
-    @Published var activeJobs: [AgentJobItem] = []
+    var pendingConfirmation: AgentConfirmation?
+    var activeJobs: [AgentJobItem] = []
 
     // Reference to bootstrap manager (set from GivaApp)
     weak var bootstrapManager: BootstrapManager?
@@ -179,15 +173,15 @@ class GivaViewModel: ObservableObject {
         guard let api = apiService else { return }
         do {
             let session = try await api.getSession()
-            serverPhase = session.phase
+            serverPhase = ServerPhase(serverString: session.phase)
             log.info("fetchSessionState → phase=\(session.phase)")
 
-            switch session.phase {
-            case "syncing":
+            switch serverPhase {
+            case .syncing:
                 if messages.isEmpty {
                     appendSystemMessage("Syncing your emails and calendar...")
                 }
-            case "onboarding":
+            case .onboarding:
                 messages.removeAll()
                 for msg in session.messages {
                     messages.append(ChatMessage(role: msg.role, content: msg.content))
@@ -248,18 +242,18 @@ class GivaViewModel: ObservableObject {
         switch event.event {
         case "phase":
             let oldPhase = serverPhase
-            serverPhase = event.data
-            log.info("phase: \(oldPhase) → \(event.data)")
+            serverPhase = ServerPhase(serverString: event.data)
+            log.info("phase: \(oldPhase) → \(serverPhase)")
 
-            switch event.data {
-            case "syncing":
+            switch serverPhase {
+            case .syncing:
                 syncProgress = SyncProgress()
-            case "onboarding":
+            case .onboarding:
                 syncProgress = nil
-            case "operational":
+            case .operational:
                 syncProgress = nil
                 isSyncingManual = false
-                if oldPhase == "onboarding" {
+                if oldPhase == .onboarding {
                     appendSystemMessage("Onboarding complete! Your preferences have been saved.")
                     Task { await loadProfile() }
                 }
@@ -444,27 +438,16 @@ class GivaViewModel: ObservableObject {
 
     /// Handle agent_actions events from the chat stream (post-chat agents).
     private func handleAgentActions(_ json: String) {
-        guard let data = json.data(using: .utf8),
-              let actions = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
-        else { return }
-
-        for action in actions {
-            guard let type = action["type"] as? String else { continue }
-            switch type {
+        for action in AgentActionHandler.parseActions(json) {
+            switch action.type {
             case "task_created":
-                if let title = action["title"] as? String {
-                    appendSystemMessage("✓ Created task: \(title)")
-                }
+                if let title = action.title { appendSystemMessage("✓ Created task: \(title)") }
                 Task { await loadTasks() }
             case "task_completed":
-                if let title = action["title"] as? String {
-                    appendSystemMessage("✓ Completed task: \(title)")
-                }
+                if let title = action.title { appendSystemMessage("✓ Completed task: \(title)") }
                 Task { await loadTasks() }
             case "preference":
-                if let key = action["key"] as? String {
-                    appendSystemMessage("✓ Noted preference: \(key)")
-                }
+                if let key = action.key { appendSystemMessage("✓ Noted preference: \(key)") }
             default:
                 break
             }
@@ -473,23 +456,15 @@ class GivaViewModel: ObservableObject {
 
     /// Handle agent_confirm event — an agent wants user approval before running.
     private func handleAgentConfirmation(_ json: String) {
-        guard let confirmation = AgentConfirmation(from: json) else { return }
+        guard let confirmation = AgentActionHandler.parseConfirmation(json) else { return }
         pendingConfirmation = confirmation
-        // Insert a marker in the chat so the UI can render a confirmation card
-        messages.append(ChatMessage(
-            role: "system",
-            content: "[AGENT_CONFIRM:\(confirmation.id)]"
-        ))
+        messages.append(ChatMessage(role: "system", content: "[AGENT_CONFIRM:\(confirmation.id)]"))
     }
 
     /// Handle agent_queued event — a non-confirmation agent was queued.
     private func handleAgentQueued(_ json: String) {
-        guard let data = json.data(using: .utf8),
-              let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let agentName = dict["agent_name"] as? String
-        else { return }
-
-        appendSystemMessage("⚡ \(agentName) is working in the background…")
+        guard let name = AgentActionHandler.parseQueuedAgentName(json) else { return }
+        appendSystemMessage("⚡ \(name) is working in the background…")
     }
 
     /// Approve a pending agent confirmation.
@@ -836,7 +811,7 @@ class GivaViewModel: ObservableObject {
         // 3. Clear local UI state
         messages.removeAll()
         tasks.removeAll()
-        serverPhase = "unknown"
+        serverPhase = .unknown
         syncProgress = nil
         profile = nil
         status = nil

@@ -27,7 +27,25 @@
 		A1000012 /* GivaMainWindowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000014 /* GivaMainWindowView.swift */; };
 		A1000013 /* AgentConfirmationCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000015 /* AgentConfirmationCard.swift */; };
 		A1000014 /* AgentActivityPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000016 /* AgentActivityPanel.swift */; };
+		A1000015 /* APIServiceProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000017 /* APIServiceProtocol.swift */; };
+		A1000016 /* AgentActionHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000018 /* AgentActionHandler.swift */; };
+		B1000001 /* MockAPIService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000001 /* MockAPIService.swift */; };
+		B1000002 /* ServerPhaseTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000002 /* ServerPhaseTests.swift */; };
+		B1000003 /* AgentActionHandlerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000003 /* AgentActionHandlerTests.swift */; };
+		B1000004 /* ServerManagerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000004 /* ServerManagerTests.swift */; };
+		B1000005 /* GivaViewModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000005 /* GivaViewModelTests.swift */; };
+		B1000006 /* GoalsViewModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000006 /* GoalsViewModelTests.swift */; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		B3000001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A8000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A5000001;
+			remoteInfo = GivaApp;
+		};
+/* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
 		A2000001 /* GivaApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GivaApp.swift; sourceTree = "<group>"; };
@@ -52,10 +70,26 @@
 		A2000014 /* GivaMainWindowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GivaMainWindowView.swift; sourceTree = "<group>"; };
 		A2000015 /* AgentConfirmationCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentConfirmationCard.swift; sourceTree = "<group>"; };
 		A2000016 /* AgentActivityPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentActivityPanel.swift; sourceTree = "<group>"; };
+		A2000017 /* APIServiceProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIServiceProtocol.swift; sourceTree = "<group>"; };
+		A2000018 /* AgentActionHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentActionHandler.swift; sourceTree = "<group>"; };
+		B2000001 /* MockAPIService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MockAPIService.swift; sourceTree = "<group>"; };
+		B2000002 /* ServerPhaseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerPhaseTests.swift; sourceTree = "<group>"; };
+		B2000003 /* AgentActionHandlerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentActionHandlerTests.swift; sourceTree = "<group>"; };
+		B2000004 /* ServerManagerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerManagerTests.swift; sourceTree = "<group>"; };
+		B2000005 /* GivaViewModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GivaViewModelTests.swift; sourceTree = "<group>"; };
+		B2000006 /* GoalsViewModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GoalsViewModelTests.swift; sourceTree = "<group>"; };
+		B2000007 /* GivaAppTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = GivaAppTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		A3000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B3000002 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -69,6 +103,7 @@
 			isa = PBXGroup;
 			children = (
 				A4000002 /* GivaApp */,
+				B4000001 /* GivaAppTests */,
 				A4000007 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -99,6 +134,8 @@
 			isa = PBXGroup;
 			children = (
 				A2000003 /* APIService.swift */,
+				A2000018 /* AgentActionHandler.swift */,
+				A2000017 /* APIServiceProtocol.swift */,
 				A200000F /* AudioPlaybackService.swift */,
 				A200000D /* BootstrapManager.swift */,
 				A2000013 /* FileLogger.swift */,
@@ -137,8 +174,30 @@
 			isa = PBXGroup;
 			children = (
 				A200000B /* GivaApp.app */,
+				B2000007 /* GivaAppTests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		B4000001 /* GivaAppTests */ = {
+			isa = PBXGroup;
+			children = (
+				B4000002 /* Mocks */,
+				B2000002 /* ServerPhaseTests.swift */,
+				B2000003 /* AgentActionHandlerTests.swift */,
+				B2000004 /* ServerManagerTests.swift */,
+				B2000005 /* GivaViewModelTests.swift */,
+				B2000006 /* GoalsViewModelTests.swift */,
+			);
+			path = GivaAppTests;
+			sourceTree = "<group>";
+		};
+		B4000002 /* Mocks */ = {
+			isa = PBXGroup;
+			children = (
+				B2000001 /* MockAPIService.swift */,
+			);
+			path = Mocks;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -161,6 +220,23 @@
 			productReference = A200000B /* GivaApp.app */;
 			productType = "com.apple.product-type.application";
 		};
+		B5000001 /* GivaAppTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B7000001 /* Build configuration list for PBXNativeTarget "GivaAppTests" */;
+			buildPhases = (
+				B6000001 /* Sources */,
+				B3000002 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				B5000002 /* PBXTargetDependency */,
+			);
+			name = GivaAppTests;
+			productName = GivaAppTests;
+			productReference = B2000007 /* GivaAppTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -173,6 +249,10 @@
 				TargetAttributes = {
 					A5000001 = {
 						CreatedOnToolsVersion = 15.4;
+					};
+					B5000001 = {
+						CreatedOnToolsVersion = 15.4;
+						TestTargetID = A5000001;
 					};
 				};
 			};
@@ -190,6 +270,7 @@
 			projectRoot = "";
 			targets = (
 				A5000001 /* GivaApp */,
+				B5000001 /* GivaAppTests */,
 			);
 		};
 /* End PBXProject section */
@@ -229,10 +310,33 @@
 				A1000012 /* GivaMainWindowView.swift in Sources */,
 				A1000013 /* AgentConfirmationCard.swift in Sources */,
 				A1000014 /* AgentActivityPanel.swift in Sources */,
+				A1000015 /* APIServiceProtocol.swift in Sources */,
+				A1000016 /* AgentActionHandler.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B6000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B1000001 /* MockAPIService.swift in Sources */,
+				B1000002 /* ServerPhaseTests.swift in Sources */,
+				B1000003 /* AgentActionHandlerTests.swift in Sources */,
+				B1000004 /* ServerManagerTests.swift in Sources */,
+				B1000005 /* GivaViewModelTests.swift in Sources */,
+				B1000006 /* GoalsViewModelTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		B5000002 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A5000001 /* GivaApp */;
+			targetProxy = B3000001 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		A9000001 /* Debug */ = {
@@ -397,6 +501,40 @@
 			};
 			name = Release;
 		};
+		B9000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.giva.GivaAppTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/GivaApp.app/Contents/MacOS/GivaApp";
+			};
+			name = Debug;
+		};
+		B9000002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.giva.GivaAppTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/GivaApp.app/Contents/MacOS/GivaApp";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -414,6 +552,15 @@
 			buildConfigurations = (
 				A9000003 /* Debug */,
 				A9000004 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		B7000001 /* Build configuration list for PBXNativeTarget "GivaAppTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B9000001 /* Debug */,
+				B9000002 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

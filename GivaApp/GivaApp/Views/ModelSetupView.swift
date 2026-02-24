@@ -8,8 +8,8 @@
 import SwiftUI
 
 struct ModelSetupView: View {
-    @ObservedObject var viewModel: GivaViewModel
-    @ObservedObject var bootstrap: BootstrapManager
+    var viewModel: GivaViewModel
+    var bootstrap: BootstrapManager
     @State private var selectedAssistant: String = ""
     @State private var selectedFilter: String = ""
     @State private var showCustomize = false

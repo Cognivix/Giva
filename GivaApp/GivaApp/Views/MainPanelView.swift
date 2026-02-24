@@ -10,7 +10,7 @@
 import SwiftUI
 
 struct MainPanelView: View {
-    @EnvironmentObject var viewModel: GivaViewModel
+    @Environment(GivaViewModel.self) private var viewModel
     @Environment(\.openWindow) private var openWindow
 
     // Inline confirmation state (no system dialogs — they break in menu bar apps)
@@ -23,6 +23,8 @@ struct MainPanelView: View {
     }
 
     var body: some View {
+        @Bindable var viewModel = viewModel
+
         VStack(spacing: 0) {
             // Header
             headerBar
@@ -74,7 +76,7 @@ struct MainPanelView: View {
             QuickActionsView()
         }
         .frame(width: 420, height: 520)
-        .environmentObject(viewModel)
+        .environment(viewModel)
     }
 
     // MARK: - Connection State
@@ -91,21 +93,21 @@ struct MainPanelView: View {
 
     private var showPhaseBanner: Bool {
         viewModel.isSystemBusy
-        || viewModel.serverPhase == "syncing"
+        || viewModel.serverPhase == .syncing
         || viewModel.isSyncingManual
-        || viewModel.serverPhase == "onboarding"
-        || viewModel.serverPhase == "ready"
+        || viewModel.serverPhase == .onboarding
+        || viewModel.serverPhase == .ready
     }
 
     @ViewBuilder
     private var phaseBanner: some View {
         if viewModel.isSystemBusy {
             systemActionBanner
-        } else if viewModel.serverPhase == "syncing" || viewModel.isSyncingManual {
+        } else if viewModel.serverPhase == .syncing || viewModel.isSyncingManual {
             syncBanner
-        } else if viewModel.serverPhase == "onboarding" {
+        } else if viewModel.serverPhase == .onboarding {
             onboardingBanner
-        } else if viewModel.serverPhase == "ready" {
+        } else if viewModel.serverPhase == .ready {
             readyBanner
         }
     }

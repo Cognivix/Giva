@@ -12,8 +12,8 @@ import SwiftUI
 
 @main
 struct GivaApp: App {
-    @StateObject private var viewModel = GivaViewModel()
-    @StateObject private var bootstrap = BootstrapManager()
+    @State private var viewModel = GivaViewModel()
+    @State private var bootstrap = BootstrapManager()
     @State private var didLaunch = false
 
     var body: some Scene {
@@ -24,7 +24,7 @@ struct GivaApp: App {
                 if bootstrap.isReady {
                     // Server is fully ready — show main UI
                     MainPanelView()
-                        .environmentObject(viewModel)
+                        .environment(viewModel)
                 } else if let status = bootstrap.serverStatus, status.needsUserInput {
                     // Server needs model selection from user
                     ModelSetupView(viewModel: viewModel, bootstrap: bootstrap)
@@ -52,7 +52,7 @@ struct GivaApp: App {
         Window("Giva", id: "main-window") {
             if bootstrap.isReady {
                 GivaMainWindowView()
-                    .environmentObject(viewModel)
+                    .environment(viewModel)
             } else {
                 ContentUnavailableView(
                     "Server Not Ready",

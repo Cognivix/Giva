@@ -4,16 +4,18 @@
 import SwiftUI
 
 struct ChatView: View {
-    @EnvironmentObject var viewModel: GivaViewModel
+    @Environment(GivaViewModel.self) private var viewModel
 
     var body: some View {
+        @Bindable var viewModel = viewModel
+
         VStack(spacing: 0) {
             // Message list
             ScrollViewReader { proxy in
                 ScrollView {
                     if viewModel.messages.isEmpty {
                         VStack(spacing: 12) {
-                            if viewModel.serverPhase == "syncing" {
+                            if viewModel.serverPhase == .syncing {
                                 ProgressView()
                                     .controlSize(.large)
                                     .padding(.bottom, 4)

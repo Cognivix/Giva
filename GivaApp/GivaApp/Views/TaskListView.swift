@@ -3,7 +3,7 @@
 import SwiftUI
 
 struct TaskListView: View {
-    @EnvironmentObject var viewModel: GivaViewModel
+    @Environment(GivaViewModel.self) private var viewModel
 
     var body: some View {
         Group {
