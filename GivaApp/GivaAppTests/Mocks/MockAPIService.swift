@@ -348,6 +348,21 @@ final class MockAPIService: APIServiceProtocol, @unchecked Sendable {
         return try throwOrReturn(goalBrainstormResult)
     }
 
+    // MARK: - Conversation History
+
+    var getConversationDatesResult: Result<ConversationDatesResponse, Error> =
+        .success(ConversationDatesResponse(dates: [], count: 0))
+    var getConversationMessagesResult: Result<ConversationMessagesResponse, Error> =
+        .success(ConversationMessagesResponse(messages: [], count: 0))
+
+    func getConversationDates(limit: Int) async throws -> ConversationDatesResponse {
+        return try throwOrReturn(getConversationDatesResult)
+    }
+
+    func getConversationMessages(date: String, limit: Int) async throws -> ConversationMessagesResponse {
+        return try throwOrReturn(getConversationMessagesResult)
+    }
+
     // MARK: - Bootstrap
 
     func getBootstrapStatus() async throws -> BootstrapStatusResponse {

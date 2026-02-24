@@ -375,6 +375,29 @@ class APIService: APIServiceProtocol {
         return json
     }
 
+    // MARK: - Conversation History
+
+    func getConversationDates(limit: Int = 30) async throws -> ConversationDatesResponse {
+        let url = baseURL.appendingPathComponent("api/conversations/dates")
+        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)!
+        components.queryItems = [URLQueryItem(name: "limit", value: "\(limit)")]
+        let (data, response) = try await session.data(from: components.url!)
+        try checkResponse(response, data: data)
+        return try JSONDecoder().decode(ConversationDatesResponse.self, from: data)
+    }
+
+    func getConversationMessages(date: String, limit: Int = 200) async throws -> ConversationMessagesResponse {
+        let url = baseURL.appendingPathComponent("api/conversations/messages")
+        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)!
+        components.queryItems = [
+            URLQueryItem(name: "date", value: date),
+            URLQueryItem(name: "limit", value: "\(limit)"),
+        ]
+        let (data, response) = try await session.data(from: components.url!)
+        try checkResponse(response, data: data)
+        return try JSONDecoder().decode(ConversationMessagesResponse.self, from: data)
+    }
+
     // MARK: - SSE Parser
 
     /// Parse an SSE stream from the server.

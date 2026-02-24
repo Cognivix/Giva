@@ -2977,6 +2977,32 @@ async def goal_messages(
     return {"messages": messages, "count": len(messages)}
 
 
+# --- Conversation History Endpoints ---
+
+
+@app.get("/api/conversations/dates")
+async def conversation_dates(
+    request: Request,
+    limit: int = Query(30, ge=1, le=100),
+):
+    """Get distinct dates of global chat conversations with preview text."""
+    store: Store = request.app.state.store
+    dates = store.get_conversation_dates(limit=limit)
+    return {"dates": dates, "count": len(dates)}
+
+
+@app.get("/api/conversations/messages")
+async def conversation_messages_by_date(
+    request: Request,
+    date: str = Query(..., description="Date in YYYY-MM-DD format"),
+    limit: int = Query(200, ge=1, le=500),
+):
+    """Get all global chat messages for a specific date."""
+    store: Store = request.app.state.store
+    messages = store.get_messages_for_date(date, limit=limit)
+    return {"messages": messages, "count": len(messages)}
+
+
 # --- Daily Review Endpoints ---
 
 

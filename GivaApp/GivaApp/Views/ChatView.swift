@@ -426,3 +426,84 @@ struct ThinkingPane: View {
         }
     }
 }
+
+// MARK: - Chat History View (read-only past messages)
+
+/// Displays past messages for a specific date. Read-only — no input field.
+struct ChatHistoryView: View {
+    let dateString: String
+    @Environment(GivaViewModel.self) private var viewModel
+    @State private var messages: [ChatMessage] = []
+    @State private var isLoading = true
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Date header
+            HStack {
+                Image(systemName: "clock.arrow.circlepath")
+                    .foregroundColor(.secondary)
+                Text(displayDate)
+                    .font(.headline)
+                Spacer()
+                Text("\(messages.count) messages")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(Color.secondary.opacity(0.05))
+
+            Divider()
+
+            if isLoading {
+                ProgressView("Loading messages...")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if messages.isEmpty {
+                ContentUnavailableView(
+                    "No Messages",
+                    systemImage: "bubble.left",
+                    description: Text("No conversation messages found for this date.")
+                )
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(messages) { message in
+                            MessageBubble(message: message)
+                                .id(message.id)
+                        }
+                    }
+                    .padding(12)
+                }
+            }
+        }
+        .task {
+            isLoading = true
+            guard let api = viewModel.apiService else {
+                isLoading = false
+                return
+            }
+            do {
+                let response = try await api.getConversationMessages(date: dateString)
+                messages = response.messages.map { msg in
+                    ChatMessage(role: msg.role, content: msg.content)
+                }
+            } catch {
+                // Non-critical
+            }
+            isLoading = false
+        }
+    }
+
+    private var displayDate: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        guard let date = formatter.date(from: dateString) else { return dateString }
+
+        if Calendar.current.isDateInToday(date) { return "Today" }
+        if Calendar.current.isDateInYesterday(date) { return "Yesterday" }
+
+        let display = DateFormatter()
+        display.dateStyle = .long
+        return display.string(from: date)
+    }
+}

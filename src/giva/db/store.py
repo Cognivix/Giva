@@ -615,6 +615,51 @@ class Store:
         """Get conversation messages scoped to a specific goal."""
         return self.get_recent_messages(limit=limit, goal_id=goal_id)
 
+    def get_conversation_dates(self, limit: int = 30) -> list[dict]:
+        """Get distinct dates with first user message as preview.
+
+        Returns a list of dicts: [{date, preview, message_count}]
+        ordered by date descending (most recent first).
+        Only includes global chat (not goal-scoped messages).
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    date(created_at) as day,
+                    MIN(CASE WHEN role = 'user' THEN content END) as preview,
+                    COUNT(*) as message_count
+                FROM conversations
+                WHERE goal_id IS NULL
+                GROUP BY date(created_at)
+                ORDER BY day DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_messages_for_date(
+        self, date_str: str, limit: int = 200
+    ) -> list[dict]:
+        """Get all global messages for a specific date.
+
+        date_str should be in YYYY-MM-DD format.
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT role, content, created_at
+                FROM conversations
+                WHERE goal_id IS NULL
+                  AND date(created_at) = ?
+                ORDER BY id ASC
+                LIMIT ?
+                """,
+                (date_str, limit),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
     # --- User Profile ---
 
     def get_profile(self) -> Optional[UserProfile]:

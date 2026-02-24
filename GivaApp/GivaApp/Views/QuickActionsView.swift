@@ -6,7 +6,7 @@
 //
 // Primary actions:
 //   Sync   — trigger manual email + calendar sync
-//   Goals  — open the Goals & Objectives window
+//   Expand — open the full main window (goals, chat history, tasks)
 //   Review — start daily review (only visible when due)
 
 import SwiftUI
@@ -27,22 +27,16 @@ struct QuickActionsView: View {
             }
             .disabled(!viewModel.areActionsEnabled || viewModel.isSyncing)
 
-            // Full Window
+            // Expand to full window
             ActionButton(
                 icon: "macwindow",
-                label: "Window"
+                label: "Expand"
             ) {
                 openWindow(id: "main-window")
-            }
-            .disabled(!viewModel.areActionsEnabled)
-
-            // Goals
-            ActionButton(
-                icon: "target",
-                label: "Goals",
-                tint: viewModel.isDailyReviewDue ? .orange : nil
-            ) {
-                openWindow(id: "goals")
+                // Bring the window to front
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    NSApp.activate(ignoringOtherApps: true)
+                }
             }
             .disabled(!viewModel.areActionsEnabled)
 
@@ -50,9 +44,13 @@ struct QuickActionsView: View {
             if viewModel.isDailyReviewDue {
                 ActionButton(
                     icon: "text.badge.checkmark",
-                    label: "Review"
+                    label: "Review",
+                    tint: .orange
                 ) {
-                    openWindow(id: "goals")
+                    openWindow(id: "main-window")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        NSApp.activate(ignoringOtherApps: true)
+                    }
                 }
                 .disabled(!viewModel.areActionsEnabled)
             }

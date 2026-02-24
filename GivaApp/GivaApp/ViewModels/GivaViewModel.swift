@@ -98,6 +98,9 @@ class GivaViewModel {
     var isStreaming: Bool = false
     var isLoadingModel: Bool = false
 
+    // Conversation history (date-grouped past chats)
+    var conversationDates: [ConversationDate] = []
+
     // Voice
     var isVoiceEnabled: Bool = false
     var isRecording: Bool = false
@@ -136,6 +139,9 @@ class GivaViewModel {
     var isLoading: Bool = false
     var errorMessage: String?
 
+    /// Whether the main window is currently open (tracked for dock icon + menu bar behavior)
+    var isMainWindowOpen: Bool = false
+
     // Agent queue state
     var pendingConfirmation: AgentConfirmation?
     var activeJobs: [AgentJobItem] = []
@@ -163,7 +169,14 @@ class GivaViewModel {
         await refreshStatus()
         await loadProfile()
         await checkReviewDue()
+        await loadConversationDates()
         connectSessionStream()
+    }
+
+    /// Attempt to reconnect using the stored bootstrap manager.
+    func reconnect() async {
+        guard let bootstrap = bootstrapManager else { return }
+        await connectToServer(from: bootstrap)
     }
 
     // MARK: - Session (server-driven state machine)
@@ -423,6 +436,9 @@ class GivaViewModel {
             finalizeLastMessage()
             isStreaming = false
             streamTask = nil
+
+            // Refresh conversation dates for sidebar
+            await loadConversationDates()
         }
     }
 
@@ -933,6 +949,18 @@ class GivaViewModel {
             errorMessage = error.localizedDescription
         }
         isLoadingTasks = false
+    }
+
+    // MARK: - Conversation History
+
+    func loadConversationDates() async {
+        guard let api = apiService else { return }
+        do {
+            let response = try await api.getConversationDates()
+            conversationDates = response.dates
+        } catch {
+            // Non-critical — sidebar just won't show history
+        }
     }
 
     func updateTaskStatus(taskId: Int, status: String) async {

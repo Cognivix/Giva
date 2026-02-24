@@ -1,99 +1,312 @@
-// GivaMainWindowView.swift - Full-app window with agent activity panel.
+// GivaMainWindowView.swift - Full-app window with sidebar navigation.
 //
-// Provides everything the menu bar popover has, but bigger, with tabs for
-// Chat, Tasks, and Goals.  When agents are active, a trailing sidebar shows
-// the AgentActivityPanel with running/queued/pending jobs.
-//
-// Opened via the "Window" quick action in the menu bar, or automatically
-// when a complex agent confirmation arrives.
+// Three-column NavigationSplitView:
+//   Sidebar: Chat, Goals (by tier), Tasks
+//   Content: Detail view for the selected sidebar item
+//   Inspector: Agent activity panel (when agents are active)
 
 import SwiftUI
 
+/// Sidebar navigation items for the main window.
+enum SidebarItem: Hashable {
+    case chat                   // current/new conversation
+    case chatHistory(String)    // past chat by date (YYYY-MM-DD)
+    case goal(Int)
+    case tasks
+}
+
 struct GivaMainWindowView: View {
     @Environment(GivaViewModel.self) private var viewModel
-    @Environment(\.openWindow) private var openWindow
+
+    @State private var sidebarSelection: SidebarItem? = .chat
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
 
     var body: some View {
-        NavigationSplitView {
-            // Main content area
-            mainContent
+        NavigationSplitView(columnVisibility: $columnVisibility) {
+            sidebarContent
+                .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 300)
+        } content: {
+            detailContent
         } detail: {
-            // Agent activity sidebar (only when agents are active)
-            if !viewModel.activeJobs.isEmpty {
-                AgentActivityPanel()
-                    .environment(viewModel)
+            Group {
+                if !viewModel.activeJobs.isEmpty {
+                    AgentActivityPanel()
+                        .environment(viewModel)
+                        .transition(.move(edge: .trailing).combined(with: .opacity))
+                }
             }
+            .animation(.easeInOut(duration: 0.25), value: viewModel.activeJobs.isEmpty)
         }
         .navigationTitle("Giva")
         .toolbar {
-            ToolbarItem(placement: .automatic) {
-                HStack(spacing: 12) {
-                    // Sync button
-                    Button {
-                        Task { await viewModel.triggerSync() }
-                    } label: {
-                        Label("Sync", systemImage: "arrow.triangle.2.circlepath")
-                    }
-                    .disabled(!viewModel.areActionsEnabled || viewModel.isSyncing)
+            ToolbarItemGroup(placement: .primaryAction) {
+                toolbarButtons
+            }
+        }
+        .sheet(isPresented: goalCreateSheetBinding) {
+            if let goalsVM = viewModel.goalsViewModel {
+                GoalCreateSheet(viewModel: goalsVM)
+            }
+        }
+        .sheet(isPresented: goalEditSheetBinding) {
+            if let goalsVM = viewModel.goalsViewModel,
+               let goal = goalsVM.goalDetail {
+                GoalEditSheet(goal: goal, viewModel: goalsVM)
+            }
+        }
+        .overlay(alignment: .bottom) {
+            if let goalsVM = viewModel.goalsViewModel, goalsVM.isDailyReviewDue {
+                DailyReviewBanner(viewModel: goalsVM)
+            }
+        }
+        .overlay {
+            if let goalsVM = viewModel.goalsViewModel, goalsVM.isInferring {
+                InferOverlay(viewModel: goalsVM)
+            }
+        }
+        .onAppear {
+            viewModel.isMainWindowOpen = true
+            NSApp.setActivationPolicy(.regular)
+        }
+        .onDisappear {
+            viewModel.isMainWindowOpen = false
+            NSApp.setActivationPolicy(.accessory)
+        }
+        .task {
+            if let goalsVM = viewModel.goalsViewModel {
+                await goalsVM.loadGoals()
+                await goalsVM.checkReviewStatus()
+            }
+        }
+        // Handle goal pending selection from GoalsViewModel
+        .onChange(of: viewModel.goalsViewModel?.pendingSelection) { _, newId in
+            if let id = newId {
+                sidebarSelection = .goal(id)
+                viewModel.goalsViewModel?.pendingSelection = nil
+            }
+        }
+    }
 
-                    // Goals window
-                    Button {
-                        openWindow(id: "goals")
-                    } label: {
-                        Label("Goals", systemImage: "target")
-                    }
-                    .disabled(!viewModel.areActionsEnabled)
+    // MARK: - Bindings
 
-                    // Daily Review
-                    if viewModel.isDailyReviewDue {
-                        Button {
-                            openWindow(id: "goals")
-                        } label: {
-                            Label("Review", systemImage: "text.badge.checkmark")
+    private var goalCreateSheetBinding: Binding<Bool> {
+        Binding(
+            get: { viewModel.goalsViewModel?.showCreateSheet ?? false },
+            set: { viewModel.goalsViewModel?.showCreateSheet = $0 }
+        )
+    }
+
+    private var goalEditSheetBinding: Binding<Bool> {
+        Binding(
+            get: { viewModel.goalsViewModel?.showEditSheet ?? false },
+            set: { viewModel.goalsViewModel?.showEditSheet = $0 }
+        )
+    }
+
+    // MARK: - Sidebar
+
+    private var sidebarContent: some View {
+        List(selection: $sidebarSelection) {
+            // Chat section
+            Section("Conversations") {
+                Label("New Chat", systemImage: "plus.bubble")
+                    .tag(SidebarItem.chat)
+
+                // Past conversation dates
+                ForEach(viewModel.conversationDates) { entry in
+                    HStack {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(entry.displayLabel)
+                                .font(.caption)
+                                .fontWeight(.medium)
+                            if let preview = entry.preview {
+                                Text(preview)
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                                    .lineLimit(1)
+                            }
+                        }
+                        Spacer()
+                        Text("\(entry.messageCount)")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                    .tag(SidebarItem.chatHistory(entry.date))
+                }
+            }
+
+            // Goals section
+            if let goalsVM = viewModel.goalsViewModel {
+                goalsSection(goalsVM)
+            }
+
+            // Tasks section
+            Section("Tasks") {
+                Label {
+                    HStack {
+                        Text("All Tasks")
+                        Spacer()
+                        if !viewModel.tasks.isEmpty {
+                            Text("\(viewModel.tasks.count)")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 1)
+                                .background(Capsule().fill(Color.secondary.opacity(0.15)))
                         }
                     }
+                } icon: {
+                    Image(systemName: "checklist")
+                }
+                .tag(SidebarItem.tasks)
+            }
+        }
+        .listStyle(.sidebar)
+        .toolbar {
+            ToolbarItem(placement: .automatic) {
+                if let goalsVM = viewModel.goalsViewModel {
+                    Button {
+                        Task { await goalsVM.loadGoals() }
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .help("Refresh goals")
                 }
             }
         }
     }
 
-    // MARK: - Main Content
+    @ViewBuilder
+    private func goalsSection(_ goalsVM: GoalsViewModel) -> some View {
+        Section("Goals") {
+            goalTierSection("Long-term", goals: goalsVM.longTermGoals, icon: "mountain.2",
+                            viewModel: goalsVM)
+            goalTierSection("Mid-term", goals: goalsVM.midTermGoals, icon: "flag",
+                            viewModel: goalsVM)
+            goalTierSection("Short-term", goals: goalsVM.shortTermGoals, icon: "checkmark.circle",
+                            viewModel: goalsVM)
+
+            if goalsVM.goals.isEmpty && !goalsVM.isLoading {
+                Text("No goals yet")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .padding(.leading, 4)
+            }
+        }
+    }
 
     @ViewBuilder
-    private var mainContent: some View {
-        @Bindable var viewModel = viewModel
+    private func goalTierSection(_ title: String, goals: [GoalItem], icon: String,
+                                  viewModel goalsVM: GoalsViewModel) -> some View {
+        if !goals.isEmpty {
+            DisclosureGroup(title) {
+                ForEach(goals) { goal in
+                    goalRow(goal, viewModel: goalsVM)
+                        .tag(SidebarItem.goal(goal.id))
+                }
+            }
+        }
+    }
 
+    private func goalRow(_ goal: GoalItem, viewModel goalsVM: GoalsViewModel) -> some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(priorityColor(goal.priority))
+                .frame(width: 8, height: 8)
+
+            Text(goal.title)
+                .lineLimit(1)
+
+            Spacer()
+
+            if !goal.children.isEmpty {
+                Text("\(goal.children.count)")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(Color.secondary.opacity(0.15)))
+            }
+        }
+        .contextMenu {
+            Button("Complete") { Task { await goalsVM.updateGoalStatus(id: goal.id, status: "completed") } }
+            Button("Pause") { Task { await goalsVM.updateGoalStatus(id: goal.id, status: "paused") } }
+            Button("Abandon") { Task { await goalsVM.updateGoalStatus(id: goal.id, status: "abandoned") } }
+        }
+    }
+
+    private func priorityColor(_ priority: String) -> Color {
+        switch priority {
+        case "high": return .red
+        case "medium": return .orange
+        case "low": return .gray
+        default: return .primary
+        }
+    }
+
+    // MARK: - Detail Content
+
+    @ViewBuilder
+    private var detailContent: some View {
+        switch sidebarSelection {
+        case .chat:
+            chatContent
+        case .chatHistory(let dateString):
+            chatHistoryContent(date: dateString)
+        case .goal(let goalId):
+            goalContent(goalId: goalId)
+        case .tasks:
+            TaskListView()
+                .environment(viewModel)
+        case nil:
+            ContentUnavailableView(
+                "Select an Item",
+                systemImage: "sidebar.left",
+                description: Text("Choose from the sidebar to get started.")
+            )
+        }
+    }
+
+    @ViewBuilder
+    private var chatContent: some View {
         VStack(spacing: 0) {
-            // Phase-aware status banner
             if showPhaseBanner {
                 phaseBanner
                 Divider()
             }
 
-            // Tab picker
-            Picker("", selection: $viewModel.currentTab) {
-                ForEach(AppTab.allCases, id: \.self) { tab in
-                    Text(tab.rawValue).tag(tab)
-                }
-            }
-            .pickerStyle(.segmented)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-
-            Divider()
-
-            // Content area
-            Group {
-                switch viewModel.currentTab {
-                case .chat:
-                    ChatView()
-                case .tasks:
-                    TaskListView()
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            ChatView()
+                .environment(viewModel)
         }
-        .environment(viewModel)
+    }
+
+    @ViewBuilder
+    private func chatHistoryContent(date: String) -> some View {
+        ChatHistoryView(dateString: date)
+            .environment(viewModel)
+            .id(date)
+    }
+
+    @ViewBuilder
+    private func goalContent(goalId: Int) -> some View {
+        if let goalsVM = viewModel.goalsViewModel {
+            GoalDetailView(
+                goal: goalsVM.goalDetail ?? goalsVM.goals.first { $0.id == goalId }
+                      ?? GoalItem.placeholder,
+                goalId: goalId,
+                viewModel: goalsVM
+            )
+            .id(goalId)
+            .task(id: goalId) {
+                await goalsVM.loadDetail(for: goalId)
+            }
+        } else {
+            ContentUnavailableView(
+                "Server Not Ready",
+                systemImage: "exclamationmark.circle",
+                description: Text("Goals require an active server connection.")
+            )
+        }
     }
 
     // MARK: - Phase Banner
@@ -128,5 +341,48 @@ struct GivaMainWindowView: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
         .background(Color.secondary.opacity(0.05))
+    }
+
+    // MARK: - Toolbar
+
+    @ViewBuilder
+    private var toolbarButtons: some View {
+        // Sync button
+        Button {
+            Task { await viewModel.triggerSync() }
+        } label: {
+            Label("Sync", systemImage: "arrow.triangle.2.circlepath")
+        }
+        .disabled(!viewModel.areActionsEnabled || viewModel.isSyncing)
+
+        // New Goal button
+        if let goalsVM = viewModel.goalsViewModel {
+            Button {
+                goalsVM.showCreateSheet = true
+            } label: {
+                Label("New Goal", systemImage: "plus")
+            }
+            .disabled(!viewModel.areActionsEnabled)
+
+            Button {
+                goalsVM.inferGoals()
+            } label: {
+                Label("Infer Goals", systemImage: "sparkles")
+            }
+            .disabled(goalsVM.isInferring || !viewModel.areActionsEnabled)
+            .help("Use AI to suggest goals from your data")
+        }
+
+        // Daily Review
+        if viewModel.isDailyReviewDue {
+            Button {
+                // Navigate to goals and show review
+                if let first = viewModel.goalsViewModel?.longTermGoals.first {
+                    sidebarSelection = .goal(first.id)
+                }
+            } label: {
+                Label("Review", systemImage: "text.badge.checkmark")
+            }
+        }
     }
 }

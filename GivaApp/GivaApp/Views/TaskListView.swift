@@ -24,7 +24,7 @@ struct TaskListView: View {
                     Text("No pending tasks")
                         .font(.callout)
                         .foregroundColor(.secondary)
-                    Text("Run Extract to find tasks in your\nemails and calendar.")
+                    Text("Tasks will appear as Giva identifies\nthem from your emails and calendar.")
                         .font(.caption)
                         .foregroundColor(.secondary.opacity(0.7))
                         .multilineTextAlignment(.center)
@@ -81,7 +81,7 @@ struct TaskRow: View {
                             .foregroundColor(.secondary)
                     }
 
-                    Text(task.priority)
+                    Text(task.priority.capitalized)
                         .font(.system(size: 9, weight: .medium))
                         .padding(.horizontal, 5)
                         .padding(.vertical, 1)
@@ -89,7 +89,7 @@ struct TaskRow: View {
                         .foregroundColor(priorityColor)
                         .cornerRadius(3)
 
-                    Text(task.sourceType)
+                    Text(task.sourceType.capitalized)
                         .font(.system(size: 9))
                         .foregroundColor(.secondary)
                 }
@@ -134,6 +134,27 @@ struct TaskRow: View {
         .cornerRadius(6)
         .onHover { hovering in
             isHovering = hovering
+        }
+        .contextMenu {
+            Button {
+                if let onAI = onAIRequest { onAI() }
+            } label: {
+                Label("Plan with AI", systemImage: "sparkles")
+            }
+
+            Divider()
+
+            Button {
+                onStatusChange("done")
+            } label: {
+                Label("Mark as Done", systemImage: "checkmark.circle")
+            }
+
+            Button {
+                onStatusChange("dismissed")
+            } label: {
+                Label("Dismiss", systemImage: "xmark.circle")
+            }
         }
     }
 

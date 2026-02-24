@@ -522,6 +522,14 @@ struct GoalItem: Codable, Identifiable {
         }
         return String(targetDate.prefix(10))
     }
+
+    /// Empty placeholder shown while loading goal detail.
+    static let placeholder = GoalItem(
+        id: 0, title: "Loading…", tier: "", description: "",
+        category: "", parentId: nil, status: "active", priority: "medium",
+        targetDate: nil, createdAt: nil, updatedAt: nil,
+        progress: [], children: [], strategies: [], tasks: []
+    )
 }
 
 struct GoalListResponse: Codable {
@@ -794,6 +802,58 @@ struct SessionStateResponse: Codable {
 struct SessionMessage: Codable {
     let role: String
     let content: String
+}
+
+// MARK: - Conversation History
+
+/// A date entry in the chat history sidebar.
+struct ConversationDate: Codable, Identifiable, Hashable {
+    let date: String           // YYYY-MM-DD
+    let preview: String?       // first user message of the day
+    let messageCount: Int
+
+    var id: String { date }
+
+    enum CodingKeys: String, CodingKey {
+        case date = "day"
+        case preview
+        case messageCount = "message_count"
+    }
+
+    /// Display label: "Today", "Yesterday", or "Feb 22"
+    var displayLabel: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        guard let d = formatter.date(from: date) else { return date }
+
+        if Calendar.current.isDateInToday(d) { return "Today" }
+        if Calendar.current.isDateInYesterday(d) { return "Yesterday" }
+
+        let display = DateFormatter()
+        display.dateFormat = "MMM d"
+        return display.string(from: d)
+    }
+}
+
+struct ConversationDatesResponse: Codable {
+    let dates: [ConversationDate]
+    let count: Int
+}
+
+struct ConversationMessagesResponse: Codable {
+    let messages: [ConversationMessageItem]
+    let count: Int
+}
+
+struct ConversationMessageItem: Codable {
+    let role: String
+    let content: String
+    let createdAt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case role, content
+        case createdAt = "created_at"
+    }
 }
 
 // MARK: - SSE Event

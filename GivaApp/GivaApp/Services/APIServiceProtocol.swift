@@ -50,6 +50,11 @@ protocol APIServiceProtocol: AnyObject, Sendable {
     func respondReview(reviewId: Int, response: String) async throws -> ReviewSummaryResponse
     func goalBrainstorm(goalId: Int) async throws -> [String: Any]
 
+    // MARK: - Conversation History
+
+    func getConversationDates(limit: Int) async throws -> ConversationDatesResponse
+    func getConversationMessages(date: String, limit: Int) async throws -> ConversationMessagesResponse
+
     // MARK: - Bootstrap (BootstrapManager)
 
     func getBootstrapStatus() async throws -> BootstrapStatusResponse
@@ -85,5 +90,11 @@ extension APIServiceProtocol {
         status: String? = nil, limit: Int = 20
     ) async throws -> AgentQueueResponse {
         try await getAgentQueue(status: status, limit: limit)
+    }
+    func getConversationDates(limit: Int = 30) async throws -> ConversationDatesResponse {
+        try await getConversationDates(limit: limit)
+    }
+    func getConversationMessages(date: String, limit: Int = 200) async throws -> ConversationMessagesResponse {
+        try await getConversationMessages(date: date, limit: limit)
     }
 }

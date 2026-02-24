@@ -215,6 +215,18 @@ struct MainPanelView: View {
                 Text(viewModel.serverManager.connectionState.rawValue)
                     .font(.system(size: 10))
                     .foregroundColor(.secondary)
+
+                if viewModel.serverManager.connectionState == .offline {
+                    Button {
+                        Task { await viewModel.reconnect() }
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 9))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundColor(.secondary)
+                    .help("Retry connection")
+                }
             }
 
             // Gear menu — system actions + settings
