@@ -1,6 +1,6 @@
 # G.I.V.A.
 
-**Generative Intelligent Virtual Assistant** — a macOS-native personal assistant that syncs your email and calendar from Apple Mail/Calendar, runs local LLM inference on Apple Silicon via [MLX](https://github.com/ml-explore/mlx), and helps you manage tasks, goals, and daily priorities.
+**Generative Intelligence Virtual Assistant** — a macOS-native personal assistant that syncs your email and calendar from Apple Mail/Calendar, runs local LLM inference on Apple Silicon via [MLX](https://github.com/ml-explore/mlx), and helps you manage tasks, goals, and daily priorities.
 
 All data stays on your device. No cloud APIs, no telemetry.
 
