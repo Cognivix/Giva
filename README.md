@@ -4,6 +4,8 @@
 
 All data stays on your device. No cloud APIs, no telemetry.
 
+> **⚠️ Alpha Software** — Giva is under active development and not ready for production use. APIs, configuration formats, and database schemas may change without notice. Expect rough edges, incomplete features, and breaking changes between commits. Use at your own risk.
+
 ## Features
 
 - **Email sync & classification** — JXA-based Apple Mail integration with LLM-powered filtering (headers-only sync, lazy body fetching)
@@ -33,10 +35,60 @@ All data stays on your device. No cloud APIs, no telemetry.
 
 ## Quick Start
 
+### Prerequisites
+
+You need a Mac with **Apple Silicon** (M1 or later) running **macOS 15 Sequoia** or newer, and at least **16 GB RAM** (for the 30B assistant model).
+
+**1. Install Xcode Command Line Tools**
+
 ```bash
-# Clone
+xcode-select --install
+```
+
+**2. Install Homebrew**
+
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+
+After installation, follow the instructions printed by Homebrew to add it to your PATH (typically adding an `eval` line to `~/.zprofile`).
+
+**3. Install Python 3.11+**
+
+```bash
+brew install python@3.13
+```
+
+Verify:
+
+```bash
+python3 --version   # Should show 3.11 or later
+```
+
+**4. Install Node.js** (optional — only needed for MCP servers)
+
+```bash
+brew install node
+```
+
+**5. Install Xcode** (optional — only needed for the SwiftUI menu bar app)
+
+Install Xcode 16+ from the [Mac App Store](https://apps.apple.com/app/xcode/id497799835) or [developer.apple.com](https://developer.apple.com/xcode/). After installation:
+
+```bash
+sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+```
+
+### Install & Run
+
+```bash
+# Clone the repository
 git clone https://github.com/Cognivix/Giva.git
 cd Giva
+
+# Create a virtual environment (recommended)
+python3 -m venv .venv
+source .venv/bin/activate
 
 # Install in editable mode with dev dependencies
 pip install -e ".[dev]"
@@ -52,12 +104,14 @@ On first run, Giva downloads the default LLM models (~4 GB for assistant, ~2 GB 
 
 ### SwiftUI App
 
-Open `GivaApp/GivaApp.xcodeproj` in Xcode, build and run. The app:
+Open `GivaApp/GivaApp.xcodeproj` in Xcode, build and run (⌘R). The app handles everything automatically:
 
 1. Creates a Python venv at `~/.local/share/giva/.venv`
 2. Pip-installs the project into it
 3. Registers a `com.giva.server` launchd user agent for the API daemon
 4. Connects to the daemon via health polling and SSE
+
+> **Note:** If you're only using the SwiftUI app, you don't need to create a venv or run `pip install` manually — the app's bootstrap does this for you.
 
 ## Configuration
 
@@ -159,6 +213,15 @@ pip install -e ".[mcp]"
 ```
 
 Configure MCP servers in `~/.config/giva/config.toml`. Servers auto-register as agents at startup. See `config.default.toml` for examples (filesystem, web fetch, iMessage, Notes, Discord).
+
+Servers that require API tokens (e.g., Discord) use secret references. Copy the template and fill in your values:
+
+```bash
+cp secrets.example.toml ~/.config/giva/secrets.toml
+# Edit ~/.config/giva/secrets.toml with your tokens
+```
+
+In your config, reference secrets with a `$` prefix (e.g., `DISCORD_BOT_TOKEN = "$DISCORD_BOT_TOKEN"`). Missing secrets are logged as warnings and the server starts without them.
 
 ## License
 
