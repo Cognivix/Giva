@@ -2,10 +2,12 @@
 
 Tests cover:
 - _handle_create_task (with goal auto-linking and duplicate detection)
-- _handle_create_objective (with tier inference)
+- _handle_create_objective (with tier inference and enrichment/decomposition)
 - _handle_complete_task (title matching)
 - _handle_preference (fact storage)
 - _auto_link_goal (keyword overlap matching)
+- _enrich_objective_description (context extraction from conversation)
+- _decompose_objective_to_tasks (task decomposition from conversation)
 - run_post_chat_agent (full pipeline with mocked LLM)
 """
 
@@ -14,6 +16,8 @@ from unittest.mock import patch
 from giva.db.models import Goal, Task, UserProfile
 from giva.intelligence.agents import (
     _auto_link_goal,
+    _decompose_objective_to_tasks,
+    _enrich_objective_description,
     _handle_complete_task,
     _handle_create_objective,
     _handle_create_task,
@@ -283,3 +287,285 @@ class TestRunPostChatAgent:
         )
         assert len(actions) == 1
         assert actions[0]["goal_id"] == goal_id
+
+    @patch("giva.llm.engine.manager")
+    def test_create_objective_triggers_enrichment_and_decomposition(
+        self, mock_manager, tmp_db, config
+    ):
+        """When an objective is created, enrichment and decomposition run."""
+        parent_id = tmp_db.add_goal(Goal(title="Investor Relations", tier="long_term"))
+
+        # Three LLM calls: 1) intent detection, 2) enrichment, 3) decomposition
+        mock_manager.generate.side_effect = [
+            # 1. Intent detection → create_objective
+            '{"intents": [{"type": "create_objective", "title": "Biweekly investor update",'
+            ' "description": "Template for updates", "tier": "mid_term"}],'
+            ' "topic": "investor", "progress": []}',
+            # 2. Enrichment
+            '{"enriched_description": "## Biweekly Investor Update Template\\n'
+            'Draft template with KPIs, milestones, and team highlights."}',
+            # 3. Decomposition
+            '{"tasks": [{"title": "Draft KPI section of template",'
+            ' "description": "Include revenue and growth metrics",'
+            ' "priority": "high"},'
+            ' {"title": "Schedule first biweekly send",'
+            ' "description": null, "priority": "medium"}]}',
+        ]
+
+        actions = run_post_chat_agent(
+            "Let's create a biweekly investor update template",
+            "Great idea! Here's a draft template with KPIs, milestones...",
+            tmp_db, config,
+            goal_id=parent_id,
+        )
+
+        # Should have: objective_created + objective_enriched + 2x task_created
+        types = [a["type"] for a in actions]
+        assert "objective_created" in types
+        assert "objective_enriched" in types
+        assert types.count("task_created") == 2
+
+        # Verify the enriched description was saved
+        obj = actions[0]
+        assert obj["type"] == "objective_created"
+        goal = tmp_db.get_goal(obj["goal_id"])
+        assert "KPI" in goal.description or "Investor Update" in goal.description
+
+        # Verify tasks were linked to the new objective
+        tasks = tmp_db.get_tasks(status="pending")
+        task_titles = [t.title for t in tasks]
+        assert "Draft KPI section of template" in task_titles
+        assert "Schedule first biweekly send" in task_titles
+
+
+class TestEnrichObjectiveDescription:
+
+    @patch("giva.llm.engine.manager")
+    def test_enriches_description(self, mock_manager, tmp_db, config):
+        """Enrichment updates the goal's description with conversation context."""
+        goal_id = tmp_db.add_goal(Goal(
+            title="Launch newsletter",
+            tier="mid_term",
+            description="Brief desc",
+        ))
+
+        mock_manager.generate.return_value = (
+            '{"enriched_description": "## Newsletter Launch Plan\\n'
+            '- Weekly cadence, Mondays at 9am\\n'
+            '- Template: intro + 3 stories + CTA\\n'
+            '- Target: 500 subscribers by Q2"}'
+        )
+
+        action = _enrich_objective_description(
+            goal_id,
+            "I want to start a newsletter",
+            "Great! Here's a plan: weekly on Mondays...",
+            tmp_db, config,
+        )
+
+        assert action is not None
+        assert action["type"] == "objective_enriched"
+        assert action["goal_id"] == goal_id
+
+        # Verify description updated in DB
+        goal = tmp_db.get_goal(goal_id)
+        assert "Newsletter Launch Plan" in goal.description
+        assert "500 subscribers" in goal.description
+
+    @patch("giva.llm.engine.manager")
+    def test_enrichment_noop_on_empty_response(self, mock_manager, tmp_db, config):
+        """If LLM returns empty enriched_description, no update happens."""
+        goal_id = tmp_db.add_goal(Goal(
+            title="Test goal", tier="short_term", description="Original",
+        ))
+
+        mock_manager.generate.return_value = '{"enriched_description": ""}'
+
+        action = _enrich_objective_description(
+            goal_id, "query", "response", tmp_db, config,
+        )
+
+        assert action is None
+        goal = tmp_db.get_goal(goal_id)
+        assert goal.description == "Original"
+
+    @patch("giva.llm.engine.manager")
+    def test_enrichment_handles_llm_error(self, mock_manager, tmp_db, config):
+        """LLM error doesn't crash, returns None."""
+        goal_id = tmp_db.add_goal(Goal(title="Test", tier="short_term"))
+        mock_manager.generate.side_effect = RuntimeError("Model crashed")
+
+        action = _enrich_objective_description(
+            goal_id, "query", "response", tmp_db, config,
+        )
+        assert action is None
+
+    def test_enrichment_nonexistent_goal(self, tmp_db, config):
+        """Nonexistent goal returns None without LLM call."""
+        action = _enrich_objective_description(
+            9999, "query", "response", tmp_db, config,
+        )
+        assert action is None
+
+
+class TestDecomposeObjectiveToTasks:
+
+    @patch("giva.llm.engine.manager")
+    def test_creates_tasks_from_conversation(self, mock_manager, tmp_db, config):
+        """Decomposition creates tasks linked to the objective."""
+        goal_id = tmp_db.add_goal(Goal(
+            title="Website redesign",
+            tier="mid_term",
+            description="Redesign the company website",
+        ))
+
+        mock_manager.generate.return_value = (
+            '{"tasks": ['
+            '{"title": "Create wireframes for homepage", "description": "Low-fi mockups",'
+            ' "priority": "high"},'
+            '{"title": "Set up staging environment", "description": null,'
+            ' "priority": "medium"},'
+            '{"title": "Write copy for About page", "description": "Include team bios",'
+            ' "priority": "low"}'
+            ']}'
+        )
+
+        actions = _decompose_objective_to_tasks(
+            goal_id, "Let's redesign the website",
+            "I'll help! Here are the key steps...",
+            tmp_db, config,
+        )
+
+        assert len(actions) == 3
+        assert all(a["type"] == "task_created" for a in actions)
+        assert all(a["goal_id"] == goal_id for a in actions)
+
+        # Verify in DB
+        tasks = tmp_db.get_tasks(status="pending")
+        assert len(tasks) == 3
+        titles = {t.title for t in tasks}
+        assert "Create wireframes for homepage" in titles
+        assert "Set up staging environment" in titles
+
+    @patch("giva.llm.engine.manager")
+    def test_skips_duplicate_tasks(self, mock_manager, tmp_db, config):
+        """Existing tasks are not duplicated."""
+        goal_id = tmp_db.add_goal(Goal(title="Project", tier="mid_term"))
+        tmp_db.add_task(Task(
+            title="Create wireframes", source_type="chat", source_id=0,
+        ))
+
+        mock_manager.generate.return_value = (
+            '{"tasks": ['
+            '{"title": "Create wireframes", "priority": "high"},'
+            '{"title": "Write copy", "priority": "medium"}'
+            ']}'
+        )
+
+        actions = _decompose_objective_to_tasks(
+            goal_id, "q", "r", tmp_db, config,
+        )
+
+        # Only the non-duplicate should be created
+        assert len(actions) == 1
+        assert actions[0]["title"] == "Write copy"
+
+    @patch("giva.llm.engine.manager")
+    def test_empty_tasks_list(self, mock_manager, tmp_db, config):
+        """LLM returning no tasks produces empty actions."""
+        goal_id = tmp_db.add_goal(Goal(title="Vague goal", tier="mid_term"))
+        mock_manager.generate.return_value = '{"tasks": []}'
+
+        actions = _decompose_objective_to_tasks(
+            goal_id, "q", "r", tmp_db, config,
+        )
+        assert actions == []
+
+    @patch("giva.llm.engine.manager")
+    def test_decomposition_handles_llm_error(self, mock_manager, tmp_db, config):
+        """LLM error doesn't crash, returns empty list."""
+        goal_id = tmp_db.add_goal(Goal(title="Test", tier="short_term"))
+        mock_manager.generate.side_effect = RuntimeError("Model crashed")
+
+        actions = _decompose_objective_to_tasks(
+            goal_id, "q", "r", tmp_db, config,
+        )
+        assert actions == []
+
+    def test_decomposition_nonexistent_goal(self, tmp_db, config):
+        """Nonexistent goal returns empty list without LLM call."""
+        actions = _decompose_objective_to_tasks(
+            9999, "q", "r", tmp_db, config,
+        )
+        assert actions == []
+
+
+class TestHandleCreateObjectiveWithEnrichment:
+
+    @patch("giva.llm.engine.manager")
+    def test_enrichment_runs_when_config_provided(self, mock_manager, tmp_db, config):
+        """With config and full text, enrichment + decomposition run."""
+        mock_manager.generate.side_effect = [
+            # Enrichment
+            '{"enriched_description": "Rich description with details"}',
+            # Decomposition
+            '{"tasks": [{"title": "Step 1", "priority": "medium"}]}',
+        ]
+
+        intent = {"title": "Build dashboard", "description": "Analytics dash"}
+        action = _handle_create_objective(
+            intent, tmp_db,
+            full_query="I need an analytics dashboard for the team",
+            full_response="Great! Let me outline the approach...",
+            config=config,
+        )
+
+        assert action is not None
+        assert action["type"] == "objective_created"
+
+        # Verify enrichment ran
+        goal = tmp_db.get_goal(action["goal_id"])
+        assert "Rich description" in goal.description
+
+        # Verify decomposition ran (task created)
+        tasks = tmp_db.get_tasks(status="pending")
+        assert len(tasks) == 1
+        assert tasks[0].title == "Step 1"
+
+    def test_no_enrichment_without_config(self, tmp_db):
+        """Without config, objective is created but no enrichment/decomposition."""
+        intent = {"title": "Simple objective", "description": "Brief"}
+        action = _handle_create_objective(intent, tmp_db)
+
+        assert action is not None
+        assert action["type"] == "objective_created"
+        assert action["extra_actions"] == []
+
+        # No tasks created by decomposition
+        tasks = tmp_db.get_tasks(status="pending")
+        assert len(tasks) == 0
+
+    @patch("giva.llm.engine.manager")
+    def test_enrichment_failure_doesnt_block_decomposition(
+        self, mock_manager, tmp_db, config
+    ):
+        """If enrichment fails, decomposition still runs."""
+        mock_manager.generate.side_effect = [
+            # Enrichment fails (bad JSON)
+            "not valid json at all",
+            # Decomposition succeeds
+            '{"tasks": [{"title": "Task from decomp", "priority": "high"}]}',
+        ]
+
+        intent = {"title": "Resilient goal", "description": "Test"}
+        action = _handle_create_objective(
+            intent, tmp_db,
+            full_query="query", full_response="response",
+            config=config,
+        )
+
+        assert action is not None
+        # Decomposition should have created a task even though enrichment failed
+        tasks = tmp_db.get_tasks(status="pending")
+        assert len(tasks) == 1
+        assert tasks[0].title == "Task from decomp"

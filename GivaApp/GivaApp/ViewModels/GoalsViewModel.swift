@@ -405,6 +405,9 @@ class GoalsViewModel {
                 if let title = action.title {
                     appendSystemChatMessage("✓ Created objective: \(title)")
                 }
+            case "objective_enriched":
+                appendSystemChatMessage("✓ Objective details saved")
+                Task { await refreshSelectedGoal() }
             case "task_completed":
                 if let title = action.title {
                     appendSystemChatMessage("✓ Completed task: \(title)")

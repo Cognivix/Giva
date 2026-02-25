@@ -10,7 +10,7 @@ struct ChatView: View {
         @Bindable var viewModel = viewModel
 
         VStack(spacing: 0) {
-            // Message list
+            // Message list — fill available space so input stays pinned at bottom
             ScrollViewReader { proxy in
                 ScrollView {
                     if viewModel.messages.isEmpty {
@@ -73,6 +73,7 @@ struct ChatView: View {
                         .padding(12)
                     }
                 }
+                .frame(maxHeight: .infinity)
                 .onChange(of: viewModel.messages.count) { _, _ in
                     if let last = viewModel.messages.last {
                         withAnimation(.easeOut(duration: 0.2)) {
@@ -93,73 +94,144 @@ struct ChatView: View {
                     }
                 }
             }
+            .layoutPriority(1)
 
             Divider()
 
             // Input field
             HStack(spacing: 8) {
-                // Voice toggle button
-                Button(action: { viewModel.isVoiceEnabled.toggle() }) {
-                    Image(systemName: viewModel.isVoiceEnabled ? "speaker.wave.2.fill" : "speaker.slash")
-                        .font(.system(size: 14))
-                        .foregroundColor(viewModel.isVoiceEnabled ? .accentColor : .secondary)
-                }
-                .buttonStyle(.plain)
-                .help(viewModel.isVoiceEnabled ? "Disable voice responses" : "Enable voice responses")
-
-                TextField(
-                    viewModel.isOnboarding ? "Answer..." : "Ask Giva...",
-                    text: $viewModel.currentInput
-                )
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 13))
-                    .onSubmit {
-                        viewModel.sendMessage()
-                    }
-                    .disabled(!viewModel.isChatEnabled || viewModel.isStreaming || viewModel.isRecording)
-
-                if viewModel.isRecording {
-                    HStack(spacing: 4) {
+                if viewModel.isRecording, let voice = viewModel.voiceService {
+                    // Recording indicator: red dot + animated level bars + transcript
+                    HStack(spacing: 3) {
                         Circle()
                             .fill(.red)
                             .frame(width: 8, height: 8)
-                        Text("Listening...")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                    }
-                } else if viewModel.isStreaming {
-                    Button(action: { viewModel.cancelStreaming() }) {
-                        Image(systemName: "stop.circle.fill")
-                            .font(.system(size: 18))
-                            .foregroundColor(.red)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Stop generating")
-                } else {
-                    // Mic button
-                    Button(action: { viewModel.startVoiceInput() }) {
-                        Image(systemName: "mic.fill")
-                            .font(.system(size: 16))
-                            .foregroundColor(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Speak a query")
 
-                    // Send button
-                    Button(action: { viewModel.sendMessage() }) {
-                        Image(systemName: "arrow.up.circle.fill")
-                            .font(.system(size: 18))
-                            .foregroundColor(.accentColor)
+                        // 5 animated level bars
+                        ForEach(0..<5, id: \.self) { i in
+                            RoundedRectangle(cornerRadius: 1)
+                                .fill(.red.opacity(0.7))
+                                .frame(
+                                    width: 3,
+                                    height: audioBarHeight(index: i, level: voice.audioLevel)
+                                )
+                                .animation(.easeInOut(duration: 0.1), value: voice.audioLevel)
+                        }
+
+                        // Progressive transcript
+                        if !voice.currentTranscription.isEmpty {
+                            Text(voice.currentTranscription)
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.head)
+                        } else if voice.state == .finishing {
+                            HStack(spacing: 3) {
+                                ProgressView()
+                                    .controlSize(.small)
+                                Text("Processing...")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+                        } else {
+                            Text("Listening...")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+
+                        Spacer()
+
+                        // Cancel button
+                        Button(action: { viewModel.cancelVoiceInput() }) {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 14))
+                                .foregroundColor(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Cancel recording")
                     }
-                    .buttonStyle(.plain)
-                    .disabled(viewModel.currentInput.trimmingCharacters(in: .whitespaces).isEmpty)
-                    .help("Send message")
+
+                    // Dictate mode: show send button so user can send early
+                    if viewModel.voiceMode == .dictate {
+                        Button(action: { viewModel.sendMessage() }) {
+                            Image(systemName: "arrow.up.circle.fill")
+                                .font(.system(size: 18))
+                                .foregroundColor(.accentColor)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(voice.currentTranscription.trimmingCharacters(in: .whitespaces).isEmpty)
+                        .help("Send message")
+                    }
+                } else {
+                    // Text input field — auto-expands vertically for multiline
+                    TextField(
+                        viewModel.isOnboarding ? "Answer..." : "Ask Giva...",
+                        text: $viewModel.currentInput,
+                        axis: .vertical
+                    )
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13))
+                    .lineLimit(1...8)
+                    .onSubmit {
+                        viewModel.sendMessage()
+                    }
+                    .disabled(!viewModel.isChatEnabled || viewModel.isStreaming)
+
+                    if viewModel.isStreaming {
+                        Button(action: { viewModel.cancelStreaming() }) {
+                            Image(systemName: "stop.circle.fill")
+                                .font(.system(size: 18))
+                                .foregroundColor(.red)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Stop generating")
+                    } else {
+                        // Dictate button (mic)
+                        Button(action: { viewModel.startVoiceInput(mode: .dictate) }) {
+                            Image(systemName: "mic.fill")
+                                .font(.system(size: 16))
+                                .foregroundColor(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Dictate — transcribe to text field")
+
+                        // Full voice button (waveform)
+                        Button(action: { viewModel.startVoiceInput(mode: .fullVoice) }) {
+                            Image(systemName: "waveform")
+                                .font(.system(size: 16))
+                                .foregroundColor(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Voice mode — auto-send with voice response")
+
+                        // Send button
+                        Button(action: { viewModel.sendMessage() }) {
+                            Image(systemName: "arrow.up.circle.fill")
+                                .font(.system(size: 18))
+                                .foregroundColor(.accentColor)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(viewModel.currentInput.trimmingCharacters(in: .whitespaces).isEmpty)
+                        .help("Send message")
+                    }
                 }
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
         }
     }
+}
+
+// MARK: - Audio Level Bar Helper
+
+/// Compute the height of an individual level bar for the recording indicator.
+/// Each bar has a slightly different base offset to create a visual wave effect.
+private func audioBarHeight(index: Int, level: Float) -> CGFloat {
+    let baseHeight: CGFloat = 4
+    let maxHeight: CGFloat = 16
+    let offset = Float(index) * 0.15  // stagger bars
+    let adjusted = min(1.0, max(0.0, level + offset - 0.1))
+    return baseHeight + CGFloat(adjusted) * (maxHeight - baseHeight)
 }
 
 // MARK: - Agent Confirmation Helpers
@@ -183,6 +255,18 @@ struct MessageBubble: View {
     let message: ChatMessage
     var isLoadingModel: Bool = false
     @State private var showThinking = false
+
+    /// Internal markers stripped before display.
+    private static let internalMarkers = ["[NEEDS_AGENT]"]
+
+    /// Message content with internal markers stripped.
+    private var displayContent: String {
+        var text = message.content
+        for marker in Self.internalMarkers {
+            text = text.replacingOccurrences(of: marker, with: "")
+        }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
     @ViewBuilder
     var body: some View {
@@ -214,15 +298,15 @@ struct MessageBubble: View {
                 }
 
                 // Main content bubble
-                if !message.content.isEmpty || message.isStreaming {
+                if !displayContent.isEmpty || message.isStreaming {
                     Group {
                         if message.role == "user" {
                             // User messages: plain text
-                            Text(message.content)
+                            Text(displayContent)
                                 .font(.system(size: 13))
                         } else {
                             // Assistant messages: Markdown rendering
-                            MarkdownText(message.content)
+                            MarkdownText(displayContent)
                                 .font(.system(size: 13))
                         }
                     }
@@ -270,11 +354,12 @@ struct MessageBubble: View {
 
 // MARK: - Markdown Text
 
-/// Renders Markdown content using `AttributedString`.
+/// Renders Markdown content with block-level visual styling.
 ///
-/// Handles headers, bold, italic, inline code, code blocks, links, lists,
-/// and numbered lists. Falls back to plain text if markdown parsing fails (e.g. mid-stream
-/// when tokens arrive incrementally and syntax is incomplete).
+/// Parses markdown into blocks (headers, paragraphs, lists, code blocks, blockquotes)
+/// and renders each with appropriate typography. Inline formatting (bold, italic, code,
+/// links) uses `AttributedString`. Falls back gracefully during streaming when markdown
+/// syntax is incomplete.
 struct MarkdownText: View {
     let source: String
 
@@ -283,79 +368,207 @@ struct MarkdownText: View {
     }
 
     var body: some View {
-        if let attributed = Self.parseMarkdown(source) {
-            Text(attributed)
-        } else {
-            Text(source)
+        VStack(alignment: .leading, spacing: 6) {
+            let blocks = Self.parseBlocks(source)
+            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+                blockView(block)
+            }
         }
     }
 
-    /// Parse markdown string into an `AttributedString`.
-    ///
-    /// Uses `.full` syntax to support block-level elements (headers, lists,
-    /// numbered lists, blockquotes) alongside inline formatting (bold, italic,
-    /// inline code, links). Falls back to `.inlineOnlyPreservingWhitespace`
-    /// if full parsing fails (e.g. mid-stream incomplete markdown), then to
-    /// plain text as a last resort.
-    private static func parseMarkdown(_ text: String) -> AttributedString? {
-        guard !text.isEmpty else { return nil }
+    // MARK: - Block Types
 
-        // Try full markdown parsing first (supports headers, lists, etc.)
-        let fullOptions = AttributedString.MarkdownParsingOptions(
-            interpretedSyntax: .full
-        )
-        if let result = try? AttributedString(markdown: text, options: fullOptions) {
-            return result
+    private enum Block {
+        case heading(level: Int, text: String)
+        case paragraph(text: String)
+        case bulletItem(text: String)
+        case numberedItem(number: String, text: String)
+        case codeBlock(lines: [String])
+        case blockquote(text: String)
+        case divider
+    }
+
+    // MARK: - Block Rendering
+
+    @ViewBuilder
+    private func blockView(_ block: Block) -> some View {
+        switch block {
+        case .heading(let level, let text):
+            Self.inlineMarkdown(text)
+                .font(Self.headingFont(level))
+                .fontWeight(.semibold)
+                .padding(.top, level == 1 ? 6 : 3)
+
+        case .paragraph(let text):
+            Self.inlineMarkdown(text)
+
+        case .bulletItem(let text):
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text("•")
+                    .foregroundColor(.secondary)
+                Self.inlineMarkdown(text)
+            }
+            .padding(.leading, 8)
+
+        case .numberedItem(let number, let text):
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                Text(number)
+                    .foregroundColor(.secondary)
+                    .monospacedDigit()
+                Self.inlineMarkdown(text)
+            }
+            .padding(.leading, 8)
+
+        case .codeBlock(let lines):
+            Text(lines.joined(separator: "\n"))
+                .font(.system(size: 12, design: .monospaced))
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(nsColor: .textBackgroundColor).opacity(0.5))
+                .cornerRadius(6)
+                .textSelection(.enabled)
+
+        case .blockquote(let text):
+            HStack(spacing: 8) {
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(Color.accentColor.opacity(0.5))
+                    .frame(width: 3)
+                Self.inlineMarkdown(text)
+                    .foregroundColor(.secondary)
+            }
+            .padding(.leading, 4)
+
+        case .divider:
+            Divider()
+                .padding(.vertical, 2)
         }
+    }
 
-        // Fallback: inline-only parsing (more tolerant of incomplete markdown
-        // during streaming). Pre-process code blocks since this mode doesn't
-        // handle fenced blocks.
-        let processed = preprocessCodeBlocks(text)
-        let inlineOptions = AttributedString.MarkdownParsingOptions(
+    // MARK: - Inline Markdown (bold, italic, code, links)
+
+    private static func inlineMarkdown(_ text: String) -> Text {
+        let options = AttributedString.MarkdownParsingOptions(
             interpretedSyntax: .inlineOnlyPreservingWhitespace
         )
-        if let result = try? AttributedString(markdown: processed, options: inlineOptions) {
-            return result
+        if let attributed = try? AttributedString(markdown: text, options: options) {
+            return Text(attributed)
         }
-
-        return nil
+        return Text(text)
     }
 
-    /// Convert fenced code blocks (```...```) into inline-code-styled blocks.
-    ///
-    /// Used only in the inline-only fallback path. Wraps each line in backticks
-    /// so they render as inline code while preserving the block structure.
-    private static func preprocessCodeBlocks(_ text: String) -> String {
-        var result: [String] = []
-        var inCodeBlock = false
-        let lines = text.components(separatedBy: "\n")
+    private static func headingFont(_ level: Int) -> Font {
+        switch level {
+        case 1: return .system(size: 18, weight: .bold)
+        case 2: return .system(size: 16, weight: .semibold)
+        case 3: return .system(size: 14, weight: .semibold)
+        default: return .system(size: 13, weight: .semibold)
+        }
+    }
 
-        for line in lines {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("```") {
-                inCodeBlock.toggle()
-                if !inCodeBlock {
-                    // Closing fence — skip the line
-                    continue
+    // MARK: - Block Parser
+
+    /// Parse markdown source into an array of typed blocks.
+    ///
+    /// Handles: headings (`#`–`####`), bullet lists (`- `, `* `), numbered lists (`1. `),
+    /// fenced code blocks (``` ``` ```), blockquotes (`> `), horizontal rules (`---`),
+    /// and paragraph text. Consecutive non-block lines merge into a single paragraph.
+    private static func parseBlocks(_ text: String) -> [Block] {
+        var blocks: [Block] = []
+        let lines = text.components(separatedBy: "\n")
+        var index = 0
+        var paragraphBuffer: [String] = []
+
+        func flushParagraph() {
+            if !paragraphBuffer.isEmpty {
+                let merged = paragraphBuffer.joined(separator: "\n")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !merged.isEmpty {
+                    blocks.append(.paragraph(text: merged))
                 }
-                // Opening fence — skip the line (language hint is decorative)
+                paragraphBuffer = []
+            }
+        }
+
+        while index < lines.count {
+            let line = lines[index]
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+            // Empty line → flush paragraph
+            if trimmed.isEmpty {
+                flushParagraph()
+                index += 1
                 continue
             }
 
-            if inCodeBlock {
-                // Wrap code lines in backticks for inline code rendering.
-                // Escape any existing backticks to avoid broken markdown.
-                let escaped = line.replacingOccurrences(of: "`", with: "'")
-                // Empty lines in code blocks become a non-breaking space in code
-                let codeLine = escaped.isEmpty ? "` `" : "`\(escaped)`"
-                result.append(codeLine)
-            } else {
-                result.append(line)
+            // Fenced code block
+            if trimmed.hasPrefix("```") {
+                flushParagraph()
+                index += 1
+                var codeLines: [String] = []
+                while index < lines.count {
+                    let codeLine = lines[index]
+                    if codeLine.trimmingCharacters(in: .whitespaces).hasPrefix("```") {
+                        index += 1
+                        break
+                    }
+                    codeLines.append(codeLine)
+                    index += 1
+                }
+                blocks.append(.codeBlock(lines: codeLines))
+                continue
             }
+
+            // Horizontal rule
+            if trimmed == "---" || trimmed == "***" || trimmed == "___" {
+                flushParagraph()
+                blocks.append(.divider)
+                index += 1
+                continue
+            }
+
+            // Headings
+            if let match = trimmed.prefixMatch(of: /^(#{1,4})\s+(.+)/) {
+                flushParagraph()
+                let level = match.1.count
+                let content = String(match.2)
+                blocks.append(.heading(level: level, text: content))
+                index += 1
+                continue
+            }
+
+            // Bullet list item
+            if let match = trimmed.prefixMatch(of: /^[-*+]\s+(.+)/) {
+                flushParagraph()
+                blocks.append(.bulletItem(text: String(match.1)))
+                index += 1
+                continue
+            }
+
+            // Numbered list item
+            if let match = trimmed.prefixMatch(of: /^(\d+[.)]\s+)(.+)/) {
+                flushParagraph()
+                blocks.append(.numberedItem(number: String(match.1).trimmingCharacters(in: .whitespaces),
+                                            text: String(match.2)))
+                index += 1
+                continue
+            }
+
+            // Blockquote
+            if trimmed.hasPrefix("> ") {
+                flushParagraph()
+                let content = String(trimmed.dropFirst(2))
+                blocks.append(.blockquote(text: content))
+                index += 1
+                continue
+            }
+
+            // Regular text → accumulate into paragraph
+            paragraphBuffer.append(trimmed)
+            index += 1
         }
 
-        return result.joined(separator: "\n")
+        flushParagraph()
+        return blocks
     }
 }
 
@@ -506,4 +719,26 @@ struct ChatHistoryView: View {
         display.dateStyle = .long
         return display.string(from: date)
     }
+}
+
+// MARK: - Previews
+
+#Preview("Chat — Empty") {
+    let vm = GivaViewModel()
+    ChatView()
+        .environment(vm)
+        .frame(width: 600, height: 500)
+}
+
+#Preview("Chat — With Messages") {
+    let vm = GivaViewModel()
+    vm.messages = [
+        ChatMessage(role: "assistant", content: "Hi there! I'm Giva — your AI assistant."),
+        ChatMessage(role: "user", content: "What meetings do I have today?"),
+        ChatMessage(role: "assistant", content: "You have 3 meetings today:\n\n1. **Standup** at 9:00 AM\n2. **Design Review** at 11:30 AM\n3. **1:1 with Sarah** at 2:00 PM"),
+    ]
+    vm.serverPhase = .operational
+    return ChatView()
+        .environment(vm)
+        .frame(width: 600, height: 500)
 }

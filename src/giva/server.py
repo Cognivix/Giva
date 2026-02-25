@@ -65,6 +65,59 @@ _llm_lock = threading.Lock()
 # Separate lock for voice models (TTS/STT use different MLX models)
 _voice_lock = threading.Lock()
 
+# Cached STT engine singleton (lazy-initialised, protected by _voice_lock)
+_stt_engine = None
+
+
+def _get_stt_engine(voice_config):
+    """Return a shared STTEngine, creating it on first call."""
+    global _stt_engine
+    if _stt_engine is None:
+        from giva.audio.stt import STTEngine
+        _stt_engine = STTEngine(voice_config)
+    return _stt_engine
+
+# --- Whisper Hallucination Filter ---
+# Common phrases Whisper generates when fed silence or near-silence audio.
+_WHISPER_HALLUCINATION_PATTERNS: set[str] = {
+    "you",
+    "thank you",
+    "thank you.",
+    "thanks",
+    "thanks.",
+    "thanks for watching",
+    "thanks for watching.",
+    "thanks for watching!",
+    "thank you for watching",
+    "thank you for watching.",
+    "thank you for watching!",
+    "bye",
+    "bye.",
+    "bye bye",
+    "bye bye.",
+    "goodbye",
+    "goodbye.",
+    "hey",
+    "hey.",
+    "so",
+    "so.",
+    "the end",
+    "the end.",
+    "you're going to be here.",
+    "you're going to be here",
+    "...",
+    "",
+}
+
+
+def _filter_hallucination(text: str) -> str:
+    """Return empty string if text is a known Whisper hallucination on silence."""
+    stripped = text.strip().lower()
+    if stripped in _WHISPER_HALLUCINATION_PATTERNS:
+        log.info("Filtered Whisper hallucination: %r", text.strip())
+        return ""
+    return text.strip()
+
 
 # --- Pydantic Request/Response Models ---
 
@@ -1682,9 +1735,7 @@ async def transcribe(request: Request, file: UploadFile = File(...)) -> Transcri
         import tempfile
         from pathlib import Path
 
-        from giva.audio.stt import STTEngine
-
-        stt = STTEngine(config.voice)
+        stt = _get_stt_engine(config.voice)
         suffix = Path(file.filename or "audio.wav").suffix or ".wav"
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
             f.write(audio_bytes)
@@ -1699,7 +1750,86 @@ async def transcribe(request: Request, file: UploadFile = File(...)) -> Transcri
     loop = asyncio.get_event_loop()
     text = await loop.run_in_executor(None, _run_transcribe)
 
+    # Filter common Whisper hallucinations on silence
+    text = _filter_hallucination(text)
+
     return TranscribeResponse(text=text)
+
+
+@app.post("/api/transcribe/stream")
+async def transcribe_stream(request: Request, file: UploadFile = File(...)):
+    """Transcribe audio with SSE streaming of results.
+
+    Like ``/api/transcribe`` but returns Server-Sent Events instead of JSON:
+      - ``partial``: transcription has started (empty data)
+      - ``final``:   complete transcription text (JSON ``{"text": "...", "chunk_id": "..."}``
+      - ``done``:    stream complete
+      - ``error``:   error message
+
+    Accepts an optional ``X-Chunk-Id`` header for client-side ordering of
+    multiple concurrent chunks.
+    """
+    config = request.app.state.config
+
+    audio_bytes = await file.read()
+    if not audio_bytes:
+        raise HTTPException(status_code=400, detail="Empty audio file.")
+
+    chunk_id = request.headers.get("X-Chunk-Id", "0")
+
+    async def _event_generator() -> AsyncGenerator[dict, None]:
+        loop = asyncio.get_event_loop()
+        queue: asyncio.Queue[dict] = asyncio.Queue()
+
+        def _run():
+            import tempfile
+            from pathlib import Path
+
+            stt = _get_stt_engine(config.voice)
+            suffix = Path(file.filename or "audio.wav").suffix or ".wav"
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
+                f.write(audio_bytes)
+                tmp_path = f.name
+
+            try:
+                # Signal that transcription has started
+                loop.call_soon_threadsafe(
+                    queue.put_nowait, {"event": "partial", "data": ""}
+                )
+
+                with _voice_lock:
+                    text = stt.transcribe_file(tmp_path)
+
+                # Filter hallucinations
+                text = _filter_hallucination(text)
+
+                loop.call_soon_threadsafe(
+                    queue.put_nowait,
+                    {
+                        "event": "final",
+                        "data": json.dumps({"text": text, "chunk_id": chunk_id}),
+                    },
+                )
+                loop.call_soon_threadsafe(
+                    queue.put_nowait, {"event": "done", "data": ""}
+                )
+            except Exception as e:
+                log.exception("Streaming transcription error")
+                loop.call_soon_threadsafe(
+                    queue.put_nowait, {"event": "error", "data": str(e)}
+                )
+            finally:
+                Path(tmp_path).unlink(missing_ok=True)
+
+        loop.run_in_executor(None, _run)
+
+        while True:
+            item = await queue.get()
+            yield item
+            if item["event"] in ("done", "error"):
+                break
+
+    return EventSourceResponse(_event_generator())
 
 
 # --- Model Management Endpoints ---

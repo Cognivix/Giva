@@ -229,6 +229,22 @@ struct MainPanelView: View {
                 }
             }
 
+            // Expand to full window
+            Button {
+                viewModel.lastUsedFullWindow = true
+                openWindow(id: "main-window")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    NSApp.activate(ignoringOtherApps: true)
+                }
+            } label: {
+                Image(systemName: "arrow.up.backward.and.arrow.down.forward")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Expand to full window")
+            .padding(.leading, 6)
+
             // Gear menu — system actions + settings
             Menu {
                 Button {

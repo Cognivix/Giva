@@ -26,7 +26,15 @@ struct GivaMainWindowView: View {
             sidebarContent
                 .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 300)
         } content: {
-            detailContent
+            VStack(spacing: 0) {
+                detailContent
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                if let goalsVM = viewModel.goalsViewModel, goalsVM.isDailyReviewDue {
+                    Divider()
+                    DailyReviewBanner(viewModel: goalsVM)
+                }
+            }
         } detail: {
             Group {
                 if !viewModel.activeJobs.isEmpty {
@@ -52,11 +60,6 @@ struct GivaMainWindowView: View {
             if let goalsVM = viewModel.goalsViewModel,
                let goal = goalsVM.goalDetail {
                 GoalEditSheet(goal: goal, viewModel: goalsVM)
-            }
-        }
-        .overlay(alignment: .bottom) {
-            if let goalsVM = viewModel.goalsViewModel, goalsVM.isDailyReviewDue {
-                DailyReviewBanner(viewModel: goalsVM)
             }
         }
         .overlay {
@@ -384,5 +387,70 @@ struct GivaMainWindowView: View {
                 Label("Review", systemImage: "text.badge.checkmark")
             }
         }
+
+        // Minimize to popover
+        Button {
+            viewModel.lastUsedFullWindow = false
+            NSApp.keyWindow?.close()
+        } label: {
+            Label("Minimize to Menu Bar", systemImage: "arrow.down.forward.and.arrow.up.backward")
+        }
+        .help("Switch to menu bar popover")
+
+        // System gear menu
+        Menu {
+            Button {
+                Task { await viewModel.loadProfile() }
+            } label: {
+                Label("Profile", systemImage: "person.circle")
+            }
+            .disabled(!viewModel.areActionsEnabled)
+
+            Button {
+                viewModel.openCLI()
+            } label: {
+                Label("Open CLI", systemImage: "terminal")
+            }
+
+            Divider()
+
+            Button {
+                Task { await viewModel.triggerRestart() }
+            } label: {
+                Label("Restart Server", systemImage: "arrow.clockwise")
+            }
+            .disabled(viewModel.isSystemBusy)
+
+            Button {
+                Task { await viewModel.triggerUpgrade() }
+            } label: {
+                Label("Upgrade Code", systemImage: "arrow.up.circle")
+            }
+            .disabled(viewModel.isSystemBusy)
+
+            Divider()
+
+            Button(role: .destructive) {
+                Task { await viewModel.triggerReset() }
+            } label: {
+                Label("Reset All Data...", systemImage: "trash")
+            }
+            .disabled(viewModel.isSystemBusy || viewModel.isStreaming)
+
+            Divider()
+
+            Button {
+                NSApplication.shared.terminate(nil)
+            } label: {
+                Label("Quit Giva", systemImage: "power")
+            }
+        } label: {
+            Label("Settings", systemImage: "gearshape")
+        }
     }
+}
+
+
+#Preview {
+    Text(String(describing: SidebarItem.chat))
 }

@@ -29,6 +29,14 @@ enum AppTab: String, CaseIterable {
     case tasks = "Tasks"
 }
 
+/// Voice input mode. Dictate places text in the input field for editing;
+/// full voice auto-sends after silence and enables TTS responses.
+enum VoiceMode: Equatable {
+    case none
+    case dictate
+    case fullVoice
+}
+
 /// Live sync progress pushed by the server.
 struct SyncProgress {
     var stage: String = "emails"  // emails | events | profile
@@ -102,9 +110,10 @@ class GivaViewModel {
     var conversationDates: [ConversationDate] = []
 
     // Voice
-    var isVoiceEnabled: Bool = false
+    var voiceMode: VoiceMode = .none
     var isRecording: Bool = false
     let audioService = AudioPlaybackService()
+    var voiceService: VoiceRecordingService?
 
     // Tasks
     var tasks: [TaskItem] = []
@@ -141,6 +150,22 @@ class GivaViewModel {
 
     /// Whether the main window is currently open (tracked for dock icon + menu bar behavior)
     var isMainWindowOpen: Bool = false
+
+    /// Persisted preference: should the menu bar click open the full window or the popover?
+    /// Defaults to `true` (full window on first launch). Only changed by the toggle button.
+    private static let lastUsedFullWindowKey = "lastUsedFullWindow"
+
+    var lastUsedFullWindow: Bool {
+        get {
+            access(keyPath: \.lastUsedFullWindow)
+            return UserDefaults.standard.object(forKey: Self.lastUsedFullWindowKey) as? Bool ?? true
+        }
+        set {
+            withMutation(keyPath: \.lastUsedFullWindow) {
+                UserDefaults.standard.set(newValue, forKey: Self.lastUsedFullWindowKey)
+            }
+        }
+    }
 
     // Agent queue state
     var pendingConfirmation: AgentConfirmation?
@@ -393,7 +418,7 @@ class GivaViewModel {
         messages.append(ChatMessage(role: "assistant", content: "", isStreaming: true))
         isStreaming = true
 
-        let useVoice = isVoiceEnabled
+        let useVoice = (voiceMode == .fullVoice)
 
         streamTask = Task {
             guard let api = apiService else {
@@ -436,6 +461,7 @@ class GivaViewModel {
             finalizeLastMessage()
             isStreaming = false
             streamTask = nil
+            voiceMode = .none
 
             // Refresh conversation dates for sidebar
             await loadConversationDates()
@@ -462,6 +488,9 @@ class GivaViewModel {
             case "task_completed":
                 if let title = action.title { appendSystemMessage("✓ Completed task: \(title)") }
                 Task { await loadTasks() }
+            case "objective_enriched":
+                appendSystemMessage("✓ Objective details saved")
+                Task { await goalsViewModel?.loadGoals() }
             case "preference":
                 if let key = action.key { appendSystemMessage("✓ Noted preference: \(key)") }
             default:
@@ -575,52 +604,64 @@ class GivaViewModel {
 
     // MARK: - Voice Input
 
-    func startVoiceInput() {
-        guard !isStreaming, !isRecording else { return }
+    func startVoiceInput(mode: VoiceMode) {
+        guard mode != .none, !isStreaming, !isRecording else { return }
+        guard let api = apiService else {
+            errorMessage = "Server is not running."
+            return
+        }
+
+        voiceMode = mode
+        let service = VoiceRecordingService()
+
+        service.onComplete = { [weak self] text in
+            guard let self else { return }
+            self.currentInput = text
+            self.isRecording = false
+            self.voiceService = nil
+            if mode == .fullVoice {
+                // Full voice: auto-send + TTS response
+                self.sendMessage()
+            }
+            // Dictate: text stays in field for editing, user sends manually
+        }
+        service.onError = { [weak self] error in
+            guard let self else { return }
+            self.errorMessage = error
+            self.isRecording = false
+            self.voiceService = nil
+            self.voiceMode = .none
+        }
+        voiceService = service
         isRecording = true
 
         Task {
-            let audioData: Data?
             do {
-                audioData = try await audioService.recordAudio(duration: 5.0)
-            } catch is AudioPlaybackService.RecordingError {
+                try await service.startRecording(apiService: api)
+            } catch VoiceRecordingError.permissionDenied {
                 isRecording = false
+                voiceService = nil
+                voiceMode = .none
                 errorMessage = "Microphone access denied. Opening Privacy Settings…"
-                // Open System Settings → Privacy → Microphone
-                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
+                if let url = URL(
+                    string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+                ) {
                     NSWorkspace.shared.open(url)
                 }
-                return
             } catch {
                 isRecording = false
-                errorMessage = "Could not record audio."
-                return
-            }
-
-            isRecording = false
-
-            guard let audioData, !audioData.isEmpty else {
-                errorMessage = "No audio recorded. Try again."
-                return
-            }
-
-            guard let api = apiService else {
-                errorMessage = "Server is not running."
-                return
-            }
-
-            do {
-                let text = try await api.transcribe(audioData: audioData)
-                if !text.isEmpty {
-                    currentInput = text
-                    sendMessage()
-                } else {
-                    errorMessage = "No speech detected. Try again."
-                }
-            } catch {
-                errorMessage = "Transcription error: \(error.localizedDescription)"
+                voiceService = nil
+                voiceMode = .none
+                errorMessage = "Could not start recording: \(error.localizedDescription)"
             }
         }
+    }
+
+    func cancelVoiceInput() {
+        voiceService?.cancel()
+        voiceService = nil
+        isRecording = false
+        voiceMode = .none
     }
 
     // MARK: - Quick Actions

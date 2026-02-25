@@ -2,11 +2,10 @@
 //
 // Follows Apple HIG: only essential, frequently-used actions are in the bottom bar.
 // System actions (Restart, Upgrade, Reset, CLI) live in the header gear menu
-// (see MainPanelView.swift).
+// (see MainPanelView.swift). Expand/minimize toggle is in the header bar.
 //
 // Primary actions:
 //   Sync   — trigger manual email + calendar sync
-//   Expand — open the full main window (goals, chat history, tasks)
 //   Review — start daily review (only visible when due)
 
 import SwiftUI
@@ -26,19 +25,6 @@ struct QuickActionsView: View {
                 Task { await viewModel.triggerSync() }
             }
             .disabled(!viewModel.areActionsEnabled || viewModel.isSyncing)
-
-            // Expand to full window
-            ActionButton(
-                icon: "macwindow",
-                label: "Expand"
-            ) {
-                openWindow(id: "main-window")
-                // Bring the window to front
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                    NSApp.activate(ignoringOtherApps: true)
-                }
-            }
-            .disabled(!viewModel.areActionsEnabled)
 
             // Daily Review (conditionally visible when due)
             if viewModel.isDailyReviewDue {

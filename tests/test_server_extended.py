@@ -441,3 +441,220 @@ class TestCORSConfiguration:
             "CORS should allow 127.0.0.1"
         assert any("localhost" in o for o in origins), \
             "CORS should allow localhost"
+
+
+# ═══════════════════════════════════════════════════════════════
+# Whisper Hallucination Filter
+# ═══════════════════════════════════════════════════════════════
+
+from giva.server import _filter_hallucination, _WHISPER_HALLUCINATION_PATTERNS
+
+
+class TestHallucinationFilter:
+    """Verify _filter_hallucination catches known Whisper silence artifacts."""
+
+    @pytest.mark.parametrize("text", [
+        "Thank you.",
+        "thank you",
+        "THANK YOU",
+        "Thanks for watching!",
+        "thanks for watching.",
+        "Bye",
+        "bye bye.",
+        "Goodbye.",
+        "Hey.",
+        "So.",
+        "The end.",
+        "You're going to be here.",
+        "...",
+        "",
+        "  thank you  ",  # with whitespace
+        "\n Thank you. \n",  # with newlines
+    ])
+    def test_known_hallucinations_filtered(self, text):
+        assert _filter_hallucination(text) == ""
+
+    @pytest.mark.parametrize("text", [
+        "Schedule a meeting with Sarah tomorrow",
+        "What's on my calendar today?",
+        "Thank you for the email about the project",
+        "Hey Sarah, can you send me the report?",
+        "So I was thinking about the new feature",
+        "The endpoint should return a 200 status",
+    ])
+    def test_real_speech_not_filtered(self, text):
+        result = _filter_hallucination(text)
+        assert result == text.strip()
+
+    def test_hallucination_patterns_set_not_empty(self):
+        assert len(_WHISPER_HALLUCINATION_PATTERNS) > 10
+
+    def test_filter_returns_stripped_text(self):
+        """Real speech should be stripped but otherwise unchanged."""
+        assert _filter_hallucination("  hello world  ") == "hello world"
+
+    def test_empty_string_in_patterns(self):
+        """Empty string is a hallucination pattern (Whisper sometimes returns nothing)."""
+        assert "" in _WHISPER_HALLUCINATION_PATTERNS
+        assert _filter_hallucination("") == ""
+        assert _filter_hallucination("   ") == ""
+
+
+# ═══════════════════════════════════════════════════════════════
+# POST /api/transcribe/stream — SSE streaming transcription
+# ═══════════════════════════════════════════════════════════════
+
+import json
+from unittest.mock import patch
+
+from starlette.testclient import TestClient
+
+
+def _make_wav_bytes():
+    """Minimal valid WAV file bytes (44-byte header + 160 zero samples)."""
+    import struct
+
+    sample_rate = 16000
+    num_samples = 160
+    data_size = num_samples * 2  # 16-bit samples
+
+    header = struct.pack(
+        "<4sI4s4sIHHIIHH4sI",
+        b"RIFF",
+        36 + data_size,
+        b"WAVE",
+        b"fmt ",
+        16,        # chunk size
+        1,         # PCM format
+        1,         # mono
+        sample_rate,
+        sample_rate * 2,  # byte rate
+        2,         # block align
+        16,        # bits per sample
+        b"data",
+        data_size,
+    )
+    return header + b"\x00" * data_size
+
+
+def _parse_sse_events(text: str) -> list[tuple[str, str]]:
+    """Parse SSE event text into list of (event_type, data) tuples."""
+    events = []
+    current_event = ""
+    for line in text.split("\n"):
+        if line.startswith("event: "):
+            current_event = line[7:].strip()
+        elif line.startswith("data: "):
+            events.append((current_event, line[6:].strip()))
+        elif line == "data:":
+            events.append((current_event, ""))
+    return events
+
+
+class TestStreamTranscribeEndpoint:
+    """Verify the /api/transcribe/stream SSE endpoint."""
+
+    def test_returns_sse_events(self):
+        """Endpoint should return partial → final → done SSE events."""
+        mock_text = "Hello world"
+        wav_bytes = _make_wav_bytes()
+
+        mock_stt = MagicMock()
+        mock_stt.transcribe_file.return_value = mock_text
+
+        with patch("giva.server._get_stt_engine", return_value=mock_stt):
+            config = MagicMock()
+            config.voice.stt_model = "distil-medium.en"
+            config.voice.enabled = True
+            app.state.config = config
+
+            client = TestClient(app)
+            files = {"file": ("test.wav", wav_bytes, "audio/wav")}
+            response = client.post(
+                "/api/transcribe/stream",
+                files=files,
+                headers={"Accept": "text/event-stream", "X-Chunk-Id": "42"},
+            )
+
+            assert response.status_code == 200
+
+            events = _parse_sse_events(response.text)
+            event_types = [e[0] for e in events]
+            assert "partial" in event_types
+            assert "final" in event_types
+            assert "done" in event_types
+
+            # Check final event contains the text and chunk_id
+            final_events = [e for e in events if e[0] == "final"]
+            assert len(final_events) == 1
+            final_data = json.loads(final_events[0][1])
+            assert final_data["text"] == mock_text
+            assert final_data["chunk_id"] == "42"
+
+    def test_hallucination_filtered_in_stream(self):
+        """Hallucinated text should be filtered to empty string in SSE events."""
+        wav_bytes = _make_wav_bytes()
+
+        mock_stt = MagicMock()
+        mock_stt.transcribe_file.return_value = "Thank you."
+
+        with patch("giva.server._get_stt_engine", return_value=mock_stt):
+            config = MagicMock()
+            config.voice.stt_model = "distil-medium.en"
+            config.voice.enabled = True
+            app.state.config = config
+
+            client = TestClient(app)
+            files = {"file": ("test.wav", wav_bytes, "audio/wav")}
+            response = client.post(
+                "/api/transcribe/stream",
+                files=files,
+                headers={"Accept": "text/event-stream"},
+            )
+
+            assert response.status_code == 200
+
+            events = _parse_sse_events(response.text)
+            final_events = [e for e in events if e[0] == "final"]
+            assert len(final_events) == 1
+            final_data = json.loads(final_events[0][1])
+            assert final_data["text"] == ""  # Hallucination filtered out
+
+    def test_empty_file_returns_400(self):
+        """Empty audio file should return 400 error."""
+        config = MagicMock()
+        config.voice.enabled = True
+        app.state.config = config
+
+        client = TestClient(app)
+        files = {"file": ("test.wav", b"", "audio/wav")}
+        response = client.post("/api/transcribe/stream", files=files)
+        assert response.status_code == 400
+
+    def test_default_chunk_id(self):
+        """Missing X-Chunk-Id header should default to '0'."""
+        wav_bytes = _make_wav_bytes()
+
+        mock_stt = MagicMock()
+        mock_stt.transcribe_file.return_value = "test"
+
+        with patch("giva.server._get_stt_engine", return_value=mock_stt):
+            config = MagicMock()
+            config.voice.stt_model = "distil-medium.en"
+            config.voice.enabled = True
+            app.state.config = config
+
+            client = TestClient(app)
+            files = {"file": ("test.wav", wav_bytes, "audio/wav")}
+            response = client.post(
+                "/api/transcribe/stream",
+                files=files,
+                headers={"Accept": "text/event-stream"},
+            )
+
+            assert response.status_code == 200
+            events = _parse_sse_events(response.text)
+            final_events = [e for e in events if e[0] == "final"]
+            assert len(final_events) == 1
+            final_data = json.loads(final_events[0][1])
+            assert final_data["chunk_id"] == "0"

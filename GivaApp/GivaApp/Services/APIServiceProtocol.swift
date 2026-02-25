@@ -22,6 +22,7 @@ protocol APIServiceProtocol: AnyObject, Sendable {
     func cancelAgent(jobId: String) async throws
     func taskAI(taskId: Int) async throws -> [String: Any]
     func transcribe(audioData: Data, filename: String) async throws -> String
+    func streamTranscribe(audioData: Data, filename: String, chunkId: String) -> AsyncThrowingStream<SSEEvent, Error>
 
     // MARK: - SSE Streaming (GivaViewModel)
 
@@ -74,6 +75,11 @@ extension APIServiceProtocol {
     }
     func transcribe(audioData: Data, filename: String = "recording.wav") async throws -> String {
         try await transcribe(audioData: audioData, filename: filename)
+    }
+    func streamTranscribe(
+        audioData: Data, filename: String = "recording.wav", chunkId: String = "0"
+    ) -> AsyncThrowingStream<SSEEvent, Error> {
+        streamTranscribe(audioData: audioData, filename: filename, chunkId: chunkId)
     }
     func getGoals(tier: String? = nil, status: String? = nil) async throws -> GoalListResponse {
         try await getGoals(tier: tier, status: status)

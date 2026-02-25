@@ -23,6 +23,7 @@ final class MockAPIService: APIServiceProtocol, @unchecked Sendable {
     var cancelAgentCallCount = 0
     var taskAICallCount = 0
     var transcribeCallCount = 0
+    var streamTranscribeCallCount = 0
     var getGoalsCallCount = 0
     var createGoalCallCount = 0
     var getGoalCallCount = 0
@@ -96,6 +97,7 @@ final class MockAPIService: APIServiceProtocol, @unchecked Sendable {
     var taskAIResult: Result<[String: Any], Error> = .success(["status": "ok"])
 
     var transcribeResult: Result<String, Error> = .success("Transcribed text")
+    var streamTranscribeEvents: [SSEEvent] = []
 
     var getGoalsResult: Result<GoalListResponse, Error> = .success(
         GoalListResponse(goals: [], count: 0)
@@ -227,6 +229,19 @@ final class MockAPIService: APIServiceProtocol, @unchecked Sendable {
     func transcribe(audioData: Data, filename: String) async throws -> String {
         transcribeCallCount += 1
         return try throwOrReturn(transcribeResult)
+    }
+
+    func streamTranscribe(
+        audioData: Data, filename: String, chunkId: String
+    ) -> AsyncThrowingStream<SSEEvent, Error> {
+        streamTranscribeCallCount += 1
+        let events = streamTranscribeEvents
+        return AsyncThrowingStream { continuation in
+            for event in events {
+                continuation.yield(event)
+            }
+            continuation.finish()
+        }
     }
 
     // MARK: - SSE Streaming (return empty streams by default)

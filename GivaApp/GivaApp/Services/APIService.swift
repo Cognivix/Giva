@@ -91,6 +91,93 @@ class APIService: APIServiceProtocol {
         return sseStream(url: url, method: "POST", body: ChatRequest(query: query, voice: voice))
     }
 
+    func streamTranscribe(
+        audioData: Data,
+        filename: String = "recording.wav",
+        chunkId: String = "0"
+    ) -> AsyncThrowingStream<SSEEvent, Error> {
+        let url = baseURL.appendingPathComponent("api/transcribe/stream")
+        let boundary = UUID().uuidString
+
+        return AsyncThrowingStream { continuation in
+            Task {
+                var request = URLRequest(url: url)
+                request.httpMethod = "POST"
+                request.setValue(
+                    "multipart/form-data; boundary=\(boundary)",
+                    forHTTPHeaderField: "Content-Type"
+                )
+                request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+                request.setValue(chunkId, forHTTPHeaderField: "X-Chunk-Id")
+
+                var body = Data()
+                body.append("--\(boundary)\r\n".data(using: .utf8)!)
+                body.append(
+                    "Content-Disposition: form-data; name=\"file\"; filename=\"\(filename)\"\r\n"
+                        .data(using: .utf8)!
+                )
+                body.append("Content-Type: audio/wav\r\n\r\n".data(using: .utf8)!)
+                body.append(audioData)
+                body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
+                request.httpBody = body
+
+                do {
+                    let (bytes, response) = try await sseSession.bytes(for: request)
+
+                    guard let httpResponse = response as? HTTPURLResponse,
+                          httpResponse.statusCode == 200 else {
+                        let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+                        continuation.finish(
+                            throwing: APIError.httpError(code, "SSE transcribe failed")
+                        )
+                        return
+                    }
+
+                    var currentEvent = ""
+                    var currentData = ""
+                    var lineBuffer = Data()
+
+                    for try await byte in bytes {
+                        if byte == UInt8(ascii: "\n") {
+                            let line = String(decoding: lineBuffer, as: UTF8.self)
+                            lineBuffer.removeAll(keepingCapacity: true)
+
+                            if line.hasPrefix("event: ") {
+                                currentEvent = String(line.dropFirst(7))
+                            } else if line.hasPrefix("data: ") {
+                                currentData = String(line.dropFirst(6))
+                            } else if line == "data:" {
+                                currentData = ""
+                            } else if line.hasPrefix(":") {
+                                // SSE comment — ignore
+                            } else if line.isEmpty {
+                                if !currentEvent.isEmpty {
+                                    continuation.yield(
+                                        SSEEvent(event: currentEvent, data: currentData)
+                                    )
+                                    if currentEvent == "done" || currentEvent == "error" {
+                                        continuation.finish()
+                                        return
+                                    }
+                                }
+                                currentEvent = ""
+                                currentData = ""
+                            }
+                        } else if byte != UInt8(ascii: "\r") {
+                            lineBuffer.append(byte)
+                        }
+                    }
+
+                    continuation.finish()
+                } catch is CancellationError {
+                    continuation.finish(throwing: CancellationError())
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+        }
+    }
+
     func transcribe(audioData: Data, filename: String = "recording.wav") async throws -> String {
         let url = baseURL.appendingPathComponent("api/transcribe")
         let boundary = UUID().uuidString

@@ -65,6 +65,63 @@ Respond with ONLY a JSON object:
   ]
 }} /no_think"""
 
+# --- Prompt for enriching objective descriptions with conversation context ---
+
+OBJECTIVE_ENRICHMENT_PROMPT = """An objective was just created from a conversation. \
+Extract the important context, plans, drafts, and details that should be preserved \
+as the objective's description.
+
+Objective title: {objective_title}
+Brief description: {brief_description}
+
+Recent conversation:
+{conversation}
+
+Current exchange:
+User: {current_query}
+Assistant: {current_response}
+
+Extract and preserve:
+- Any templates, drafts, or structured content the assistant created
+- Specific plans, steps, or strategies discussed
+- Key details, names, dates, or requirements mentioned
+- Any decisions or preferences the user expressed
+
+Respond with ONLY a JSON object:
+{{"enriched_description": "comprehensive description preserving all important context \
+from the conversation. Include any templates or drafts verbatim. Use markdown formatting."}} \
+/no_think"""
+
+# --- Prompt for decomposing an objective into concrete tasks ---
+
+OBJECTIVE_DECOMPOSITION_PROMPT = """An objective was just created from a conversation. \
+Identify concrete, actionable tasks that were discussed and should be created to advance \
+this objective.
+
+Objective: {objective_title}
+Description: {objective_description}
+
+Recent conversation:
+{conversation}
+
+Current exchange:
+User: {current_query}
+Assistant: {current_response}
+
+Rules:
+- Only extract tasks that were specifically discussed or clearly implied in the conversation.
+- Each task should be a concrete action (start with a verb).
+- Do NOT create generic tasks. Only create tasks grounded in the conversation.
+- Keep titles concise (under 80 chars).
+- Set priority: "high" for urgent/blocking items, "medium" for normal, "low" for nice-to-have.
+- If no concrete tasks were discussed, return an empty list.
+
+Respond with ONLY a JSON object:
+{{"tasks": [
+  {{"title": "verb-phrase task title", "description": "brief context or null", \
+"priority": "high|medium|low"}}
+]}} /no_think"""
+
 
 def run_post_chat_agent(
     query: str,
@@ -146,9 +203,14 @@ def run_post_chat_agent(
                     actions.append(action)
 
             elif intent_type == "create_objective":
-                action = _handle_create_objective(intent, store, goal_id=goal_id)
+                action = _handle_create_objective(
+                    intent, store, goal_id=goal_id,
+                    full_query=query, full_response=response, config=config,
+                )
                 if action:
+                    extra = action.pop("extra_actions", [])
                     actions.append(action)
+                    actions.extend(extra)
 
             elif intent_type == "complete_task":
                 action = _handle_complete_task(intent, store, tasks)
@@ -220,10 +282,162 @@ def _handle_create_task(
     }
 
 
-def _handle_create_objective(
-    intent: dict, store: Store, goal_id: Optional[int] = None
+def _enrich_objective_description(
+    goal_id: int,
+    full_query: str,
+    full_response: str,
+    store: Store,
+    config: GivaConfig,
+    goal_context_id: Optional[int] = None,
 ) -> Optional[dict]:
-    """Create a child goal (objective) from a detected intent."""
+    """Enrich a newly created objective's description with conversation context.
+
+    Extracts relevant details, templates, drafts, and plans from the conversation
+    and saves them as a rich description on the objective.
+    """
+    from giva.llm.engine import manager
+
+    goal = store.get_goal(goal_id)
+    if not goal:
+        return None
+
+    # Get recent conversation history for richer context
+    recent = store.get_recent_messages(limit=6, goal_id=goal_context_id)
+    conv_text = "\n".join(
+        f"{m['role'].title()}: {m['content'][:1500]}" for m in recent[-6:]
+    )
+
+    prompt = OBJECTIVE_ENRICHMENT_PROMPT.format(
+        objective_title=goal.title,
+        brief_description=goal.description,
+        conversation=conv_text,
+        current_query=full_query[:2000],
+        current_response=full_response[:3000],
+    )
+
+    try:
+        raw = manager.generate(
+            config.llm.filter_model,
+            [{"role": "user", "content": prompt}],
+            max_tokens=1024,
+            temp=0.2,
+            top_p=0.9,
+        )
+        result = _parse_agent_response(raw)
+        if result and result.get("enriched_description"):
+            store.update_goal(goal_id, description=result["enriched_description"])
+            log.info(
+                "Enriched objective #%d description (%d chars)",
+                goal_id, len(result["enriched_description"]),
+            )
+            return {"type": "objective_enriched", "goal_id": goal_id}
+    except Exception as e:
+        log.debug("Objective enrichment error: %s", e)
+
+    return None
+
+
+def _decompose_objective_to_tasks(
+    goal_id: int,
+    full_query: str,
+    full_response: str,
+    store: Store,
+    config: GivaConfig,
+    goal_context_id: Optional[int] = None,
+) -> list[dict]:
+    """Break down a newly created objective into concrete tasks.
+
+    Analyzes the conversation to extract specific actionable tasks that were
+    discussed, and creates them linked to the objective.
+    """
+    from giva.llm.engine import manager
+
+    goal = store.get_goal(goal_id)
+    if not goal:
+        return []
+
+    # Get conversation context
+    recent = store.get_recent_messages(limit=6, goal_id=goal_context_id)
+    conv_text = "\n".join(
+        f"{m['role'].title()}: {m['content'][:1500]}" for m in recent[-6:]
+    )
+
+    # Use the enriched description if available (it may have just been updated)
+    refreshed = store.get_goal(goal_id)
+    obj_description = (refreshed.description if refreshed else goal.description) or ""
+
+    prompt = OBJECTIVE_DECOMPOSITION_PROMPT.format(
+        objective_title=goal.title,
+        objective_description=obj_description[:2000],
+        conversation=conv_text,
+        current_query=full_query[:2000],
+        current_response=full_response[:3000],
+    )
+
+    actions: list[dict] = []
+    try:
+        raw = manager.generate(
+            config.llm.filter_model,
+            [{"role": "user", "content": prompt}],
+            max_tokens=1024,
+            temp=0.2,
+            top_p=0.9,
+        )
+        result = _parse_agent_response(raw)
+        if not result:
+            return actions
+
+        # Get existing tasks for duplicate check
+        existing = store.get_tasks(status="pending", limit=50)
+        existing_titles = {t.title.lower() for t in existing}
+
+        for task_data in result.get("tasks", []):
+            title = task_data.get("title")
+            if not title or title.lower() in existing_titles:
+                continue
+
+            task = Task(
+                title=title,
+                description=task_data.get("description", "") or "",
+                source_type="chat",
+                source_id=0,
+                priority=task_data.get("priority") or "medium",
+                goal_id=goal_id,
+            )
+            task_id = store.add_task(task)
+            existing_titles.add(title.lower())
+            log.info(
+                "Decomposition created task #%d: %s (goal=%d)",
+                task_id, title, goal_id,
+            )
+            actions.append({
+                "type": "task_created",
+                "task_id": task_id,
+                "title": title,
+                "priority": task.priority,
+                "goal_id": goal_id,
+            })
+
+    except Exception as e:
+        log.debug("Objective decomposition error: %s", e)
+
+    return actions
+
+
+def _handle_create_objective(
+    intent: dict,
+    store: Store,
+    goal_id: Optional[int] = None,
+    full_query: str = "",
+    full_response: str = "",
+    config: Optional[GivaConfig] = None,
+) -> Optional[dict]:
+    """Create a child goal (objective) from a detected intent.
+
+    If full conversation context and config are provided, also:
+    1. Enriches the objective description with conversation details
+    2. Decomposes the objective into concrete tasks
+    """
     title = intent.get("title")
     if not title:
         return None
@@ -264,13 +478,31 @@ def _handle_create_objective(
         new_goal_id, title, parent_id, tier,
     )
 
-    return {
+    action = {
         "type": "objective_created",
         "goal_id": new_goal_id,
         "title": title,
         "tier": tier,
         "parent_id": parent_id,
+        "extra_actions": [],
     }
+
+    # Run enrichment and decomposition if full context is available
+    if config and (full_query or full_response):
+        enrichment = _enrich_objective_description(
+            new_goal_id, full_query, full_response, store, config,
+            goal_context_id=goal_id,
+        )
+        if enrichment:
+            action["extra_actions"].append(enrichment)
+
+        decomposition = _decompose_objective_to_tasks(
+            new_goal_id, full_query, full_response, store, config,
+            goal_context_id=goal_id,
+        )
+        action["extra_actions"].extend(decomposition)
+
+    return action
 
 
 def _auto_link_goal(

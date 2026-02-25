@@ -25,6 +25,10 @@ struct GivaApp: App {
                 if viewModel.isMainWindowOpen {
                     // Main window is open — redirect to it instead of showing popover
                     MainWindowRedirectView()
+                } else if viewModel.lastUsedFullWindow && bootstrap.isReady {
+                    // User prefers full window — launch it directly
+                    FullWindowLauncherView()
+                        .environment(viewModel)
                 } else if bootstrap.isReady {
                     MainPanelView()
                         .environment(viewModel)
@@ -76,6 +80,24 @@ private struct MainWindowRedirectView: View {
                 for window in NSApp.windows where window.title == "Giva" && window.isVisible {
                     window.makeKeyAndOrderFront(nil)
                     break
+                }
+            }
+    }
+}
+
+/// Tiny view that opens the full window immediately when the user prefers full mode.
+/// Shown inside the menu bar popover when `lastUsedFullWindow` is true.
+private struct FullWindowLauncherView: View {
+    @Environment(GivaViewModel.self) private var viewModel
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Color.clear
+            .frame(width: 1, height: 1)
+            .onAppear {
+                openWindow(id: "main-window")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    NSApp.activate(ignoringOtherApps: true)
                 }
             }
     }
