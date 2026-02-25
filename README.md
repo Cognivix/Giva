@@ -220,4 +220,4 @@ In your config, reference secrets with a `$` prefix (e.g., `DISCORD_BOT_TOKEN = 
 
 ## License
 
-Proprietary. All rights reserved.
+Apache 2.0
