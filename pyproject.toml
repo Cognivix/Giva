@@ -7,6 +7,7 @@ name = "giva"
 version = "0.1.0"
 description = "Generative Intelligent Virtual Assistant"
 requires-python = ">=3.13"
+license = "Apache-2.0"
 dependencies = [
     "mlx-lm>=0.25.2",
     "pyobjc-framework-EventKit>=12.0",
