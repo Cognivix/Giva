@@ -103,6 +103,20 @@ max_execution_seconds = 60
 # timeout_seconds = 30
 # description = "Send and receive Discord messages"
 
+[power]
+# Power-aware scheduling: adapts background work to battery and thermal state
+enabled = true
+# Battery % below which ALL background work (sync, strategy, agents) is skipped
+battery_pause_threshold = 20
+# Battery % below which heavy work (deep sync, strategy gen) is skipped
+battery_defer_heavy_threshold = 50
+# Thermal state (0=nominal, 1=fair, 2=serious, 3=critical) at which ALL work stops
+thermal_pause_threshold = 3
+# Thermal state at which heavy work is deferred
+thermal_defer_heavy_threshold = 2
+# Minutes of idle time after which LLM models are unloaded from memory
+model_idle_timeout_minutes = 20
+
 [voice]
 # Voice mode: TTS (text-to-speech) and STT (speech-to-text)
 enabled = false

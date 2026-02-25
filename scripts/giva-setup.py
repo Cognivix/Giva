@@ -222,7 +222,9 @@ def write_plist() -> None:
             "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin",
             "HOME": str(Path.home()),
         },
-        "ProcessType": "Interactive",
+        "ProcessType": "Background",
+        "LowPriorityIO": True,
+        "Nice": 10,
     }
 
     with open(PLIST_PATH, "wb") as f:

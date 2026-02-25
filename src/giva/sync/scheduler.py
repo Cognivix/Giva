@@ -58,6 +58,91 @@ class SyncScheduler:
         else:
             yield
 
+    # ------------------------------------------------------------------
+    # Power-aware scheduling helpers
+    # ------------------------------------------------------------------
+
+    def _should_skip_sync(self) -> str | None:
+        """Return a reason string if sync should be skipped, else None."""
+        if not self.config.power.enabled:
+            return None
+        try:
+            from giva.utils.power import get_power_state
+
+            state = get_power_state()
+            pwr = self.config.power
+
+            if state.thermal_state >= pwr.thermal_pause_threshold:
+                return (
+                    f"thermal state {state.thermal_state} "
+                    f"(threshold {pwr.thermal_pause_threshold})"
+                )
+            if (
+                state.on_battery
+                and state.battery_percent is not None
+                and state.battery_percent < pwr.battery_pause_threshold
+            ):
+                return (
+                    f"battery at {state.battery_percent}% "
+                    f"(threshold {pwr.battery_pause_threshold}%)"
+                )
+        except Exception as e:
+            log.debug("Power state check failed: %s", e)
+        return None
+
+    def _should_skip_heavy(self) -> str | None:
+        """Return a reason string if heavy work should be skipped, else None."""
+        if not self.config.power.enabled:
+            return None
+        try:
+            from giva.utils.power import get_power_state
+
+            state = get_power_state()
+            pwr = self.config.power
+
+            if state.thermal_state >= pwr.thermal_defer_heavy_threshold:
+                return (
+                    f"thermal state {state.thermal_state} "
+                    f"(heavy threshold {pwr.thermal_defer_heavy_threshold})"
+                )
+            if (
+                state.on_battery
+                and state.battery_percent is not None
+                and state.battery_percent < pwr.battery_defer_heavy_threshold
+            ):
+                return (
+                    f"battery at {state.battery_percent}% "
+                    f"(heavy threshold {pwr.battery_defer_heavy_threshold}%)"
+                )
+        except Exception as e:
+            log.debug("Power state check failed: %s", e)
+        return None
+
+    def _set_background_qos(self) -> None:
+        """Set the current thread to background QoS priority."""
+        if not self.config.power.enabled:
+            return
+        try:
+            from giva.utils.power import set_thread_qos_background
+            set_thread_qos_background()
+        except Exception:
+            pass
+
+    def _maybe_unload_idle_models(self) -> None:
+        """Unload LLM models that have been idle longer than the configured timeout."""
+        if not self.config.power.enabled:
+            return
+        try:
+            from giva.llm.engine import manager
+
+            timeout = self.config.power.model_idle_timeout_minutes * 60
+            with self._acquire_llm():
+                unloaded = manager.unload_idle(timeout)
+            if unloaded:
+                log.info("Unloaded idle models: %s", ", ".join(unloaded))
+        except Exception as e:
+            log.debug("Idle model unload failed: %s", e)
+
     def _broadcast(self, event: dict) -> None:
         """Push an event to all connected /api/session/stream consumers."""
         if self.app is None:
@@ -131,6 +216,16 @@ class SyncScheduler:
 
     def _run_sync(self, interval: float):
         """Run a sync cycle, extract tasks, broadcast results, and reschedule."""
+        self._set_background_qos()
+
+        # Power-aware: skip entire sync cycle if conditions are bad
+        skip_reason = self._should_skip_sync()
+        if skip_reason:
+            log.info("Skipping sync cycle: %s", skip_reason)
+            self._maybe_unload_idle_models()
+            self._schedule(interval)
+            return
+
         mail_synced = 0
         events_synced = 0
 
@@ -235,10 +330,21 @@ class SyncScheduler:
         except Exception as e:
             log.debug("Reflection check error: %s", e)
 
+        # Unload models that have been idle past the timeout
+        self._maybe_unload_idle_models()
+
         self._schedule(interval)
 
     def _run_strategy(self, interval: float):
         """Background job: generate strategies for goals without them."""
+        self._set_background_qos()
+
+        skip_reason = self._should_skip_heavy()
+        if skip_reason:
+            log.info("Skipping strategy generation: %s", skip_reason)
+            self._schedule_strategy(interval)
+            return
+
         try:
             from giva.intelligence.daily_review import run_background_strategy
 
@@ -262,12 +368,18 @@ class SyncScheduler:
         """Incrementally extend email history if conditions are met.
 
         Guards:
+        - Power state allows heavy work
         - ≥24h since last deepening attempt
         - Hasn't reached ``deep_sync_max_months`` yet
         - Only one tier advancement per invocation
 
         Runs ``sync_mail_initial`` at the next tier, then re-profiles.
         """
+        skip_reason = self._should_skip_heavy()
+        if skip_reason:
+            log.info("Skipping deep sync: %s", skip_reason)
+            return
+
         from datetime import datetime, timedelta
 
         import json as _json
@@ -380,6 +492,14 @@ class SyncScheduler:
         Current triggers:
         - Weekly goal inference: re-analyze profile + data to suggest new goals
         """
+        self._set_background_qos()
+
+        skip_reason = self._should_skip_heavy()
+        if skip_reason:
+            log.info("Skipping agent tasks: %s", skip_reason)
+            self._schedule_agent_tasks(interval)
+            return
+
         try:
             log.debug("Scheduler agent tasks: checking for automated work")
 

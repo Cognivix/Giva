@@ -9,6 +9,7 @@ Both can be loaded simultaneously on M4 Max.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Generator, Optional
 
 from giva.config import LLMConfig
@@ -28,6 +29,7 @@ class ModelManager:
 
     def __init__(self):
         self._models: dict[str, tuple] = {}  # model_id -> (model, tokenizer)
+        self._last_use: dict[str, float] = {}  # model_id -> monotonic timestamp
 
     def ensure_loaded(self, model_id: str):
         """Load a model if not already loaded.
@@ -67,6 +69,7 @@ class ModelManager:
     def _get(self, model_id: str) -> tuple:
         """Get a loaded model and tokenizer."""
         self.ensure_loaded(model_id)
+        self._last_use[model_id] = time.monotonic()
         return self._models[model_id]
 
     def generate(
@@ -119,7 +122,23 @@ class ModelManager:
         """Unload a model to free memory."""
         if model_id in self._models:
             del self._models[model_id]
+            self._last_use.pop(model_id, None)
             log.info("Model %s unloaded.", model_id)
+
+    def unload_idle(self, timeout_seconds: int) -> list[str]:
+        """Unload models that haven't been used for ``timeout_seconds``.
+
+        Returns the list of model IDs that were unloaded.
+        Caller must hold ``_llm_lock`` to prevent races with active inference.
+        """
+        now = time.monotonic()
+        to_unload = [
+            mid for mid, ts in self._last_use.items()
+            if mid in self._models and (now - ts) > timeout_seconds
+        ]
+        for mid in to_unload:
+            self.unload(mid)
+        return to_unload
 
     def loaded_models(self) -> list[str]:
         return list(self._models.keys())

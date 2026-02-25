@@ -213,10 +213,19 @@ class ExtractResponse(BaseModel):
     tasks_extracted: int
 
 
+class PowerStateResponse(BaseModel):
+    on_battery: bool
+    battery_percent: int | None = None
+    thermal_state: int = 0
+    memory_pressure_pct: float = 0.0
+    loaded_models: int = 0
+
+
 class HealthResponse(BaseModel):
     status: str
     version: str
     commit: str
+    power: PowerStateResponse | None = None
 
 
 class TranscribeResponse(BaseModel):
@@ -809,7 +818,24 @@ async def _sync_gen_to_sse_with_voice(
 @app.get("/api/health")
 async def health() -> HealthResponse:
     """Health check — lightweight, no DB or model access."""
-    return HealthResponse(status="ok", version=__version__, commit=_GIT_COMMIT)
+    power = None
+    try:
+        from giva.llm.engine import manager
+        from giva.utils.power import get_power_state
+
+        ps = get_power_state()
+        power = PowerStateResponse(
+            on_battery=ps.on_battery,
+            battery_percent=ps.battery_percent,
+            thermal_state=ps.thermal_state,
+            memory_pressure_pct=round(ps.memory_pressure_pct, 1),
+            loaded_models=len(manager.loaded_models()),
+        )
+    except Exception:
+        pass
+    return HealthResponse(
+        status="ok", version=__version__, commit=_GIT_COMMIT, power=power,
+    )
 
 
 @app.get("/api/status")

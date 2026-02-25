@@ -79,6 +79,16 @@ class AgentsConfig:
 
 
 @dataclass(frozen=True)
+class PowerConfig:
+    enabled: bool = True
+    battery_pause_threshold: int = 20       # Below this %, skip ALL background work
+    battery_defer_heavy_threshold: int = 50  # Below this %, skip heavy work
+    thermal_pause_threshold: int = 3        # At this thermal state, skip ALL work
+    thermal_defer_heavy_threshold: int = 2  # At this thermal state, skip heavy work
+    model_idle_timeout_minutes: int = 20    # Unload models after N idle minutes
+
+
+@dataclass(frozen=True)
 class GivaConfig:
     data_dir: Path = field(default_factory=lambda: Path("~/.local/share/giva").expanduser())
     log_level: str = "INFO"
@@ -88,6 +98,7 @@ class GivaConfig:
     voice: VoiceConfig = field(default_factory=VoiceConfig)
     goals: GoalsConfig = field(default_factory=GoalsConfig)
     agents: AgentsConfig = field(default_factory=AgentsConfig)
+    power: PowerConfig = field(default_factory=PowerConfig)
 
     @property
     def db_path(self) -> Path:
@@ -132,6 +143,7 @@ def _apply_env(raw: dict) -> dict:
         "GIVA_GOALS_REVIEW_HOUR": ("goals", "daily_review_hour"),
         "GIVA_AGENTS_ENABLED": ("agents", "enabled"),
         "GIVA_AGENTS_ROUTING": ("agents", "routing_enabled"),
+        "GIVA_POWER_ENABLED": ("power", "enabled"),
     }
     for env_key, path in env_map.items():
         val = os.environ.get(env_key)
@@ -363,6 +375,24 @@ def load_config() -> GivaConfig:
             ),
             scheduler_agent_interval_minutes=int(
                 raw.get("agents", {}).get("scheduler_agent_interval_minutes", 60)
+            ),
+        ),
+        power=PowerConfig(
+            enabled=_to_bool(raw.get("power", {}).get("enabled", True)),
+            battery_pause_threshold=int(
+                raw.get("power", {}).get("battery_pause_threshold", 20)
+            ),
+            battery_defer_heavy_threshold=int(
+                raw.get("power", {}).get("battery_defer_heavy_threshold", 50)
+            ),
+            thermal_pause_threshold=int(
+                raw.get("power", {}).get("thermal_pause_threshold", 3)
+            ),
+            thermal_defer_heavy_threshold=int(
+                raw.get("power", {}).get("thermal_defer_heavy_threshold", 2)
+            ),
+            model_idle_timeout_minutes=int(
+                raw.get("power", {}).get("model_idle_timeout_minutes", 20)
             ),
         ),
     )
