@@ -62,7 +62,10 @@ max_execution_seconds = 60
 # scheduler_agent_interval_minutes = 60
 
 # --- MCP Servers (optional, requires `pip install giva[mcp]` + Node.js for npx) ---
-# Uncomment and adjust paths/tokens. Servers auto-register as agents at startup.
+# Uncomment and adjust paths. Servers auto-register as agents at startup.
+#
+# Tokens/secrets: env values starting with "$" are resolved from
+# ~/.config/giva/secrets.toml — see secrets.example.toml for setup.
 #
 # [mcp_servers.filesystem]
 # transport = "stdio"
@@ -96,7 +99,7 @@ max_execution_seconds = 60
 # transport = "stdio"
 # command = "npx"
 # args = ["-y", "discord-mcp"]
-# env = { DISCORD_BOT_TOKEN = "Bot your_token_here" }  # prefix with "Bot " for bot tokens
+# env = { DISCORD_BOT_TOKEN = "$DISCORD_BOT_TOKEN" }
 # timeout_seconds = 30
 # description = "Send and receive Discord messages"
 

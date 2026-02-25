@@ -8,6 +8,8 @@ dist/
 build/
 .venv/
 .env
+secrets.toml
 .mypy_cache/
+.coverage
 .pytest_cache/
 .ruff_cache/

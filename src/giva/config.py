@@ -11,6 +11,7 @@ _PACKAGE_DIR = Path(__file__).resolve().parent
 _PROJECT_ROOT = _PACKAGE_DIR.parent.parent
 _DEFAULT_CONFIG = _PROJECT_ROOT / "config.default.toml"
 _USER_CONFIG = Path("~/.config/giva/config.toml").expanduser()
+_SECRETS_FILE = Path("~/.config/giva/secrets.toml").expanduser()
 
 
 @dataclass(frozen=True)
@@ -201,10 +202,69 @@ def _toml_value(val) -> str:
     return f'"{val}"'
 
 
+def _load_secrets() -> dict[str, str]:
+    """Load secrets from ~/.config/giva/secrets.toml.
+
+    Returns a flat dict of secret_name → value from the ``[secrets]`` section.
+    Returns an empty dict if the file doesn't exist or has no ``[secrets]`` section.
+    """
+    if not _SECRETS_FILE.exists():
+        return {}
+    try:
+        with open(_SECRETS_FILE, "rb") as f:
+            raw = tomllib.load(f)
+        secrets = raw.get("secrets", {})
+        return {k: str(v) for k, v in secrets.items()}
+    except Exception:
+        return {}
+
+
+def _resolve_secrets(raw: dict, secrets: dict[str, str]) -> dict:
+    """Resolve ``$SECRET_NAME`` references in MCP server env values.
+
+    Scans ``[mcp_servers.<name>].env`` dicts and replaces any string value
+    that starts with ``$`` with the matching value from ``secrets``.  Missing
+    secrets are logged and the entry is removed so the server can fail
+    gracefully rather than passing the literal ``$TOKEN`` string.
+    """
+    import logging
+    log = logging.getLogger(__name__)
+
+    mcp = raw.get("mcp_servers")
+    if not mcp or not isinstance(mcp, dict):
+        return raw
+
+    for server_name, server_cfg in mcp.items():
+        if not isinstance(server_cfg, dict):
+            continue
+        env = server_cfg.get("env")
+        if not isinstance(env, dict):
+            continue
+
+        resolved = {}
+        for key, val in env.items():
+            if isinstance(val, str) and val.startswith("$"):
+                secret_key = val[1:]  # strip leading $
+                if secret_key in secrets:
+                    resolved[key] = secrets[secret_key]
+                else:
+                    log.warning(
+                        "mcp_servers.%s.env.%s: secret '%s' not found in "
+                        "~/.config/giva/secrets.toml — server may fail to start",
+                        server_name, key, secret_key,
+                    )
+                    # Omit the key so the subprocess gets no value rather than "$NAME"
+            else:
+                resolved[key] = val
+        server_cfg["env"] = resolved
+
+    return raw
+
+
 def load_raw_config() -> dict:
     """Load and merge raw TOML config (without parsing into GivaConfig).
 
-    Applies: config.default.toml → user config.toml → GIVA_* env vars.
+    Applies: config.default.toml → user config.toml → secrets.toml → GIVA_* env vars.
     Useful when subsystems (e.g. MCP agents) need access to sections
     that are not represented in the typed :class:`GivaConfig`.
     """
@@ -218,6 +278,10 @@ def load_raw_config() -> dict:
         with open(_USER_CONFIG, "rb") as f:
             user = tomllib.load(f)
         raw = _deep_merge(raw, user)
+
+    secrets = _load_secrets()
+    if secrets:
+        raw = _resolve_secrets(raw, secrets)
 
     return _apply_env(raw)
 
