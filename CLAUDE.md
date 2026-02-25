@@ -171,7 +171,7 @@ Uses the **Swift Testing** framework (`@Test`, `#expect`, `@Suite`). Test target
 
 ## Conventions
 
-- Python 3.11+, ruff line-length 100
+- Python 3.13+, ruff line-length 100
 - `src/` layout with `setuptools`
 - Frozen dataclasses for config, mutable for DB models
 - All LLM prompt templates live in `src/giva/llm/prompts.py`

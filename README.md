@@ -28,21 +28,24 @@ All data stays on your device. No cloud APIs, no telemetry.
 
 ## Requirements
 
-- **macOS 15+** (Sequoia) with **Apple Silicon** (M1 or later)
-- **Python 3.11+**
-- **Xcode 16+** (for building the SwiftUI app)
+- **macOS 26** (Tahoe) with **Apple Silicon** (M1 or later)
+- **Python 3.13+**
+- **Xcode 26+**
+- **Node.js 18+** (for MCP servers)
 - ~16 GB RAM recommended (for 30B assistant model)
 
 ## Quick Start
 
 ### Prerequisites
 
-You need a Mac with **Apple Silicon** (M1 or later) running **macOS 15 Sequoia** or newer, and at least **16 GB RAM** (for the 30B assistant model).
+You need a Mac with **Apple Silicon** (M1 or later) running **macOS 26 Tahoe** or newer, and at least **16 GB RAM** (for the 30B assistant model).
 
-**1. Install Xcode Command Line Tools**
+**1. Install Xcode**
+
+Install Xcode 26+ from the [Mac App Store](https://apps.apple.com/app/xcode/id497799835). After installation:
 
 ```bash
-xcode-select --install
+sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
 ```
 
 **2. Install Homebrew**
@@ -53,7 +56,7 @@ xcode-select --install
 
 After installation, follow the instructions printed by Homebrew to add it to your PATH (typically adding an `eval` line to `~/.zprofile`).
 
-**3. Install Python 3.11+**
+**3. Install Python 3.13+**
 
 ```bash
 brew install python@3.13
@@ -62,21 +65,13 @@ brew install python@3.13
 Verify:
 
 ```bash
-python3 --version   # Should show 3.11 or later
+python3 --version   # Should show 3.13 or later
 ```
 
-**4. Install Node.js** (optional — only needed for MCP servers)
+**4. Install Node.js**
 
 ```bash
 brew install node
-```
-
-**5. Install Xcode** (optional — only needed for the SwiftUI menu bar app)
-
-Install Xcode 16+ from the [Mac App Store](https://apps.apple.com/app/xcode/id497799835) or [developer.apple.com](https://developer.apple.com/xcode/). After installation:
-
-```bash
-sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
 ```
 
 ### Install & Run
@@ -90,8 +85,8 @@ cd Giva
 python3 -m venv .venv
 source .venv/bin/activate
 
-# Install in editable mode with dev dependencies
-pip install -e ".[dev]"
+# Install with all features (dev tools, voice, MCP servers)
+pip install -e ".[dev,voice,mcp]"
 
 # Run the CLI
 giva
@@ -196,23 +191,23 @@ All logs in `~/.local/share/giva/logs/`:
 tail -f ~/.local/share/giva/logs/server.log ~/.local/share/giva/logs/giva-app.log
 ```
 
-## Optional Features
+## Lighter Install
+
+The default `pip install -e ".[dev,voice,mcp]"` installs everything. If you want a smaller footprint:
+
+| Install command | What you get | What you skip |
+|-----------------|--------------|---------------|
+| `pip install -e ".[dev,mcp]"` | CLI, API, MCP servers | Voice (TTS/STT) |
+| `pip install -e ".[dev,voice]"` | CLI, API, voice | MCP servers (Node.js not needed) |
+| `pip install -e ".[dev]"` | CLI + API only | Voice and MCP |
 
 ### Voice Mode
 
-```bash
-pip install -e ".[voice]"
-```
-
-Enables local TTS (Qwen3-TTS-0.6B) and STT (Lightning Whisper MLX). Set `voice.enabled = true` in config.
+Included in the full install. Set `voice.enabled = true` in config to activate local TTS (Qwen3-TTS-0.6B) and STT (Lightning Whisper MLX).
 
 ### MCP Servers
 
-```bash
-pip install -e ".[mcp]"
-```
-
-Configure MCP servers in `~/.config/giva/config.toml`. Servers auto-register as agents at startup. See `config.default.toml` for examples (filesystem, web fetch, iMessage, Notes, Discord).
+Included in the full install. Configure servers in `~/.config/giva/config.toml`. Servers auto-register as agents at startup. See `config.default.toml` for examples (filesystem, web fetch, iMessage, Notes, Discord).
 
 Servers that require API tokens (e.g., Discord) use secret references. Copy the template and fill in your values:
 
