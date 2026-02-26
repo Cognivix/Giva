@@ -13,6 +13,8 @@ protocol APIServiceProtocol: AnyObject, Sendable {
     func triggerSync() async throws -> SyncResponse
     func triggerExtract() async throws -> ExtractResponse
     func triggerReset() async throws -> ResetResponse
+    func getConfig() async throws -> ConfigResponse
+    func updateConfig(updates: [String: Any]) async throws -> [String: Any]
     func getSession() async throws -> SessionStateResponse
     func getAvailableModels() async throws -> AvailableModelsResponse
     func selectModels(assistant: String, filter: String) async throws -> ModelSelectResponse

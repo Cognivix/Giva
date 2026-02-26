@@ -39,6 +39,8 @@ final class MockAPIService: APIServiceProtocol, @unchecked Sendable {
     var acceptPlanCallCount = 0
     var respondReviewCallCount = 0
     var goalBrainstormCallCount = 0
+    var getConfigCallCount = 0
+    var updateConfigCallCount = 0
 
     // MARK: - Stub returns
 
@@ -124,6 +126,42 @@ final class MockAPIService: APIServiceProtocol, @unchecked Sendable {
     )
     var goalBrainstormResult: Result<[String: Any], Error> = .success(["status": "ok"])
 
+    var getConfigResult: Result<ConfigResponse, Error> = .success(
+        ConfigResponse(
+            llm: LLMConfigResponse(
+                model: "test-model", filterModel: "test-filter",
+                maxTokens: 2048, temperature: 0.7, topP: 0.9,
+                contextBudgetTokens: 8000
+            ),
+            voice: VoiceConfigResponse(
+                enabled: false, ttsModel: "test-tts", ttsVoice: "af_heart",
+                sttModel: "test-stt", sampleRate: 24000
+            ),
+            power: PowerConfigResponse(
+                enabled: true, batteryPauseThreshold: 20,
+                batteryDeferHeavyThreshold: 50, thermalPauseThreshold: 3,
+                thermalDeferHeavyThreshold: 2, modelIdleTimeoutMinutes: 20
+            ),
+            mail: MailConfigResponse(
+                mailboxes: ["INBOX"], batchSize: 50,
+                syncIntervalMinutes: 15, initialSyncMonths: 4,
+                deepSyncMaxMonths: 24
+            ),
+            calendar: CalendarConfigResponse(
+                syncWindowPastDays: 7, syncWindowFutureDays: 30,
+                syncIntervalMinutes: 15
+            ),
+            agents: AgentsConfigResponse(
+                enabled: true, routingEnabled: true, maxExecutionSeconds: 60
+            ),
+            goals: GoalsConfigResponse(
+                strategyIntervalHours: 6, dailyReviewHour: 18,
+                maxStrategiesPerRun: 1, planHorizonDays: 7
+            )
+        )
+    )
+    var updateConfigResult: Result<[String: Any], Error> = .success(["success": true])
+
     // MARK: - Error injection
 
     var shouldThrow: Error?
@@ -151,6 +189,16 @@ final class MockAPIService: APIServiceProtocol, @unchecked Sendable {
     func getProfile() async throws -> ProfileResponse {
         getProfileCallCount += 1
         return try throwOrReturn(getProfileResult)
+    }
+
+    func getConfig() async throws -> ConfigResponse {
+        getConfigCallCount += 1
+        return try throwOrReturn(getConfigResult)
+    }
+
+    func updateConfig(updates: [String: Any]) async throws -> [String: Any] {
+        updateConfigCallCount += 1
+        return try throwOrReturn(updateConfigResult)
     }
 
     func getTasks(status: String?, limit: Int) async throws -> TaskListResponse {

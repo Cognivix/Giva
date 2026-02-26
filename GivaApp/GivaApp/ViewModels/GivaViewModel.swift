@@ -29,6 +29,15 @@ enum AppTab: String, CaseIterable {
     case tasks = "Tasks"
 }
 
+/// Settings window tab for deep-linking (e.g. gear menu → Profile).
+enum SettingsTab: Hashable {
+    case models
+    case sync
+    case general
+    case goals
+    case profile
+}
+
 /// Voice input mode. Dictate places text in the input field for editing;
 /// full voice auto-sends after silence and enables TTS responses.
 enum VoiceMode: Equatable {
@@ -142,6 +151,13 @@ class GivaViewModel {
     var downloadProgress: [String: Double] = [:]
     var isDownloadingModels: Bool = false
     var modelSetupError: String?
+
+    // Config (fetched from server)
+    var config: ConfigResponse?
+    var isLoadingConfig: Bool = false
+
+    /// Set before opening the Settings window to deep-link to a specific tab.
+    var selectedSettingsTab: SettingsTab?
 
     // UI
     var currentTab: AppTab = .chat
@@ -1031,6 +1047,30 @@ class GivaViewModel {
             profile = try await api.getProfile()
         } catch {
             // Profile may not exist yet
+        }
+    }
+
+    // MARK: - Config
+
+    func loadConfig() async {
+        guard let api = apiService else { return }
+        isLoadingConfig = true
+        do {
+            config = try await api.getConfig()
+        } catch {
+            errorMessage = "Failed to load settings: \(error.localizedDescription)"
+        }
+        isLoadingConfig = false
+    }
+
+    func updateConfig(updates: [String: Any]) async {
+        guard let api = apiService else { return }
+        do {
+            _ = try await api.updateConfig(updates: updates)
+            // Reload config to reflect server-side merged state
+            await loadConfig()
+        } catch {
+            errorMessage = "Failed to save settings: \(error.localizedDescription)"
         }
     }
 
