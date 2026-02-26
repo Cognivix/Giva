@@ -129,6 +129,7 @@ def run_post_chat_agent(
     store: Store,
     config: GivaConfig,
     goal_id: Optional[int] = None,
+    task_id: Optional[int] = None,
 ) -> list[dict]:
     """Run the combined post-chat agent after a chat response.
 
@@ -140,6 +141,7 @@ def run_post_chat_agent(
     Args:
         goal_id: When set, auto-links created tasks/objectives to this goal
             and injects goal context into the prompt.
+        task_id: When set, injects task context into the prompt.
 
     Returns a list of action dicts for SSE broadcasting.
     """
@@ -160,9 +162,21 @@ def run_post_chat_agent(
         if tasks else "No pending tasks."
     )
 
-    # Build goal context when in goal chat
+    # Build goal/task context when in scoped chat
     goal_context = ""
-    if goal_id:
+    if task_id:
+        task = store.get_task(task_id)
+        if task:
+            goal_context = (
+                f"Current task context: working on task #{task_id} '{task.title}' "
+                f"(priority: {task.priority}, status: {task.status}). "
+                f"Description: {task.description or 'N/A'}. "
+                f"This is a task-scoped conversation — link any new sub-tasks "
+                f"to the parent task's goal if applicable."
+            )
+            if task.goal_id:
+                goal_context += f" Task linked to goal_id={task.goal_id}."
+    elif goal_id:
         goal = store.get_goal(goal_id)
         if goal:
             goal_context = (

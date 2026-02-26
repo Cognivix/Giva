@@ -587,6 +587,10 @@ struct GoalChatRequest: Encodable {
     let query: String
 }
 
+struct TaskChatRequest: Encodable {
+    let query: String
+}
+
 struct GoalMessageItem: Codable {
     let role: String
     let content: String

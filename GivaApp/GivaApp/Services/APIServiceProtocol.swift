@@ -23,6 +23,8 @@ protocol APIServiceProtocol: AnyObject, Sendable {
     func confirmAgent(jobId: String) async throws
     func cancelAgent(jobId: String) async throws
     func taskAI(taskId: Int) async throws -> [String: Any]
+    func streamTaskChat(taskId: Int, query: String) -> AsyncThrowingStream<SSEEvent, Error>
+    func getTaskMessages(taskId: Int, limit: Int) async throws -> GoalMessagesResponse
     func transcribe(audioData: Data, filename: String) async throws -> String
     func streamTranscribe(audioData: Data, filename: String, chunkId: String) -> AsyncThrowingStream<SSEEvent, Error>
 
@@ -93,6 +95,9 @@ extension APIServiceProtocol {
     }
     func getGoalMessages(goalId: Int, limit: Int = 50) async throws -> GoalMessagesResponse {
         try await getGoalMessages(goalId: goalId, limit: limit)
+    }
+    func getTaskMessages(taskId: Int, limit: Int = 50) async throws -> GoalMessagesResponse {
+        try await getTaskMessages(taskId: taskId, limit: limit)
     }
     func getAgentQueue(
         status: String? = nil, limit: Int = 20

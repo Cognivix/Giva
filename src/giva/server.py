@@ -453,6 +453,10 @@ class GoalChatRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=4096)
 
 
+class TaskChatRequest(BaseModel):
+    query: str = Field(..., min_length=1, max_length=4096)
+
+
 class ModelDownloadRequest(BaseModel):
     model_id: str = Field(..., min_length=1)
 
@@ -1287,6 +1291,85 @@ async def task_ai(task_id: int, request: Request):
     }
 
 
+@app.post("/api/tasks/{task_id}/chat")
+async def task_chat(task_id: int, req: TaskChatRequest, request: Request):
+    """Task-scoped chat: sends task context to LLM. Returns SSE stream.
+
+    Messages are persisted scoped to this task (not mixed with global or goal chat).
+    After the response stream, runs the post-chat agent pipeline to detect
+    intents (create sub-task, complete task, progress, etc.).
+    """
+    store: Store = request.app.state.store
+    config = request.app.state.config
+
+    task = store.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    from giva.intelligence.queries import handle_query
+
+    # Build task context prefix — sent to LLM but NOT saved to DB
+    task_context = (
+        f"[Context: working on task '{task.title}' "
+        f"(priority: {task.priority}, status: {task.status}). "
+        f"Description: {task.description or 'N/A'}."
+    )
+    if task.due_date:
+        task_context += f" Due: {task.due_date.isoformat()[:10]}."
+    if task.goal_id:
+        goal = store.get_goal(task.goal_id)
+        if goal:
+            task_context += f" Linked to goal: {goal.title}."
+    task_context += (
+        " You are a coordinator agent helping the user accomplish this task. "
+        "Plan concrete steps, draft assets (emails, documents) for review, "
+        "and report where deliverables are stored. Never send or publish "
+        "anything without explicit user approval.]"
+    )
+    original_query = req.query
+
+    async def event_generator():
+        async for event in _sync_gen_to_sse(
+            handle_query, original_query, store, config,
+            task_id=task_id, context_prefix=task_context,
+        ):
+            yield event
+        # Post-chat agents (after stream done, lock released)
+        actions = await _run_post_chat(
+            original_query, store, config, task_id=task_id,
+        )
+        if actions:
+            yield {
+                "event": "agent_actions",
+                "data": json.dumps(actions),
+            }
+
+    return EventSourceResponse(event_generator())
+
+
+@app.get("/api/tasks/{task_id}/messages")
+async def task_messages(
+    task_id: int,
+    request: Request,
+    limit: int = Query(50, ge=1, le=200),
+):
+    """Retrieve persisted task chat messages."""
+    store: Store = request.app.state.store
+
+    task = store.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    msgs = store.get_task_messages(task_id, limit=limit)
+    return {
+        "messages": [
+            {"role": m["role"], "content": m["content"], "created_at": m.get("created_at")}
+            for m in msgs
+        ],
+        "count": len(msgs),
+    }
+
+
 @app.post("/api/sync")
 async def sync(request: Request) -> SyncResponse:
     """Trigger full email + calendar sync. Long-running (~30s)."""
@@ -1356,6 +1439,7 @@ async def _run_post_chat(
     store: Store,
     config,
     goal_id: int | None = None,
+    task_id: int | None = None,
 ) -> list[dict]:
     """Run post-chat agents in a thread with LLM lock.
 
@@ -1363,13 +1447,17 @@ async def _run_post_chat(
         goal_id: When set, scopes message retrieval and auto-links
             created tasks/objectives to this goal.  Conversation
             compression is skipped for goal-scoped chats.
+        task_id: When set, scopes message retrieval to this task.
+            Conversation compression is skipped for task-scoped chats.
     """
     loop = asyncio.get_event_loop()
 
     def _agents():
         actions: list[dict] = []
         # Get the last assistant response from the DB (scoped)
-        recent = store.get_recent_messages(limit=2, goal_id=goal_id)
+        recent = store.get_recent_messages(
+            limit=2, goal_id=goal_id, task_id=task_id
+        )
         response_text = ""
         for m in reversed(recent):
             if m["role"] == "assistant":
@@ -1385,13 +1473,14 @@ async def _run_post_chat(
 
             with _llm_lock:
                 actions = run_post_chat_agent(
-                    query, response_text, store, config, goal_id=goal_id
+                    query, response_text, store, config,
+                    goal_id=goal_id, task_id=task_id,
                 )
         except Exception as e:
             log.debug("Post-chat agent error: %s", e)
 
         # 2. Run conversation compressor if needed (global chat only)
-        if goal_id is None:
+        if goal_id is None and task_id is None:
             try:
                 from giva.intelligence.context import maybe_compress_conversation
 

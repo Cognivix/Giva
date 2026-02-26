@@ -22,6 +22,7 @@ final class MockAPIService: APIServiceProtocol, @unchecked Sendable {
     var confirmAgentCallCount = 0
     var cancelAgentCallCount = 0
     var taskAICallCount = 0
+    var getTaskMessagesCallCount = 0
     var transcribeCallCount = 0
     var streamTranscribeCallCount = 0
     var getGoalsCallCount = 0
@@ -97,6 +98,9 @@ final class MockAPIService: APIServiceProtocol, @unchecked Sendable {
     )
 
     var taskAIResult: Result<[String: Any], Error> = .success(["status": "ok"])
+    var getTaskMessagesResult: Result<GoalMessagesResponse, Error> = .success(
+        GoalMessagesResponse(messages: [], count: 0)
+    )
 
     var transcribeResult: Result<String, Error> = .success("Transcribed text")
     var streamTranscribeEvents: [SSEEvent] = []
@@ -272,6 +276,15 @@ final class MockAPIService: APIServiceProtocol, @unchecked Sendable {
     func taskAI(taskId: Int) async throws -> [String: Any] {
         taskAICallCount += 1
         return try throwOrReturn(taskAIResult)
+    }
+
+    func streamTaskChat(taskId: Int, query: String) -> AsyncThrowingStream<SSEEvent, Error> {
+        AsyncThrowingStream { $0.finish() }
+    }
+
+    func getTaskMessages(taskId: Int, limit: Int) async throws -> GoalMessagesResponse {
+        getTaskMessagesCallCount += 1
+        return try throwOrReturn(getTaskMessagesResult)
     }
 
     func transcribe(audioData: Data, filename: String) async throws -> String {

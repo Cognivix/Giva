@@ -132,6 +132,36 @@ def test_conversations(tmp_db):
     assert messages[1]["role"] == "assistant"
 
 
+def test_task_scoped_conversations(tmp_db):
+    """Task-scoped messages are isolated from global and goal-scoped messages."""
+    from giva.db.models import Task
+
+    # Create a task
+    task = Task(title="Review budget", source_type="manual", source_id=0)
+    task_id = tmp_db.add_task(task)
+    assert task_id > 0
+
+    # Add global, goal-scoped (fake goal_id=999), and task-scoped messages
+    tmp_db.add_message("user", "global message")
+    tmp_db.add_message("user", "task message 1", task_id=task_id)
+    tmp_db.add_message("assistant", "task reply 1", task_id=task_id)
+
+    # Global should only see global
+    global_msgs = tmp_db.get_recent_messages(limit=10)
+    assert len(global_msgs) == 1
+    assert global_msgs[0]["content"] == "global message"
+
+    # Task-scoped should see only task messages
+    task_msgs = tmp_db.get_task_messages(task_id)
+    assert len(task_msgs) == 2
+    assert task_msgs[0]["content"] == "task message 1"
+    assert task_msgs[1]["content"] == "task reply 1"
+
+    # get_recent_messages with task_id should match get_task_messages
+    recent_task = tmp_db.get_recent_messages(limit=10, task_id=task_id)
+    assert len(recent_task) == 2
+
+
 def test_stats(tmp_db):
     stats = tmp_db.get_stats()
     assert stats["emails"] == 0

@@ -4,6 +4,8 @@ import SwiftUI
 
 struct TaskListView: View {
     @Environment(GivaViewModel.self) private var viewModel
+    /// Callback to navigate to task-scoped contextual chat (main window only).
+    var onOpenTaskChat: ((Int) -> Void)? = nil
 
     var body: some View {
         Group {
@@ -40,7 +42,14 @@ struct TaskListView: View {
                                     await viewModel.updateTaskStatus(taskId: task.id, status: status)
                                 }
                             }, onAIRequest: {
-                                Task { await viewModel.requestTaskAI(taskId: task.id) }
+                                if let openChat = onOpenTaskChat {
+                                    // In main window: navigate to task chat directly
+                                    openChat(task.id)
+                                } else {
+                                    // In popover: signal main window to open task chat
+                                    viewModel.pendingTaskChatId = task.id
+                                    viewModel.lastUsedFullWindow = true
+                                }
                             })
                         }
                     }
@@ -107,7 +116,7 @@ struct TaskRow: View {
                                 .foregroundColor(.purple)
                         }
                         .buttonStyle(.plain)
-                        .help("Plan with AI")
+                        .help("Open task chat")
                     }
 
                     Button(action: { onStatusChange("done") }) {
@@ -139,7 +148,7 @@ struct TaskRow: View {
             Button {
                 if let onAI = onAIRequest { onAI() }
             } label: {
-                Label("Plan with AI", systemImage: "sparkles")
+                Label("Open Task Chat", systemImage: "sparkles")
             }
 
             Divider()
