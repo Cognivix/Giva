@@ -35,7 +35,7 @@ src/giva/
 ├── benchmarks.py       # Live LLM benchmark fetching (Open LLM Leaderboard, LMArena)
 ├── db/
 │   ├── models.py       # Dataclasses: Email, Event, Task, UserProfile, Goal, GoalStrategy
-│   ├── store.py        # SQLite + FTS5 data layer (WAL mode, schema v7)
+│   ├── store.py        # SQLite + FTS5 data layer (WAL mode, schema v8)
 │   └── migrations.py   # Schema versioning + ALTER migrations
 ├── sync/
 │   ├── mail.py         # Apple Mail sync via JXA, chunked headers + LLM filter
@@ -178,7 +178,7 @@ SQLite storage, schema management, and data type definitions.
 
 | File | Role |
 |---|---|
-| `src/giva/db/store.py` | SQLite + FTS5 data layer (WAL mode, SCHEMA_SQL constant, schema v4) |
+| `src/giva/db/store.py` | SQLite + FTS5 data layer (WAL mode, SCHEMA_SQL constant, schema v8) |
 | `src/giva/db/models.py` | Dataclasses: Email, Event, Task, UserProfile, Goal, GoalStrategy |
 | `src/giva/db/migrations.py` | Schema version detection + ALTER TABLE migrations |
 | `src/giva/config.py` | TOML config loading: default → user → env overlay |
@@ -330,6 +330,7 @@ Test infrastructure across both Python and Swift.
 - **Post-chat agents in goal chat**: The `/api/goals/{goal_id}/chat` endpoint runs the same post-chat agent pipeline as regular chat. The agent prompt includes the goal context and supports `create_objective` intents (auto-creating child goals with tier inferred from parent). Agent actions are broadcast via `agent_actions` SSE events.
 - **Task review & classification**: After task extraction, a background review pipeline runs: (0) **sanity checks** dismiss obviously stale tasks without LLM (expired deadlines, answered emails, past events), (1) **dedup** merges semantic duplicates via filter model, (2) **classify** assigns each task to one of five categories—`autonomous` (agent prepares, user confirms), `needs_input` (enriched with context), `user_only` (reminder context), `project` (upgraded to goal), `dismiss` (unnecessary/trivial)—via assistant model with review memory and dismissal history, (3) **route** each accordingly, (4) **learn** from dismissal patterns and persist LLM observations to `profile_data["task_review_patterns"]`. Power-gated: runs immediately in high-performance mode, deferred when battery/thermal-constrained. Unclassified tasks accumulate and are batch-processed on next eligible cycle.
 - **Source preservation in post-chat agent**: When the post-chat agent creates tasks from chat, `retrieve_context_sources()` extracts the email/event IDs from the query's retrieved context, and `_handle_create_task()` uses the most relevant source (email > event > chat) instead of defaulting to `source_type="chat", source_id=0`. This preserves the link between a task and the email or event being discussed.
+- **Dismissed task undo queue**: Dismissed tasks are soft-deleted (status → "dismissed") and retain `dismissal_reason` and `dismissed_at` metadata. All dismissal paths (sanity checks, LLM classification, duplicate merge, user action, goal upgrade) record a human-readable reason. The `TaskListView` shows a normally-hidden collapsible "Dismissed" section at the bottom; users can skim the title + reason and restore with a single click. API: `GET /api/tasks/dismissed`, `POST /api/tasks/{id}/restore`, `POST /api/tasks/{id}/dismiss`.
 
 ## Agent Architecture
 

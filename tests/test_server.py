@@ -27,6 +27,9 @@ def _create_test_app(store: Store, config: GivaConfig) -> FastAPI:
         profile,
         get_tasks,
         update_task_status,
+        get_dismissed_tasks,
+        restore_task,
+        dismiss_task_endpoint,
         sync,
         extract,
         chat,
@@ -40,7 +43,10 @@ def _create_test_app(store: Store, config: GivaConfig) -> FastAPI:
     test_app.get("/api/status")(status)
     test_app.get("/api/profile")(profile)
     test_app.get("/api/tasks")(get_tasks)
+    test_app.get("/api/tasks/dismissed")(get_dismissed_tasks)
     test_app.post("/api/tasks/{task_id}/status")(update_task_status)
+    test_app.post("/api/tasks/{task_id}/restore")(restore_task)
+    test_app.post("/api/tasks/{task_id}/dismiss")(dismiss_task_endpoint)
     test_app.post("/api/sync")(sync)
     test_app.post("/api/extract")(extract)
     test_app.post("/api/chat")(chat)
@@ -203,6 +209,92 @@ def test_update_task_invalid_status(server_client):
         json={"status": "invalid_status"},
     )
     assert resp.status_code == 422
+
+
+# --- Dismissed Tasks & Restore ---
+
+
+def test_dismiss_via_status_records_reason(server_client):
+    client, store = server_client
+    task_id = store.add_task(Task(title="Task to dismiss", source_type="email", source_id=1))
+
+    resp = client.post(f"/api/tasks/{task_id}/status", json={"status": "dismissed"})
+    assert resp.status_code == 200
+
+    task = store.get_task(task_id)
+    assert task.status == "dismissed"
+    assert task.dismissal_reason == "Dismissed by user"
+    assert task.dismissed_at is not None
+
+
+def test_get_dismissed_tasks(server_client):
+    client, store = server_client
+    t1 = store.add_task(Task(title="Task A", source_type="email", source_id=1))
+    t2 = store.add_task(Task(title="Task B", source_type="event", source_id=2))
+    store.dismiss_task(t1, "Expired deadline")
+    store.dismiss_task(t2, "Past event")
+
+    resp = client.get("/api/tasks/dismissed")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["count"] == 2
+    assert data["tasks"][0]["dismissal_reason"] in ("Expired deadline", "Past event")
+
+
+def test_restore_task(server_client):
+    client, store = server_client
+    task_id = store.add_task(Task(title="Restore me", source_type="email", source_id=1))
+    store.dismiss_task(task_id, "Test reason")
+
+    resp = client.post(f"/api/tasks/{task_id}/restore")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["success"] is True
+    assert data["task_id"] == task_id
+
+    task = store.get_task(task_id)
+    assert task.status == "pending"
+    assert task.dismissal_reason == ""
+
+
+def test_restore_non_dismissed_fails(server_client):
+    client, store = server_client
+    task_id = store.add_task(Task(title="Active task", source_type="email", source_id=1))
+
+    resp = client.post(f"/api/tasks/{task_id}/restore")
+    assert resp.status_code == 404
+
+
+def test_restore_not_found(server_client):
+    client, _ = server_client
+    resp = client.post("/api/tasks/9999/restore")
+    assert resp.status_code == 404
+
+
+def test_dismiss_task_endpoint(server_client):
+    client, store = server_client
+    task_id = store.add_task(Task(title="Dismiss me", source_type="email", source_id=1))
+
+    resp = client.post(f"/api/tasks/{task_id}/dismiss", json={"reason": "Custom reason"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["success"] is True
+
+    task = store.get_task(task_id)
+    assert task.status == "dismissed"
+    assert task.dismissal_reason == "Custom reason"
+
+
+def test_task_response_includes_dismissal_fields(server_client):
+    client, store = server_client
+    task_id = store.add_task(Task(title="Check fields", source_type="email", source_id=1))
+    store.dismiss_task(task_id, "Test reason")
+
+    resp = client.get("/api/tasks?status=dismissed")
+    assert resp.status_code == 200
+    task_data = resp.json()["tasks"][0]
+    assert task_data["dismissal_reason"] == "Test reason"
+    assert task_data["dismissed_at"] is not None
 
 
 # --- Profile ---

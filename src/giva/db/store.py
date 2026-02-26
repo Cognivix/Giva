@@ -23,7 +23,7 @@ from giva.db.models import (
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -102,6 +102,8 @@ CREATE TABLE IF NOT EXISTS tasks (
         CHECK(status IN ('pending', 'in_progress', 'done', 'dismissed')),
     goal_id INTEGER REFERENCES goals(id) ON DELETE SET NULL,
     classification TEXT,
+    dismissal_reason TEXT DEFAULT '',
+    dismissed_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -462,9 +464,13 @@ class Store:
     def update_task(self, task_id: int, **kwargs) -> bool:
         """Update task fields. Returns True if the task was found.
 
-        Allowed fields: title, description, priority, due_date, status, goal_id, classification.
+        Allowed fields: title, description, priority, due_date, status, goal_id,
+        classification, dismissal_reason, dismissed_at.
         """
-        allowed = {"title", "description", "priority", "due_date", "status", "goal_id", "classification"}
+        allowed = {
+            "title", "description", "priority", "due_date", "status",
+            "goal_id", "classification", "dismissal_reason", "dismissed_at",
+        }
         fields = {k: v for k, v in kwargs.items() if k in allowed}
         if not fields:
             return False
@@ -519,8 +525,52 @@ class Store:
             status=row["status"],
             goal_id=row.get("goal_id"),
             classification=row.get("classification"),
+            dismissal_reason=row.get("dismissal_reason") or "",
+            dismissed_at=(
+                datetime.fromisoformat(row["dismissed_at"]) if row.get("dismissed_at") else None
+            ),
             created_at=datetime.fromisoformat(row["created_at"]) if row.get("created_at") else None,
         )
+
+    def dismiss_task(self, task_id: int, reason: str = "") -> bool:
+        """Dismiss a task, recording the reason and timestamp. Returns True if found."""
+        with self._conn() as conn:
+            cursor = conn.execute(
+                """UPDATE tasks
+                   SET status = 'dismissed',
+                       dismissal_reason = ?,
+                       dismissed_at = datetime('now'),
+                       updated_at = datetime('now')
+                   WHERE id = ?""",
+                (reason, task_id),
+            )
+            return cursor.rowcount > 0
+
+    def restore_task(self, task_id: int) -> bool:
+        """Restore a dismissed task back to pending. Returns True if found."""
+        with self._conn() as conn:
+            cursor = conn.execute(
+                """UPDATE tasks
+                   SET status = 'pending',
+                       dismissal_reason = '',
+                       dismissed_at = NULL,
+                       updated_at = datetime('now')
+                   WHERE id = ? AND status = 'dismissed'""",
+                (task_id,),
+            )
+            return cursor.rowcount > 0
+
+    def get_dismissed_tasks(self, limit: int = 30) -> list[Task]:
+        """Get recently dismissed tasks, newest first (for the undo queue)."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM tasks
+                   WHERE status = 'dismissed'
+                   ORDER BY dismissed_at DESC, updated_at DESC
+                   LIMIT ?""",
+                (limit,),
+            ).fetchall()
+            return [self._task_from_row(dict(r)) for r in rows]
 
     # --- Task Extraction Tracking ---
 

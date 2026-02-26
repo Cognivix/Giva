@@ -167,3 +167,85 @@ def test_stats(tmp_db):
     assert stats["emails"] == 0
     assert stats["events"] == 0
     assert stats["pending_tasks"] == 0
+
+
+# --- Dismiss & Restore ---
+
+
+def test_dismiss_task_records_reason_and_timestamp(tmp_db):
+    from giva.db.models import Task
+
+    task_id = tmp_db.add_task(
+        Task(title="Reply to Alice", source_type="email", source_id=1)
+    )
+    assert tmp_db.dismiss_task(task_id, "Deadline has passed")
+
+    task = tmp_db.get_task(task_id)
+    assert task.status == "dismissed"
+    assert task.dismissal_reason == "Deadline has passed"
+    assert task.dismissed_at is not None
+
+
+def test_dismiss_task_not_found(tmp_db):
+    assert tmp_db.dismiss_task(9999, "no such task") is False
+
+
+def test_restore_task_returns_to_pending(tmp_db):
+    from giva.db.models import Task
+
+    task_id = tmp_db.add_task(
+        Task(title="Book flight", source_type="manual", source_id=0)
+    )
+    tmp_db.dismiss_task(task_id, "Dismissed by user")
+    assert tmp_db.restore_task(task_id)
+
+    task = tmp_db.get_task(task_id)
+    assert task.status == "pending"
+    assert task.dismissal_reason == ""
+    assert task.dismissed_at is None
+
+
+def test_restore_non_dismissed_task_is_noop(tmp_db):
+    from giva.db.models import Task
+
+    task_id = tmp_db.add_task(
+        Task(title="Active task", source_type="email", source_id=1)
+    )
+    # Task is pending — restore should fail
+    assert tmp_db.restore_task(task_id) is False
+
+
+def test_get_dismissed_tasks_ordered_by_dismissed_at(tmp_db):
+    from giva.db.models import Task
+    import time
+
+    t1 = tmp_db.add_task(
+        Task(title="First", source_type="email", source_id=1)
+    )
+    tmp_db.dismiss_task(t1, "Expired")
+    # Sleep >1s to ensure SQLite datetime('now') differs
+    time.sleep(1.1)
+
+    t2 = tmp_db.add_task(
+        Task(title="Second", source_type="email", source_id=2)
+    )
+    tmp_db.dismiss_task(t2, "Answered")
+
+    dismissed = tmp_db.get_dismissed_tasks()
+    assert len(dismissed) == 2
+    # Newest first
+    assert dismissed[0].title == "Second"
+    assert dismissed[1].title == "First"
+
+
+def test_dismissed_task_has_reason_in_results(tmp_db):
+    from giva.db.models import Task
+
+    task_id = tmp_db.add_task(
+        Task(title="Review doc", source_type="event", source_id=5)
+    )
+    tmp_db.dismiss_task(task_id, "Event already happened")
+
+    dismissed = tmp_db.get_dismissed_tasks()
+    assert len(dismissed) == 1
+    assert dismissed[0].dismissal_reason == "Event already happened"
