@@ -323,6 +323,62 @@ class GoalProgress:
 
 
 @dataclass
+class VlmTask:
+    """A VLM browser automation subtask in the visual task queue."""
+
+    task_uuid: str  # UUID for external reference (Chrome extension)
+    goal_id: int  # FK → goals(id)
+    objective: str  # e.g. "Find Sarah Smith and like her latest post"
+    target_url: str  # Starting URL
+    job_id: str = ""  # Links back to AgentJob.job_id that created this
+    sequence: int = 0  # Order within a multi-step plan (0-based)
+    status: str = "queued"  # queued | in_progress | completed | failed
+    vlm_report: str = ""  # Markdown summary of what VLM accomplished
+    error_message: str = ""  # Error details if failed
+    id: Optional[int] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    def to_row(self) -> dict:
+        return {
+            "task_uuid": self.task_uuid,
+            "goal_id": self.goal_id,
+            "objective": self.objective,
+            "target_url": self.target_url,
+            "job_id": self.job_id,
+            "sequence": self.sequence,
+            "status": self.status,
+            "vlm_report": self.vlm_report,
+            "error_message": self.error_message,
+        }
+
+    @classmethod
+    def from_row(cls, row: dict) -> VlmTask:
+        return cls(
+            id=row["id"],
+            task_uuid=row["task_uuid"],
+            goal_id=row["goal_id"],
+            objective=row["objective"],
+            target_url=row["target_url"],
+            job_id=row.get("job_id", ""),
+            sequence=row.get("sequence", 0),
+            status=row.get("status", "queued"),
+            vlm_report=row.get("vlm_report", ""),
+            error_message=row.get("error_message", ""),
+            created_at=(
+                datetime.fromisoformat(row["created_at"])
+                if row.get("created_at")
+                else None
+            ),
+            updated_at=(
+                datetime.fromisoformat(row["updated_at"])
+                if row.get("updated_at")
+                else None
+            ),
+        )
+
+
+@dataclass
 class DailyReview:
     """A daily check-in record: Giva's prompt, user response, and LLM summary."""
 

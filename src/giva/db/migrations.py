@@ -78,6 +78,24 @@ MIGRATIONS: dict[int, str] = {
     6: "",  # ALTER-only migration; statements in _ALTER_MIGRATIONS[6]
     7: "",  # ALTER-only migration; statements in _ALTER_MIGRATIONS[7]
     8: "",  # ALTER-only migration; statements in _ALTER_MIGRATIONS[8]
+    9: """
+        CREATE TABLE IF NOT EXISTS vlm_task_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_uuid TEXT UNIQUE NOT NULL,
+            goal_id INTEGER NOT NULL,
+            objective TEXT NOT NULL,
+            target_url TEXT NOT NULL,
+            job_id TEXT DEFAULT '',
+            sequence INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'queued'
+                CHECK(status IN ('queued', 'in_progress', 'completed', 'failed')),
+            vlm_report TEXT DEFAULT '',
+            error_message TEXT DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY (goal_id) REFERENCES goals(id) ON DELETE CASCADE
+        );
+    """,
 }
 
 # ALTER TABLE must run as a separate execute() (not inside executescript).

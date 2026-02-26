@@ -65,6 +65,9 @@ _llm_lock = threading.Lock()
 # Separate lock for voice models (TTS/STT use different MLX models)
 _voice_lock = threading.Lock()
 
+# Separate lock for VLM inference (mlx-vlm, not thread-safe)
+_vlm_lock = threading.Lock()
+
 # Cached STT engine singleton (lazy-initialised, protected by _voice_lock)
 _stt_engine = None
 
@@ -628,6 +631,7 @@ app.add_middleware(
         "http://127.0.0.1",
         "http://localhost",
     ],
+    allow_origin_regex=r"^chrome-extension://.*$",
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -1941,6 +1945,222 @@ async def get_agent_job(job_id: str, request: Request):
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
     return job.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# VLM Task Queue
+# ---------------------------------------------------------------------------
+
+
+class VlmTaskCreateRequest(BaseModel):
+    goal_id: int
+    objective: str
+    target_url: str
+    job_id: str = ""
+    sequence: int = 0
+
+
+class VlmTaskResponse(BaseModel):
+    id: int
+    task_uuid: str
+    goal_id: int
+    objective: str
+    target_url: str
+    job_id: str
+    sequence: int
+    status: str
+    vlm_report: str
+    error_message: str
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class VlmAnalyzeRequest(BaseModel):
+    task_uuid: str
+    screenshot_b64: str = Field(description="Base64-encoded PNG screenshot")
+
+
+class VlmAnalyzeResponse(BaseModel):
+    action_type: str
+    coordinates: Optional[list[int]] = None
+    text_to_type: Optional[str] = None
+    scroll_amount: Optional[int] = None
+    url: Optional[str] = None
+    reasoning: str = ""
+
+
+class VlmTaskCompleteRequest(BaseModel):
+    task_uuid: str
+    vlm_report: str
+    success: bool = True
+
+
+def _vlm_task_response(t) -> VlmTaskResponse:
+    """Convert a VlmTask to a VlmTaskResponse."""
+    return VlmTaskResponse(
+        id=t.id,
+        task_uuid=t.task_uuid,
+        goal_id=t.goal_id,
+        objective=t.objective,
+        target_url=t.target_url,
+        job_id=t.job_id,
+        sequence=t.sequence,
+        status=t.status,
+        vlm_report=t.vlm_report,
+        error_message=t.error_message,
+        created_at=t.created_at.isoformat() if t.created_at else None,
+        updated_at=t.updated_at.isoformat() if t.updated_at else None,
+    )
+
+
+@app.post("/api/vlm/tasks")
+async def create_vlm_task(body: VlmTaskCreateRequest, request: Request):
+    """Create a new VLM task in the queue."""
+    import uuid
+
+    from giva.db.models import VlmTask
+
+    store: Store = request.app.state.store
+
+    task = VlmTask(
+        task_uuid=str(uuid.uuid4()),
+        goal_id=body.goal_id,
+        objective=body.objective,
+        target_url=body.target_url,
+        job_id=body.job_id,
+        sequence=body.sequence,
+    )
+    task_id = store.add_vlm_task(task)
+    created = store.get_vlm_task(task_id)
+    log.info("VLM task created: id=%d uuid=%s", task_id, task.task_uuid)
+    return _vlm_task_response(created)
+
+
+@app.get("/api/vlm/tasks")
+async def list_vlm_tasks(
+    request: Request,
+    status: Optional[str] = Query(None),
+    job_id: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+):
+    """List VLM tasks with optional filters."""
+    store: Store = request.app.state.store
+    tasks = store.get_vlm_tasks(status=status, job_id=job_id, limit=limit)
+    return [_vlm_task_response(t) for t in tasks]
+
+
+@app.get("/api/vlm/tasks/current")
+async def get_current_vlm_task(request: Request):
+    """Get the current VLM task for the Chrome extension.
+
+    Returns the active task (in_progress or next queued).
+    Returns 204 No Content if no task is available.
+    """
+    from fastapi.responses import Response
+
+    store: Store = request.app.state.store
+    task = store.get_current_vlm_task()
+    if task is None:
+        return Response(status_code=204)
+
+    # Auto-transition queued → in_progress when polled
+    if task.status == "queued":
+        store.update_vlm_task_status(task.id, "in_progress")
+        task.status = "in_progress"
+        log.info("VLM task %d transitioned to in_progress", task.id)
+
+    return _vlm_task_response(task)
+
+
+@app.post("/api/vlm/vision/analyze")
+async def vlm_analyze(body: VlmAnalyzeRequest, request: Request):
+    """Accept a screenshot, run VLM inference, return the next action.
+
+    The Chrome extension captures the visible tab and sends the base64 PNG here.
+    The VLM analyzes the screenshot against the task objective and returns
+    what to click, type, scroll, or navigate.
+    """
+    store: Store = request.app.state.store
+    task = store.get_vlm_task_by_uuid(body.task_uuid)
+    if task is None:
+        raise HTTPException(status_code=404, detail="VLM task not found")
+    if task.status not in ("in_progress", "queued"):
+        raise HTTPException(
+            status_code=409, detail=f"Task status is '{task.status}', expected in_progress"
+        )
+
+    loop = asyncio.get_event_loop()
+
+    def _infer():
+        from giva.llm.vlm import run_vlm_inference
+
+        with _vlm_lock:
+            return run_vlm_inference(body.screenshot_b64, task.objective)
+
+    action = await loop.run_in_executor(None, _infer)
+    log.info(
+        "VLM analyze: task=%s action=%s reasoning=%s",
+        body.task_uuid[:8], action.action_type, action.reasoning[:80],
+    )
+
+    return VlmAnalyzeResponse(
+        action_type=action.action_type,
+        coordinates=action.coordinates,
+        text_to_type=action.text_to_type,
+        scroll_amount=action.scroll_amount,
+        url=action.url,
+        reasoning=action.reasoning,
+    )
+
+
+@app.post("/api/vlm/tasks/complete")
+async def complete_vlm_task(body: VlmTaskCompleteRequest, request: Request):
+    """Mark a VLM task as completed or failed with a report."""
+    store: Store = request.app.state.store
+    task = store.get_vlm_task_by_uuid(body.task_uuid)
+    if task is None:
+        raise HTTPException(status_code=404, detail="VLM task not found")
+
+    new_status = "completed" if body.success else "failed"
+    store.update_vlm_task_status(
+        task.id, new_status, vlm_report=body.vlm_report,
+    )
+    log.info(
+        "VLM task %s marked %s (report: %d chars)",
+        body.task_uuid[:8], new_status, len(body.vlm_report),
+    )
+
+    # Check if all subtasks for this job are done
+    if task.job_id:
+        remaining = store.get_vlm_tasks(status="queued", job_id=task.job_id)
+        in_progress = store.get_vlm_tasks(status="in_progress", job_id=task.job_id)
+        if not remaining and not in_progress:
+            # All subtasks done — broadcast completion
+            all_tasks = store.get_vlm_tasks(job_id=task.job_id)
+            combined_report = "\n\n---\n\n".join(
+                f"**Step {t.sequence + 1}** ({t.status}): {t.vlm_report}"
+                for t in all_tasks if t.vlm_report
+            )
+            log.info(
+                "All VLM subtasks for job %s complete (%d tasks)",
+                task.job_id[:8], len(all_tasks),
+            )
+            # Broadcast SSE event if broadcast function available
+            broadcast = getattr(request.app.state, "broadcast_fn", None)
+            if broadcast:
+                broadcast({
+                    "event": "vlm_job_completed",
+                    "data": json.dumps({
+                        "job_id": task.job_id,
+                        "task_count": len(all_tasks),
+                        "succeeded": sum(1 for t in all_tasks if t.status == "completed"),
+                        "failed": sum(1 for t in all_tasks if t.status == "failed"),
+                        "report": combined_report,
+                    }),
+                })
+
+    updated = store.get_vlm_task_by_uuid(body.task_uuid)
+    return _vlm_task_response(updated)
 
 
 # ---------------------------------------------------------------------------

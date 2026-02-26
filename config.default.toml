@@ -103,6 +103,17 @@ max_execution_seconds = 60
 # timeout_seconds = 30
 # description = "Send and receive Discord messages"
 
+[vlm]
+# VLM browser automation: visual web task execution via Chrome extension
+enabled = false
+# VLM model for screenshot analysis (mlx-vlm compatible)
+# model = "mlx-community/Qwen2.5-VL-7B-4bit"
+model = ""
+# Chrome extension poll interval (seconds)
+poll_interval_seconds = 3
+# Delay after each browser action to let DOM settle (ms)
+action_delay_ms = 800
+
 [task_review]
 # Post-extraction review: dedup + classify + route tasks automatically
 enabled = true

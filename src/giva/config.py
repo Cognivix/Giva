@@ -97,6 +97,14 @@ class PowerConfig:
 
 
 @dataclass(frozen=True)
+class VlmConfig:
+    enabled: bool = False
+    model: str = ""  # e.g. "mlx-community/Qwen2.5-VL-7B-4bit"
+    poll_interval_seconds: int = 3
+    action_delay_ms: int = 800
+
+
+@dataclass(frozen=True)
 class GivaConfig:
     data_dir: Path = field(default_factory=lambda: Path("~/.local/share/giva").expanduser())
     log_level: str = "INFO"
@@ -104,6 +112,7 @@ class GivaConfig:
     calendar: CalendarConfig = field(default_factory=CalendarConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     voice: VoiceConfig = field(default_factory=VoiceConfig)
+    vlm: VlmConfig = field(default_factory=VlmConfig)
     goals: GoalsConfig = field(default_factory=GoalsConfig)
     agents: AgentsConfig = field(default_factory=AgentsConfig)
     task_review: TaskReviewConfig = field(default_factory=TaskReviewConfig)
@@ -374,6 +383,14 @@ def load_config() -> GivaConfig:
             tts_voice=raw.get("voice", {}).get("tts_voice", "af_heart"),
             stt_model=raw.get("voice", {}).get("stt_model", "distil-medium.en"),
             sample_rate=int(raw.get("voice", {}).get("sample_rate", 24000)),
+        ),
+        vlm=VlmConfig(
+            enabled=_to_bool(raw.get("vlm", {}).get("enabled", False)),
+            model=raw.get("vlm", {}).get("model", ""),
+            poll_interval_seconds=int(
+                raw.get("vlm", {}).get("poll_interval_seconds", 3)
+            ),
+            action_delay_ms=int(raw.get("vlm", {}).get("action_delay_ms", 800)),
         ),
         goals=GoalsConfig(
             strategy_interval_hours=int(
