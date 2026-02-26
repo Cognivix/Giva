@@ -248,21 +248,17 @@ struct MainPanelView: View {
             // Gear menu — system actions + settings
             Menu {
                 Button {
-                    viewModel.showSettings = true
-                    openWindow(id: "main-window")
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                        NSApp.activate(ignoringOtherApps: true)
-                    }
+                    NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
                 } label: {
-                    Label("Settings", systemImage: "slider.horizontal.3")
+                    Label("Settings...", systemImage: "slider.horizontal.3")
                 }
 
                 Button {
-                    Task { await viewModel.loadProfile() }
+                    viewModel.selectedSettingsTab = .profile
+                    NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
                 } label: {
-                    Label("Profile", systemImage: "person.circle")
+                    Label("Profile...", systemImage: "person.circle")
                 }
-                .disabled(!viewModel.areActionsEnabled)
 
                 Button {
                     viewModel.openCLI()

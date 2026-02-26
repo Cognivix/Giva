@@ -13,7 +13,13 @@ enum SidebarItem: Hashable {
     case chatHistory(String)    // past chat by date (YYYY-MM-DD)
     case goal(Int)
     case tasks
-    case settings
+}
+
+/// System actions that require confirmation in the full window.
+private enum SystemAction: Equatable {
+    case restart
+    case upgrade
+    case reset
 }
 
 struct GivaMainWindowView: View {
@@ -21,6 +27,7 @@ struct GivaMainWindowView: View {
 
     @State private var sidebarSelection: SidebarItem? = .chat
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    @State private var pendingSystemAction: SystemAction?
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
@@ -82,11 +89,22 @@ struct GivaMainWindowView: View {
                 await goalsVM.checkReviewStatus()
             }
         }
-        // Handle settings navigation from menu bar gear menu
-        .onChange(of: viewModel.showSettings) { _, show in
-            if show {
-                sidebarSelection = .settings
-                viewModel.showSettings = false
+        // Confirmation dialogs for system actions
+        .confirmationDialog(
+            systemActionTitle,
+            isPresented: showSystemDialog,
+            titleVisibility: .visible
+        ) {
+            if let action = pendingSystemAction {
+                Button(systemActionConfirmLabel(action),
+                       role: action == .reset ? .destructive : nil) {
+                    Task { await performSystemAction(action) }
+                }
+                Button("Cancel", role: .cancel) { }
+            }
+        } message: {
+            if let action = pendingSystemAction {
+                Text(systemActionMessage(action))
             }
         }
         // Handle goal pending selection from GoalsViewModel
@@ -149,12 +167,6 @@ struct GivaMainWindowView: View {
             // Goals section
             if let goalsVM = viewModel.goalsViewModel {
                 goalsSection(goalsVM)
-            }
-
-            // Settings
-            Section {
-                Label("Settings", systemImage: "slider.horizontal.3")
-                    .tag(SidebarItem.settings)
             }
 
             // Tasks section
@@ -274,9 +286,6 @@ struct GivaMainWindowView: View {
             goalContent(goalId: goalId)
         case .tasks:
             TaskListView()
-                .environment(viewModel)
-        case .settings:
-            SettingsView()
                 .environment(viewModel)
         case nil:
             ContentUnavailableView(
@@ -417,17 +426,18 @@ struct GivaMainWindowView: View {
         // System gear menu
         Menu {
             Button {
-                sidebarSelection = .settings
+                openSettingsWindow()
             } label: {
-                Label("Settings", systemImage: "slider.horizontal.3")
+                Label("Settings...", systemImage: "slider.horizontal.3")
             }
+            .keyboardShortcut(",", modifiers: .command)
 
             Button {
-                Task { await viewModel.loadProfile() }
+                viewModel.selectedSettingsTab = .profile
+                openSettingsWindow()
             } label: {
-                Label("Profile", systemImage: "person.circle")
+                Label("Profile...", systemImage: "person.circle")
             }
-            .disabled(!viewModel.areActionsEnabled)
 
             Button {
                 viewModel.openCLI()
@@ -438,23 +448,23 @@ struct GivaMainWindowView: View {
             Divider()
 
             Button {
-                Task { await viewModel.triggerRestart() }
+                pendingSystemAction = .restart
             } label: {
-                Label("Restart Server", systemImage: "arrow.clockwise")
+                Label("Restart Server...", systemImage: "arrow.clockwise")
             }
             .disabled(viewModel.isSystemBusy)
 
             Button {
-                Task { await viewModel.triggerUpgrade() }
+                pendingSystemAction = .upgrade
             } label: {
-                Label("Upgrade Code", systemImage: "arrow.up.circle")
+                Label("Upgrade Code...", systemImage: "arrow.up.circle")
             }
             .disabled(viewModel.isSystemBusy)
 
             Divider()
 
             Button(role: .destructive) {
-                Task { await viewModel.triggerReset() }
+                pendingSystemAction = .reset
             } label: {
                 Label("Reset All Data...", systemImage: "trash")
             }
@@ -470,6 +480,54 @@ struct GivaMainWindowView: View {
         } label: {
             Label("Settings", systemImage: "gearshape")
         }
+    }
+    // MARK: - System Action Confirmation
+
+    private var showSystemDialog: Binding<Bool> {
+        Binding(
+            get: { pendingSystemAction != nil },
+            set: { if !$0 { pendingSystemAction = nil } }
+        )
+    }
+
+    private var systemActionTitle: String {
+        switch pendingSystemAction {
+        case .restart: return "Restart Server"
+        case .upgrade: return "Upgrade Code"
+        case .reset: return "Reset All Data"
+        case nil: return ""
+        }
+    }
+
+    private func systemActionConfirmLabel(_ action: SystemAction) -> String {
+        switch action {
+        case .restart: return "Restart"
+        case .upgrade: return "Upgrade"
+        case .reset: return "Erase Everything"
+        }
+    }
+
+    private func systemActionMessage(_ action: SystemAction) -> String {
+        switch action {
+        case .restart:
+            return "Active requests will be interrupted. No data is lost."
+        case .upgrade:
+            return "Re-installs from source and restarts the server. Data is preserved."
+        case .reset:
+            return "Deletes emails, events, tasks, goals, profile, and settings. Models are kept."
+        }
+    }
+
+    private func performSystemAction(_ action: SystemAction) async {
+        switch action {
+        case .restart: await viewModel.triggerRestart()
+        case .upgrade: await viewModel.triggerUpgrade()
+        case .reset: await viewModel.triggerReset()
+        }
+    }
+
+    private func openSettingsWindow() {
+        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
     }
 }
 

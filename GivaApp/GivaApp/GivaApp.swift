@@ -65,6 +65,20 @@ struct GivaApp: App {
             }
         }
         .defaultSize(width: 1000, height: 700)
+
+        Settings {
+            if bootstrap.isReady {
+                SettingsView()
+                    .environment(viewModel)
+            } else {
+                ContentUnavailableView(
+                    "Server Not Ready",
+                    systemImage: "exclamationmark.circle",
+                    description: Text("Wait for the server to start, then try again.")
+                )
+                .frame(width: 400, height: 200)
+            }
+        }
     }
 }
 

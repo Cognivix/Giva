@@ -29,6 +29,15 @@ enum AppTab: String, CaseIterable {
     case tasks = "Tasks"
 }
 
+/// Settings window tab for deep-linking (e.g. gear menu → Profile).
+enum SettingsTab: Hashable {
+    case models
+    case sync
+    case general
+    case goals
+    case profile
+}
+
 /// Voice input mode. Dictate places text in the input field for editing;
 /// full voice auto-sends after silence and enables TTS responses.
 enum VoiceMode: Equatable {
@@ -146,7 +155,9 @@ class GivaViewModel {
     // Config (fetched from server)
     var config: ConfigResponse?
     var isLoadingConfig: Bool = false
-    var showSettings: Bool = false
+
+    /// Set before opening the Settings window to deep-link to a specific tab.
+    var selectedSettingsTab: SettingsTab?
 
     // UI
     var currentTab: AppTab = .chat
