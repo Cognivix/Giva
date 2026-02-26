@@ -303,14 +303,14 @@ def maybe_compress_conversation(store: Store, config: LLMConfig) -> bool:
 def _delete_oldest_messages(store: Store, count: int) -> None:
     """Delete the N oldest global messages from the conversations table.
 
-    Only deletes messages with goal_id IS NULL so goal-scoped chat
-    is never affected by conversation compression.
+    Only deletes messages with goal_id IS NULL AND task_id IS NULL so
+    goal-scoped and task-scoped chat is never affected by compression.
     """
     with store._conn() as conn:
         conn.execute(
             "DELETE FROM conversations WHERE id IN "
             "(SELECT id FROM conversations WHERE goal_id IS NULL "
-            "ORDER BY id ASC LIMIT ?)",
+            "AND task_id IS NULL ORDER BY id ASC LIMIT ?)",
             (count,),
         )
 

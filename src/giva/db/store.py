@@ -23,7 +23,7 @@ from giva.db.models import (
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -161,6 +161,7 @@ CREATE TABLE IF NOT EXISTS conversations (
     role TEXT NOT NULL CHECK(role IN ('user', 'assistant', 'system')),
     content TEXT NOT NULL,
     goal_id INTEGER REFERENCES goals(id) ON DELETE CASCADE,
+    task_id INTEGER REFERENCES tasks(id) ON DELETE CASCADE,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -580,24 +581,39 @@ class Store:
     # --- Conversations ---
 
     def add_message(
-        self, role: str, content: str, goal_id: Optional[int] = None
+        self,
+        role: str,
+        content: str,
+        goal_id: Optional[int] = None,
+        task_id: Optional[int] = None,
     ):
         with self._conn() as conn:
             conn.execute(
-                "INSERT INTO conversations (role, content, goal_id) VALUES (?, ?, ?)",
-                (role, content, goal_id),
+                "INSERT INTO conversations (role, content, goal_id, task_id)"
+                " VALUES (?, ?, ?, ?)",
+                (role, content, goal_id, task_id),
             )
 
     def get_recent_messages(
-        self, limit: int = 20, goal_id: Optional[int] = None
+        self,
+        limit: int = 20,
+        goal_id: Optional[int] = None,
+        task_id: Optional[int] = None,
     ) -> list[dict]:
-        """Get recent messages, scoped by goal_id.
+        """Get recent messages, scoped by goal_id or task_id.
 
-        When goal_id is None, returns only global (non-goal) messages.
+        When both are None, returns only global (non-goal, non-task) messages.
         When goal_id is set, returns only messages for that goal.
+        When task_id is set, returns only messages for that task.
         """
         with self._conn() as conn:
-            if goal_id is not None:
+            if task_id is not None:
+                rows = conn.execute(
+                    "SELECT role, content, created_at FROM conversations "
+                    "WHERE task_id = ? ORDER BY id DESC LIMIT ?",
+                    (task_id, limit),
+                ).fetchall()
+            elif goal_id is not None:
                 rows = conn.execute(
                     "SELECT role, content, created_at FROM conversations "
                     "WHERE goal_id = ? ORDER BY id DESC LIMIT ?",
@@ -606,7 +622,8 @@ class Store:
             else:
                 rows = conn.execute(
                     "SELECT role, content, created_at FROM conversations "
-                    "WHERE goal_id IS NULL ORDER BY id DESC LIMIT ?",
+                    "WHERE goal_id IS NULL AND task_id IS NULL"
+                    " ORDER BY id DESC LIMIT ?",
                     (limit,),
                 ).fetchall()
             return [dict(r) for r in reversed(rows)]
@@ -615,12 +632,16 @@ class Store:
         """Get conversation messages scoped to a specific goal."""
         return self.get_recent_messages(limit=limit, goal_id=goal_id)
 
+    def get_task_messages(self, task_id: int, limit: int = 50) -> list[dict]:
+        """Get conversation messages scoped to a specific task."""
+        return self.get_recent_messages(limit=limit, task_id=task_id)
+
     def get_conversation_dates(self, limit: int = 30) -> list[dict]:
         """Get distinct dates with first user message as preview.
 
         Returns a list of dicts: [{date, preview, message_count}]
         ordered by date descending (most recent first).
-        Only includes global chat (not goal-scoped messages).
+        Only includes global chat (not goal-scoped or task-scoped messages).
         """
         with self._conn() as conn:
             rows = conn.execute(
@@ -630,7 +651,7 @@ class Store:
                     MIN(CASE WHEN role = 'user' THEN content END) as preview,
                     COUNT(*) as message_count
                 FROM conversations
-                WHERE goal_id IS NULL
+                WHERE goal_id IS NULL AND task_id IS NULL
                 GROUP BY date(created_at)
                 ORDER BY day DESC
                 LIMIT ?
@@ -651,7 +672,7 @@ class Store:
                 """
                 SELECT role, content, created_at
                 FROM conversations
-                WHERE goal_id IS NULL
+                WHERE goal_id IS NULL AND task_id IS NULL
                   AND date(created_at) = ?
                 ORDER BY id ASC
                 LIMIT ?

@@ -13,6 +13,7 @@ enum SidebarItem: Hashable {
     case chatHistory(String)    // past chat by date (YYYY-MM-DD)
     case goal(Int)
     case tasks
+    case taskChat(Int)          // contextual AI chat for a specific task
 }
 
 /// System actions that require confirmation in the full window.
@@ -113,6 +114,13 @@ struct GivaMainWindowView: View {
             if let id = newId {
                 sidebarSelection = .goal(id)
                 viewModel.goalsViewModel?.pendingSelection = nil
+            }
+        }
+        // Handle task chat navigation from popover
+        .onChange(of: viewModel.pendingTaskChatId) { _, newId in
+            if let id = newId {
+                sidebarSelection = .taskChat(id)
+                viewModel.pendingTaskChatId = nil
             }
         }
     }
@@ -286,8 +294,14 @@ struct GivaMainWindowView: View {
         case .goal(let goalId):
             goalContent(goalId: goalId)
         case .tasks:
-            TaskListView()
+            TaskListView(onOpenTaskChat: { taskId in
+                sidebarSelection = .taskChat(taskId)
+            })
+            .environment(viewModel)
+        case .taskChat(let taskId):
+            TaskChatView(taskId: taskId)
                 .environment(viewModel)
+                .id(taskId)
         case nil:
             ContentUnavailableView(
                 "Select an Item",

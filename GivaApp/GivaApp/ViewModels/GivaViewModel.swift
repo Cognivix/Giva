@@ -128,6 +128,15 @@ class GivaViewModel {
     var tasks: [TaskItem] = []
     var isLoadingTasks: Bool = false
 
+    // Task Chat (contextual AI for individual tasks)
+    var taskChatTaskId: Int?
+    var taskChatMessages: [ChatMessage] = []
+    var taskChatInput: String = ""
+    var isTaskChatStreaming: Bool = false
+    var isLoadingTaskChat: Bool = false
+    /// Set by popover to request main window navigate to a task chat.
+    var pendingTaskChatId: Int?
+
     // Status & Profile
     var status: StatusResponse?
     var profile: ProfileResponse?
@@ -615,6 +624,135 @@ class GivaViewModel {
             }
         } catch {
             appendSystemMessage("Failed to create AI plan: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - Task Chat
+
+    /// Load task chat history when navigating to a task's contextual chat.
+    func loadTaskChat(taskId: Int) async {
+        guard let api = apiService else { return }
+
+        if taskChatTaskId == taskId, !taskChatMessages.isEmpty {
+            return  // already loaded
+        }
+
+        taskChatTaskId = taskId
+        taskChatInput = ""
+        taskChatMessages = []
+        isLoadingTaskChat = true
+
+        do {
+            let history = try await api.getTaskMessages(taskId: taskId)
+            guard taskChatTaskId == taskId else { return }
+            taskChatMessages = history.messages.map { msg in
+                ChatMessage(role: msg.role, content: msg.content)
+            }
+        } catch {
+            guard taskChatTaskId == taskId else { return }
+            errorMessage = error.localizedDescription
+        }
+        guard taskChatTaskId == taskId else { return }
+        isLoadingTaskChat = false
+    }
+
+    /// Send a message in the task-scoped chat.
+    func sendTaskChat(taskId: Int) {
+        let query = taskChatInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty, !isTaskChatStreaming else { return }
+
+        taskChatInput = ""
+        taskChatMessages.append(ChatMessage(role: "user", content: query))
+        taskChatMessages.append(ChatMessage(role: "assistant", content: "", isStreaming: true))
+        isTaskChatStreaming = true
+
+        streamTask = Task {
+            guard let api = apiService else {
+                appendTaskChatSystemMessage("Server is not running.")
+                isTaskChatStreaming = false
+                return
+            }
+            do {
+                let stream = api.streamTaskChat(taskId: taskId, query: query)
+                for try await event in stream {
+                    if event.event == "model_loading" {
+                        isLoadingModel = true
+                    } else if event.event == "thinking" {
+                        isLoadingModel = false
+                        appendThinkingToTaskChat(event.data)
+                    } else if event.event == "token" {
+                        isLoadingModel = false
+                        finishThinkingInTaskChatIfNeeded()
+                        guard !taskChatMessages.isEmpty else { continue }
+                        taskChatMessages[taskChatMessages.count - 1].content += event.data
+                    } else if event.event == "agent_actions" {
+                        handleTaskChatAgentActions(event.data)
+                    } else if event.event == "error" {
+                        isLoadingModel = false
+                        errorMessage = event.data
+                    }
+                }
+            } catch is CancellationError {
+                // cancelled
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+
+            isLoadingModel = false
+            if !taskChatMessages.isEmpty {
+                taskChatMessages[taskChatMessages.count - 1].isStreaming = false
+                taskChatMessages[taskChatMessages.count - 1].isThinking = false
+            }
+            isTaskChatStreaming = false
+
+            // Refresh tasks to pick up any status changes
+            await loadTasks()
+        }
+    }
+
+    func cancelTaskChatStreaming() {
+        streamTask?.cancel()
+        streamTask = nil
+        if !taskChatMessages.isEmpty {
+            taskChatMessages[taskChatMessages.count - 1].isStreaming = false
+            taskChatMessages[taskChatMessages.count - 1].isThinking = false
+        }
+        isTaskChatStreaming = false
+    }
+
+    private func appendTaskChatSystemMessage(_ text: String) {
+        taskChatMessages.append(ChatMessage(role: "assistant", content: text))
+    }
+
+    private func appendThinkingToTaskChat(_ data: String) {
+        guard !taskChatMessages.isEmpty else { return }
+        taskChatMessages[taskChatMessages.count - 1].isThinking = true
+        taskChatMessages[taskChatMessages.count - 1].thinkingContent += data
+    }
+
+    private func finishThinkingInTaskChatIfNeeded() {
+        guard !taskChatMessages.isEmpty else { return }
+        if taskChatMessages[taskChatMessages.count - 1].isThinking {
+            taskChatMessages[taskChatMessages.count - 1].isThinking = false
+        }
+    }
+
+    private func handleTaskChatAgentActions(_ json: String) {
+        for action in AgentActionHandler.parseActions(json) {
+            switch action.type {
+            case "task_created":
+                if let title = action.title {
+                    appendTaskChatSystemMessage("Created task: \(title)")
+                }
+                Task { await loadTasks() }
+            case "task_completed":
+                if let title = action.title {
+                    appendTaskChatSystemMessage("Completed task: \(title)")
+                }
+                Task { await loadTasks() }
+            default:
+                break
+            }
         }
     }
 

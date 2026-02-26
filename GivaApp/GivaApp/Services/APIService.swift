@@ -465,6 +465,15 @@ class APIService: APIServiceProtocol {
         return json
     }
 
+    func streamTaskChat(taskId: Int, query: String) -> AsyncThrowingStream<SSEEvent, Error> {
+        let url = baseURL.appendingPathComponent("api/tasks/\(taskId)/chat")
+        return sseStream(url: url, method: "POST", body: TaskChatRequest(query: query))
+    }
+
+    func getTaskMessages(taskId: Int, limit: Int = 50) async throws -> GoalMessagesResponse {
+        return try await get("/api/tasks/\(taskId)/messages?limit=\(limit)")
+    }
+
     func goalBrainstorm(goalId: Int) async throws -> [String: Any] {
         let url = baseURL.appendingPathComponent("api/goals/\(goalId)/brainstorm")
         var request = URLRequest(url: url)

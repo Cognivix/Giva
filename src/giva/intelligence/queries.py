@@ -26,6 +26,7 @@ def handle_query(
     store: Store,
     config: GivaConfig,
     goal_id: Optional[int] = None,
+    task_id: Optional[int] = None,
     context_prefix: Optional[str] = None,
 ) -> Generator[str, None, None]:
     """Handle a natural language query. Yields streamed tokens.
@@ -36,8 +37,10 @@ def handle_query(
         config: App configuration.
         goal_id: When set, messages are scoped to this goal in the DB
             and conversation history is loaded from that goal's chat.
+        task_id: When set, messages are scoped to this task in the DB
+            and conversation history is loaded from that task's chat.
         context_prefix: Extra context prepended to the LLM prompt
-            (e.g. goal metadata) but NOT saved to the DB.
+            (e.g. task/goal metadata) but NOT saved to the DB.
     """
     # Include session summary (Tier 2) in context if available
     from giva.intelligence.context import get_session_summary
@@ -67,10 +70,10 @@ def handle_query(
     ]
 
     # Include recent conversation history within the conversation budget
-    # (scoped to goal if in goal chat, global otherwise)
+    # (scoped to goal/task if in scoped chat, global otherwise)
     budget = effective_budget(config.llm)
     conv_budget = int(budget * SLOT_CONVERSATION)
-    recent = store.get_recent_messages(limit=10, goal_id=goal_id)
+    recent = store.get_recent_messages(limit=10, goal_id=goal_id, task_id=task_id)
     conv_tokens = 0
     trimmed_messages = []
     for msg in recent:
@@ -86,7 +89,7 @@ def handle_query(
     messages.append({"role": "user", "content": user_content})
 
     # Save the user's ORIGINAL query (without context_prefix)
-    store.add_message("user", query, goal_id=goal_id)
+    store.add_message("user", query, goal_id=goal_id, task_id=task_id)
 
     # Stream the response
     full_response = []
@@ -97,4 +100,4 @@ def handle_query(
     # Save the assistant's response (strip <think>...</think> from conversation history)
     raw = "".join(full_response)
     clean = re.sub(r"<think>.*?</think>\s*", "", raw, flags=re.DOTALL)
-    store.add_message("assistant", clean, goal_id=goal_id)
+    store.add_message("assistant", clean, goal_id=goal_id, task_id=task_id)
