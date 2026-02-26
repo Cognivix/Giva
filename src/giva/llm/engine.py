@@ -4,6 +4,10 @@ Supports a dual-model architecture:
 - Filter model (small/fast, e.g. Qwen3-8B): used during sync to classify emails
 - Assistant model (large/smart, e.g. Qwen3-30B): used for user queries
 Both can be loaded simultaneously on M4 Max.
+
+When ``filter_model = "apple"`` is configured, filter model calls are routed
+to Apple's on-device Foundation Model (~3B) via :mod:`giva.llm.apple_adapter`
+instead of loading a separate MLX model.
 """
 
 from __future__ import annotations
@@ -37,8 +41,13 @@ class ModelManager:
         Checks the HuggingFace cache first — if the model hasn't been
         downloaded yet, raises ``RuntimeError`` immediately instead of
         silently downloading a multi-GB model during inference.
+
+        Apple model (``model_id="apple"``) is always "loaded" — no MLX
+        weights to manage.
         """
-        if model_id in self._models:
+        from giva.llm.apple_adapter import is_apple_model
+
+        if is_apple_model(model_id) or model_id in self._models:
             return
 
         # Guard: refuse to auto-download large models during inference.
@@ -80,7 +89,16 @@ class ModelManager:
         temp: float = 0.7,
         top_p: float = 0.9,
     ) -> str:
-        """Generate a complete response."""
+        """Generate a complete response.
+
+        Routes to the Apple adapter when ``model_id`` is ``"apple"``.
+        """
+        from giva.llm.apple_adapter import is_apple_model
+
+        if is_apple_model(model_id):
+            from giva.llm.apple_adapter import adapter
+            return adapter.generate(messages, max_tokens=max_tokens, temp=temp, top_p=top_p)
+
         model, tokenizer = self._get(model_id)
         from mlx_lm import generate as mlx_generate
 
@@ -101,7 +119,21 @@ class ModelManager:
         temp: float = 0.7,
         top_p: float = 0.9,
     ) -> Generator[str, None, None]:
-        """Stream tokens from the model."""
+        """Stream tokens from the model.
+
+        For the Apple model, falls back to a single-shot generate since
+        streaming yields snapshots (not deltas) and filter model callers
+        don't typically use streaming.
+        """
+        from giva.llm.apple_adapter import is_apple_model
+
+        if is_apple_model(model_id):
+            # Apple's stream_response yields snapshots, not deltas.
+            # Simpler and safer to return the full response as one chunk.
+            from giva.llm.apple_adapter import adapter
+            yield adapter.generate(messages, max_tokens=max_tokens, temp=temp, top_p=top_p)
+            return
+
         model, tokenizer = self._get(model_id)
         from mlx_lm import stream_generate as mlx_stream
 
@@ -116,10 +148,18 @@ class ModelManager:
             yield response.text
 
     def is_loaded(self, model_id: str) -> bool:
-        return model_id in self._models
+        from giva.llm.apple_adapter import is_apple_model
+
+        # Apple model is always "loaded" — it's part of the OS.
+        return is_apple_model(model_id) or model_id in self._models
 
     def unload(self, model_id: str):
         """Unload a model to free memory."""
+        from giva.llm.apple_adapter import is_apple_model
+
+        if is_apple_model(model_id):
+            return  # Nothing to unload — managed by the OS
+
         if model_id in self._models:
             del self._models[model_id]
             self._last_use.pop(model_id, None)
