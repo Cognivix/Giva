@@ -295,17 +295,24 @@ class ModelRecommendationResponse(BaseModel):
     reasoning: str
 
 
+class AppleModelInfoResponse(BaseModel):
+    available: bool
+    reason: Optional[str] = None  # None when available, message when not
+
+
 class ModelStatusResponse(BaseModel):
     setup_completed: bool
     current_assistant: str
     current_filter: str
     hardware: HardwareInfoResponse
+    apple_model: Optional[AppleModelInfoResponse] = None
 
 
 class AvailableModelsResponse(BaseModel):
     hardware: HardwareInfoResponse
     compatible_models: list[ModelInfoResponse]
     recommended: ModelRecommendationResponse
+    apple_model: Optional[AppleModelInfoResponse] = None
 
 
 class ModelSelectRequest(BaseModel):
@@ -2196,9 +2203,13 @@ async def models_status(request: Request) -> ModelStatusResponse:
     config = request.app.state.config
 
     from giva.hardware import get_hardware_info
+    from giva.llm.apple_adapter import check_apple_model_availability
     from giva.models import is_model_setup_complete
 
     hw = get_hardware_info()
+
+    available, reason = check_apple_model_availability()
+    apple_info = AppleModelInfoResponse(available=available, reason=reason)
 
     return ModelStatusResponse(
         setup_completed=is_model_setup_complete(),
@@ -2209,6 +2220,7 @@ async def models_status(request: Request) -> ModelStatusResponse:
             ram_gb=hw["ram_gb"],
             gpu_cores=hw["gpu_cores"],
         ),
+        apple_model=apple_info,
     )
 
 
@@ -2270,6 +2282,11 @@ async def models_available(request: Request) -> AvailableModelsResponse:
         None, _run
     )
 
+    from giva.llm.apple_adapter import check_apple_model_availability
+
+    available, reason = check_apple_model_availability()
+    apple_info = AppleModelInfoResponse(available=available, reason=reason)
+
     return AvailableModelsResponse(
         hardware=HardwareInfoResponse(
             chip=hw["chip"],
@@ -2295,6 +2312,7 @@ async def models_available(request: Request) -> AvailableModelsResponse:
             filter=rec["filter"],
             reasoning=rec["reasoning"],
         ),
+        apple_model=apple_info,
     )
 
 

@@ -26,6 +26,8 @@ sync_interval_minutes = 15
 # Assistant model (large) — used for answering user queries
 model = "mlx-community/Qwen3-30B-A3B-4bit"
 # Filter model (small, fast) — used during sync to classify emails as keep/skip
+# Set to "apple" to use Apple's on-device Foundation Model (~3B, macOS 26+)
+# instead of downloading a separate HuggingFace model.
 filter_model = "mlx-community/Qwen3-8B-4bit"
 max_tokens = 2048
 temperature = 0.7

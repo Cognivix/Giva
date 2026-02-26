@@ -635,8 +635,11 @@ def is_model_setup_complete() -> bool:
     Verifies that:
     1. A user config file exists with an [llm] section
     2. The configured models are actually downloaded
+       (Apple model ``"apple"`` counts as always available)
     """
     import tomllib
+
+    from giva.llm.apple_adapter import is_apple_model
 
     config_path = Path("~/.config/giva/config.toml").expanduser()
     if not config_path.exists():
@@ -651,9 +654,11 @@ def is_model_setup_complete() -> bool:
         if not model or not filter_model:
             log.info("is_model_setup_complete: no model/filter in config → False")
             return False
-        # Verify both models are actually downloaded
+        # Verify models are downloaded (Apple model needs no download)
         downloaded = get_downloaded_model_ids()
-        result = model in downloaded and filter_model in downloaded
+        assistant_ok = model in downloaded
+        filter_ok = is_apple_model(filter_model) or filter_model in downloaded
+        result = assistant_ok and filter_ok
         log.info(
             "is_model_setup_complete: model=%s filter=%s → %s",
             model, filter_model, result,
