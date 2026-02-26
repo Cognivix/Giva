@@ -10,13 +10,17 @@ All data stays on your device. No cloud APIs, no telemetry.
 
 - **Email sync & classification** — JXA-based Apple Mail integration with LLM-powered filtering (headers-only sync, lazy body fetching)
 - **Calendar sync** — EventKit (native) with AppleScript fallback
-- **Local LLM inference** — Dual-model architecture: large assistant (Qwen3-30B-A3B) for queries, small filter (Qwen3-8B) for classification
-- **Goal tracking** — Hierarchical goals with strategy generation, objective decomposition, and daily reviews
-- **Task extraction** — Automatic task detection from emails and calendar events
-- **Post-chat agents** — Intent detection, progress tracking, and preference learning after every conversation
-- **Voice mode** — Optional TTS (Qwen3-TTS) and STT (Lightning Whisper) via mlx-audio
-- **MCP integration** — Pluggable Model Context Protocol servers for filesystem, web fetch, iMessage, Notes, and more
+- **Local LLM inference** — Dual-model architecture: large assistant (Qwen3-30B-A3B) for queries, small filter (Qwen3-8B) for classification. Models auto-recommended based on your hardware (chip, RAM, GPU cores) with live benchmark data
+- **Goal tracking** — Hierarchical goals (long-term → mid-term → short-term) with strategy generation, objective decomposition, and daily reviews with reflection
+- **Task extraction** — Automatic task detection from emails and calendar events, with auto-linking to goals
+- **Pluggable agent framework** — Extensible agent system with protocol-based discovery, two-stage routing (keyword pre-filter → LLM classification), and a thread-safe priority queue. Built-in agents: orchestrator (multi-step planning), email drafter, and MCP server wrappers
+- **Post-chat agents** — Intent detection, task creation, progress tracking, conversation tagging, and preference learning run automatically after every chat turn using the filter model
+- **Three-tier conversation memory** — Active window (recent turns), session summary (compressed by filter model), and learned facts (permanent preferences extracted during daily review)
+- **Proactive suggestions** — Morning briefing, priority engine, and upcoming event summaries
+- **Voice mode** — Optional TTS (Qwen3-TTS) and STT (Lightning Whisper) via mlx-audio, with two-tier silence detection and progressive chunk transcription
+- **MCP integration** — Pluggable Model Context Protocol servers for filesystem, web fetch, iMessage, Notes, Discord, and more. Servers auto-register as agents at startup
 - **Writing style profiling** — Learns your communication patterns from sent emails
+- **Power-aware scheduling** — Sync and model loading defer when on battery (≤50%), under thermal pressure, or high memory usage
 
 ## Interfaces
 
@@ -24,7 +28,7 @@ All data stays on your device. No cloud APIs, no telemetry.
 |-----------|-------------|
 | `giva` | Interactive CLI (prompt-toolkit + rich) |
 | `giva-server` | REST API + SSE streaming on `127.0.0.1:7483` |
-| **Giva.app** | SwiftUI menu bar app with chat, tasks, and goals |
+| **Giva.app** | SwiftUI menu bar panel + full window with chat, tasks, goals, agent activity, and settings (⌘,) |
 
 ## Requirements
 
@@ -129,34 +133,109 @@ Key environment overrides:
 
 ```
 src/giva/
-  cli.py            # Interactive REPL
-  server.py         # FastAPI REST + SSE API
-  config.py         # TOML config with env overrides
-  db/               # SQLite + FTS5 data layer (WAL mode)
-  sync/             # Apple Mail (JXA) + Calendar (EventKit/AppleScript)
-  llm/              # MLX model management, prompts, structured output
-  intelligence/     # Query handling, agents, goals, context assembly
-  utils/            # AppleScript helpers, MIME parsing
+├── cli.py              # Interactive REPL (prompt-toolkit + rich)
+├── server.py           # FastAPI REST + SSE API on 127.0.0.1:7483
+├── config.py           # TOML config: config.default.toml → user → env
+├── bootstrap.py        # Server-side bootstrap state machine
+├── models.py           # HuggingFace model discovery + recommendation
+├── hardware.py         # Mac hardware detection (chip, RAM, GPU cores)
+├── benchmarks.py       # Live LLM benchmark fetching
+├── db/
+│   ├── models.py       # Dataclasses: Email, Event, Task, Goal, etc.
+│   ├── store.py        # SQLite + FTS5 data layer (WAL mode)
+│   └── migrations.py   # Schema versioning + ALTER migrations
+├── sync/
+│   ├── mail.py         # Apple Mail sync via JXA + LLM filter
+│   ├── calendar.py     # EventKit or AppleScript fallback
+│   └── scheduler.py    # Background sync via threading.Timer
+├── llm/
+│   ├── engine.py       # MLX dual-model: assistant + filter
+│   ├── prompts.py      # All prompt templates
+│   └── structured.py   # Pydantic models for structured output
+├── intelligence/
+│   ├── queries.py      # NL query → FTS5 → streamed LLM response
+│   ├── tasks.py        # Task extraction from emails/events
+│   ├── profile.py      # User profile analytics
+│   ├── proactive.py    # Priority suggestion engine
+│   ├── onboarding.py   # Conversational onboarding
+│   ├── goals.py        # Goal CRUD + strategy generation
+│   ├── agents.py       # Post-chat agent pipeline
+│   ├── context.py      # Budget-aware context assembly
+│   ├── daily_review.py # Daily goal review + reflection
+│   └── mcp_observations.py # MCP source observations
+├── agents/
+│   ├── base.py         # Agent Protocol + AgentManifest
+│   ├── registry.py     # Auto-discovery of giva.agents.*
+│   ├── router.py       # Keyword pre-filter → LLM classification
+│   ├── queue.py        # Thread-safe priority queue + SSE
+│   ├── orchestrator/   # Plan → validate → execute → QA
+│   ├── email_drafter/  # Email drafting with history context
+│   └── mcp_agent/      # MCP server wrappers (no LLM)
+├── audio/
+│   ├── tts.py          # Qwen3-TTS via mlx-audio
+│   ├── stt.py          # Lightning Whisper MLX
+│   └── player.py       # Threaded audio playback queue
+└── utils/
+    ├── applescript.py   # osascript/JXA runner helpers
+    ├── email_parser.py  # MIME parsing utilities
+    ├── power.py         # Battery, thermal, memory monitoring
+    └── recents.py       # Spotlight-based file discovery
 
-GivaApp/            # SwiftUI macOS menu bar app
-  Services/         # API client, bootstrap, server manager, logging
-  Views/            # Chat, tasks, goals, bootstrap UI
-  ViewModels/       # @Observable state management
-  Models/           # Codable structs, ServerPhase enum
+GivaApp/                        # SwiftUI macOS app (Xcode project)
+├── GivaApp.swift               # App entry point
+├── Models/
+│   └── APIModels.swift         # Codable structs + ServerPhase enum
+├── Services/
+│   ├── APIService.swift        # URLSession + SSE streaming
+│   ├── APIServiceProtocol.swift # Protocol for DI + testing
+│   ├── AgentActionHandler.swift # Shared agent action parsing
+│   ├── BootstrapManager.swift  # First-run setup + launchd daemon
+│   ├── ServerManager.swift     # Daemon health polling
+│   ├── FileLogger.swift        # os.Logger + file logging
+│   ├── AudioPlaybackService.swift  # AVFoundation playback
+│   └── VoiceRecordingService.swift # AVAudioEngine recording
+├── ViewModels/
+│   ├── GivaViewModel.swift     # Central @Observable state
+│   └── GoalsViewModel.swift    # Goals window state
+├── Views/
+│   ├── BootstrapView.swift     # First-run cooking spinner
+│   ├── ModelSetupView.swift    # Model selection wizard
+│   ├── GivaMainWindowView.swift # Full window: NavigationSplitView
+│   ├── MainPanelView.swift     # Menu bar panel
+│   ├── ChatView.swift          # Chat + Markdown rendering
+│   ├── TaskListView.swift      # Task list + priority indicators
+│   ├── TaskChatView.swift      # Task-scoped AI chat
+│   ├── GoalsWindowView.swift   # Goals detail window
+│   ├── SettingsView.swift      # Settings (⌘,): tabbed layout
+│   ├── QuickActionsView.swift  # Bottom action bar
+│   ├── AgentActivityPanel.swift    # Agent queue inspector
+│   └── AgentConfirmationCard.swift # Agent approval card
+└── GivaAppTests/               # Swift Testing suite
+
+tests/                  # pytest suite mirroring src/ structure
+scripts/                # Bootstrap + demo scripts
+docs/                   # Agent architecture + bootstrap design
 ```
 
 ### Key Design Decisions
 
 - **Local-only** — all data in SQLite at `~/.local/share/giva/giva.db`
-- **Dual LLM** — assistant model for reasoning, filter model for high-frequency classification
+- **Dual LLM** — assistant model (30B+) for reasoning and synthesis; filter model (≤8B) for high-frequency classification, extraction, and structured JSON
 - **Lazy email bodies** — sync fetches headers; bodies fetched on-demand when the LLM needs them
-- **Budget-aware context** — token budget scales with model size (system 5%, query 5%, conversation 25%, retrieved 55%, headroom 10%)
-- **Server-side state machine** — `ServerPhase` enum is the single source of truth; the SwiftUI app is a thin observer
-- **Post-chat agent pipeline** — intent detection, task creation, and preference learning run automatically after every chat turn using the filter model
+- **Budget-aware context** — token budget scales with model size (system 5%, query 5%, conversation 25%, retrieved 55%, headroom 10%). Auto-scales: ≤1B→2K, ≤8B→4K, ≤32B→8K, >32B→12K tokens
+- **Three-tier conversation memory** — Tier 1: active window (recent turns). Tier 2: session summary (compressed by filter model, resets daily). Tier 3: learned facts (permanent preferences, always in system prompt)
+- **Server-side state machine** — `ServerPhase` checkpoint is the single source of truth (unknown → downloading → awaiting_model_selection → validating → ready → syncing → onboarding → operational). The SwiftUI app is a thin observer, never drives transitions
+- **Post-chat agent pipeline** — intent detection, task creation, progress tracking, and preference learning run automatically after every chat turn using the filter model
+- **Pluggable agents** — protocol-based discovery with two-stage routing. New agents register by dropping a module into `giva/agents/`. Filter model for classification agents, assistant model for synthesis agents
+- **Power-aware scheduling** — sync defers on low battery (≤50%) or thermal pressure (≥ serious). Models auto-unload after configurable idle timeout
+- **Goal-scoped conversations** — conversations table has nullable `goal_id`; global and goal chat are cleanly separated in the DB and UI
 
 ## Development
 
 ```bash
+# Install with dev deps
+pip install -e ".[dev]"
+
 # Run tests
 pytest
 
@@ -171,11 +250,18 @@ xcodebuild test -project GivaApp/GivaApp.xcodeproj -scheme GivaApp \
   -destination 'platform=macOS' -only-testing:GivaAppTests
 ```
 
-### Project Structure
+### Testing
 
-- Python tests: `tests/` (mirrors `src/` structure)
-- Swift tests: `GivaApp/GivaAppTests/` (Swift Testing framework)
-- Isolated test DBs via `tmp_path` fixtures — no real LLM or Apple Mail calls in tests
+- **Python tests** (`tests/`): mirrors `src/` structure. Uses `tmp_path` fixtures for isolated SQLite DBs — no real LLM or Apple Mail calls in tests
+- **Swift tests** (`GivaApp/GivaAppTests/`): Swift Testing framework (`@Test`, `#expect`, `@Suite`). Uses `MockAPIService` conforming to `APIServiceProtocol` for dependency injection
+
+### Adding New Agents
+
+1. Create a module under `src/giva/agents/` (e.g., `my_agent/agent.py`)
+2. Implement the `Agent` protocol from `giva.agents.base`
+3. Export `AGENT_CLASS` or `agent_factory()` from the module
+4. The `AgentRegistry` auto-discovers it at startup
+5. Set `model_tier = "filter"` unless the agent needs reasoning/synthesis
 
 ## Logging
 
