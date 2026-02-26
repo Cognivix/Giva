@@ -66,7 +66,10 @@ struct GivaApp: App {
         }
         .defaultSize(width: 1000, height: 700)
 
-        Settings {
+        // Settings as a regular Window — the SwiftUI `Settings` scene and
+        // `openSettings` environment action are broken for menu bar apps on
+        // macOS 26 (Tahoe).  A plain Window + openWindow(id:) works reliably.
+        Window("Giva Settings", id: "settings-window") {
             if bootstrap.isReady {
                 SettingsView()
                     .environment(viewModel)
@@ -79,6 +82,8 @@ struct GivaApp: App {
                 .frame(width: 400, height: 200)
             }
         }
+        .defaultSize(width: 560, height: 460)
+        .windowResizability(.contentSize)
     }
 }
 

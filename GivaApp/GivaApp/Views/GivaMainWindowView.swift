@@ -24,6 +24,7 @@ private enum SystemAction: Equatable {
 
 struct GivaMainWindowView: View {
     @Environment(GivaViewModel.self) private var viewModel
+    @Environment(\.openWindow) private var openWindow
 
     @State private var sidebarSelection: SidebarItem? = .chat
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
@@ -527,7 +528,7 @@ struct GivaMainWindowView: View {
     }
 
     private func openSettingsWindow() {
-        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        openWindow(id: "settings-window")
     }
 }
 
