@@ -57,6 +57,21 @@ class APIService: APIServiceProtocol {
         return try await get("/api/profile")
     }
 
+    func getConfig() async throws -> ConfigResponse {
+        return try await get("/api/config")
+    }
+
+    func updateConfig(updates: [String: Any]) async throws -> [String: Any] {
+        let url = baseURL.appendingPathComponent("api/config")
+        var request = URLRequest(url: url)
+        request.httpMethod = "PUT"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: updates)
+        let (data, response) = try await session.data(for: request)
+        try checkResponse(response, data: data)
+        return (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+    }
+
     func getTasks(status: String? = "pending", limit: Int = 50) async throws -> TaskListResponse {
         var components = URLComponents(url: baseURL.appendingPathComponent("api/tasks"), resolvingAgainstBaseURL: false)!
         var queryItems: [URLQueryItem] = []

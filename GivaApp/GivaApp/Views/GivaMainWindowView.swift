@@ -13,6 +13,7 @@ enum SidebarItem: Hashable {
     case chatHistory(String)    // past chat by date (YYYY-MM-DD)
     case goal(Int)
     case tasks
+    case settings
 }
 
 struct GivaMainWindowView: View {
@@ -81,6 +82,13 @@ struct GivaMainWindowView: View {
                 await goalsVM.checkReviewStatus()
             }
         }
+        // Handle settings navigation from menu bar gear menu
+        .onChange(of: viewModel.showSettings) { _, show in
+            if show {
+                sidebarSelection = .settings
+                viewModel.showSettings = false
+            }
+        }
         // Handle goal pending selection from GoalsViewModel
         .onChange(of: viewModel.goalsViewModel?.pendingSelection) { _, newId in
             if let id = newId {
@@ -141,6 +149,12 @@ struct GivaMainWindowView: View {
             // Goals section
             if let goalsVM = viewModel.goalsViewModel {
                 goalsSection(goalsVM)
+            }
+
+            // Settings
+            Section {
+                Label("Settings", systemImage: "slider.horizontal.3")
+                    .tag(SidebarItem.settings)
             }
 
             // Tasks section
@@ -260,6 +274,9 @@ struct GivaMainWindowView: View {
             goalContent(goalId: goalId)
         case .tasks:
             TaskListView()
+                .environment(viewModel)
+        case .settings:
+            SettingsView()
                 .environment(viewModel)
         case nil:
             ContentUnavailableView(
@@ -399,6 +416,12 @@ struct GivaMainWindowView: View {
 
         // System gear menu
         Menu {
+            Button {
+                sidebarSelection = .settings
+            } label: {
+                Label("Settings", systemImage: "slider.horizontal.3")
+            }
+
             Button {
                 Task { await viewModel.loadProfile() }
             } label: {

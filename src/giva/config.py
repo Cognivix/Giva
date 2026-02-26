@@ -155,6 +155,24 @@ def _apply_env(raw: dict) -> dict:
     return raw
 
 
+def save_config(updates: dict) -> None:
+    """Persist arbitrary config section updates to the user config file.
+
+    ``updates`` is a dict of ``{section: {key: value, ...}, ...}``.
+    Creates or updates ~/.config/giva/config.toml, merging with existing content.
+    Next load_config() call will pick up the changes.
+    """
+    _USER_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+
+    raw: dict = {}
+    if _USER_CONFIG.exists():
+        with open(_USER_CONFIG, "rb") as f:
+            raw = tomllib.load(f)
+
+    raw = _deep_merge(raw, updates)
+    _write_toml(_USER_CONFIG, raw)
+
+
 def save_llm_config(model: str, filter_model: str) -> None:
     """Persist LLM model choices to the user config file.
 

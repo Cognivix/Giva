@@ -248,6 +248,16 @@ struct MainPanelView: View {
             // Gear menu — system actions + settings
             Menu {
                 Button {
+                    viewModel.showSettings = true
+                    openWindow(id: "main-window")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        NSApp.activate(ignoringOtherApps: true)
+                    }
+                } label: {
+                    Label("Settings", systemImage: "slider.horizontal.3")
+                }
+
+                Button {
                     Task { await viewModel.loadProfile() }
                 } label: {
                     Label("Profile", systemImage: "person.circle")

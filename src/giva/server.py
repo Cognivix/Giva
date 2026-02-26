@@ -292,6 +292,82 @@ class ModelSelectResponse(BaseModel):
     message: str
 
 
+# --- Config Pydantic Models ---
+
+
+class LLMConfigResponse(BaseModel):
+    model: str
+    filter_model: str
+    max_tokens: int
+    temperature: float
+    top_p: float
+    context_budget_tokens: int
+
+
+class VoiceConfigResponse(BaseModel):
+    enabled: bool
+    tts_model: str
+    tts_voice: str
+    stt_model: str
+    sample_rate: int
+
+
+class PowerConfigResponse(BaseModel):
+    enabled: bool
+    battery_pause_threshold: int
+    battery_defer_heavy_threshold: int
+    thermal_pause_threshold: int
+    thermal_defer_heavy_threshold: int
+    model_idle_timeout_minutes: int
+
+
+class MailConfigResponse(BaseModel):
+    mailboxes: list[str]
+    batch_size: int
+    sync_interval_minutes: int
+    initial_sync_months: int
+    deep_sync_max_months: int
+
+
+class CalendarConfigResponse(BaseModel):
+    sync_window_past_days: int
+    sync_window_future_days: int
+    sync_interval_minutes: int
+
+
+class AgentsConfigResponse(BaseModel):
+    enabled: bool
+    routing_enabled: bool
+    max_execution_seconds: int
+
+
+class GoalsConfigResponse(BaseModel):
+    strategy_interval_hours: int
+    daily_review_hour: int
+    max_strategies_per_run: int
+    plan_horizon_days: int
+
+
+class ConfigResponse(BaseModel):
+    llm: LLMConfigResponse
+    voice: VoiceConfigResponse
+    power: PowerConfigResponse
+    mail: MailConfigResponse
+    calendar: CalendarConfigResponse
+    agents: AgentsConfigResponse
+    goals: GoalsConfigResponse
+
+
+class ConfigUpdateRequest(BaseModel):
+    llm: Optional[dict] = None
+    voice: Optional[dict] = None
+    power: Optional[dict] = None
+    mail: Optional[dict] = None
+    calendar: Optional[dict] = None
+    agents: Optional[dict] = None
+    goals: Optional[dict] = None
+
+
 # --- Goal Pydantic Models ---
 
 
@@ -864,6 +940,95 @@ async def status(request: Request) -> StatusResponse:
         model=config.llm.model,
         model_loaded=is_loaded(),
     )
+
+
+@app.get("/api/config")
+async def get_config(request: Request) -> ConfigResponse:
+    """Return current configuration (all sections)."""
+    config = request.app.state.config
+    return ConfigResponse(
+        llm=LLMConfigResponse(
+            model=config.llm.model,
+            filter_model=config.llm.filter_model,
+            max_tokens=config.llm.max_tokens,
+            temperature=config.llm.temperature,
+            top_p=config.llm.top_p,
+            context_budget_tokens=config.llm.context_budget_tokens,
+        ),
+        voice=VoiceConfigResponse(
+            enabled=config.voice.enabled,
+            tts_model=config.voice.tts_model,
+            tts_voice=config.voice.tts_voice,
+            stt_model=config.voice.stt_model,
+            sample_rate=config.voice.sample_rate,
+        ),
+        power=PowerConfigResponse(
+            enabled=config.power.enabled,
+            battery_pause_threshold=config.power.battery_pause_threshold,
+            battery_defer_heavy_threshold=config.power.battery_defer_heavy_threshold,
+            thermal_pause_threshold=config.power.thermal_pause_threshold,
+            thermal_defer_heavy_threshold=config.power.thermal_defer_heavy_threshold,
+            model_idle_timeout_minutes=config.power.model_idle_timeout_minutes,
+        ),
+        mail=MailConfigResponse(
+            mailboxes=config.mail.mailboxes,
+            batch_size=config.mail.batch_size,
+            sync_interval_minutes=config.mail.sync_interval_minutes,
+            initial_sync_months=config.mail.initial_sync_months,
+            deep_sync_max_months=config.mail.deep_sync_max_months,
+        ),
+        calendar=CalendarConfigResponse(
+            sync_window_past_days=config.calendar.sync_window_past_days,
+            sync_window_future_days=config.calendar.sync_window_future_days,
+            sync_interval_minutes=config.calendar.sync_interval_minutes,
+        ),
+        agents=AgentsConfigResponse(
+            enabled=config.agents.enabled,
+            routing_enabled=config.agents.routing_enabled,
+            max_execution_seconds=config.agents.max_execution_seconds,
+        ),
+        goals=GoalsConfigResponse(
+            strategy_interval_hours=config.goals.strategy_interval_hours,
+            daily_review_hour=config.goals.daily_review_hour,
+            max_strategies_per_run=config.goals.max_strategies_per_run,
+            plan_horizon_days=config.goals.plan_horizon_days,
+        ),
+    )
+
+
+@app.put("/api/config")
+async def update_config(request: Request, body: ConfigUpdateRequest):
+    """Update configuration and persist to user config file.
+
+    Only provided sections are updated; omitted sections are left unchanged.
+    The server config is reloaded after writing so changes take effect immediately.
+    """
+    from giva.config import save_config, load_config
+
+    updates = {}
+    if body.llm is not None:
+        updates["llm"] = body.llm
+    if body.voice is not None:
+        updates["voice"] = body.voice
+    if body.power is not None:
+        updates["power"] = body.power
+    if body.mail is not None:
+        updates["mail"] = body.mail
+    if body.calendar is not None:
+        updates["calendar"] = body.calendar
+    if body.agents is not None:
+        updates["agents"] = body.agents
+    if body.goals is not None:
+        updates["goals"] = body.goals
+
+    if not updates:
+        raise HTTPException(status_code=400, detail="No config sections provided")
+
+    save_config(updates)
+    request.app.state.config = load_config()
+    log.info("Config updated: sections=%s", list(updates.keys()))
+
+    return {"success": True, "updated_sections": list(updates.keys())}
 
 
 @app.get("/api/profile")

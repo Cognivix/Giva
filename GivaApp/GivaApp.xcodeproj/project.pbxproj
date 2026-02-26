@@ -30,6 +30,7 @@
 		A1000015 /* APIServiceProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000017 /* APIServiceProtocol.swift */; };
 		A1000016 /* AgentActionHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000018 /* AgentActionHandler.swift */; };
 		A1000017 /* VoiceRecordingService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000019 /* VoiceRecordingService.swift */; };
+		A100001A /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200001A /* SettingsView.swift */; };
 		B1000001 /* MockAPIService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000001 /* MockAPIService.swift */; };
 		B1000002 /* ServerPhaseTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000002 /* ServerPhaseTests.swift */; };
 		B1000003 /* AgentActionHandlerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000003 /* AgentActionHandlerTests.swift */; };
@@ -75,6 +76,7 @@
 		A2000017 /* APIServiceProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIServiceProtocol.swift; sourceTree = "<group>"; };
 		A2000018 /* AgentActionHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentActionHandler.swift; sourceTree = "<group>"; };
 		A2000019 /* VoiceRecordingService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceRecordingService.swift; sourceTree = "<group>"; };
+		A200001A /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		B2000001 /* MockAPIService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MockAPIService.swift; sourceTree = "<group>"; };
 		B2000002 /* ServerPhaseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerPhaseTests.swift; sourceTree = "<group>"; };
 		B2000003 /* AgentActionHandlerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentActionHandlerTests.swift; sourceTree = "<group>"; };
@@ -170,6 +172,7 @@
 				A2000006 /* MainPanelView.swift */,
 				A2000010 /* ModelSetupView.swift */,
 				A2000008 /* QuickActionsView.swift */,
+				A200001A /* SettingsView.swift */,
 				A2000009 /* TaskListView.swift */,
 			);
 			path = Views;
@@ -319,6 +322,7 @@
 				A1000015 /* APIServiceProtocol.swift in Sources */,
 				A1000016 /* AgentActionHandler.swift in Sources */,
 				A1000017 /* VoiceRecordingService.swift in Sources */,
+				A100001A /* SettingsView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

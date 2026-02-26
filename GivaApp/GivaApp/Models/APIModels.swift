@@ -856,6 +856,123 @@ struct ConversationMessageItem: Codable {
     }
 }
 
+// MARK: - Configuration
+
+struct LLMConfigResponse: Codable {
+    let model: String
+    let filterModel: String
+    let maxTokens: Int
+    let temperature: Double
+    let topP: Double
+    let contextBudgetTokens: Int
+
+    enum CodingKeys: String, CodingKey {
+        case model, temperature
+        case filterModel = "filter_model"
+        case maxTokens = "max_tokens"
+        case topP = "top_p"
+        case contextBudgetTokens = "context_budget_tokens"
+    }
+}
+
+struct VoiceConfigResponse: Codable {
+    let enabled: Bool
+    let ttsModel: String
+    let ttsVoice: String
+    let sttModel: String
+    let sampleRate: Int
+
+    enum CodingKeys: String, CodingKey {
+        case enabled
+        case ttsModel = "tts_model"
+        case ttsVoice = "tts_voice"
+        case sttModel = "stt_model"
+        case sampleRate = "sample_rate"
+    }
+}
+
+struct PowerConfigResponse: Codable {
+    let enabled: Bool
+    let batteryPauseThreshold: Int
+    let batteryDeferHeavyThreshold: Int
+    let thermalPauseThreshold: Int
+    let thermalDeferHeavyThreshold: Int
+    let modelIdleTimeoutMinutes: Int
+
+    enum CodingKeys: String, CodingKey {
+        case enabled
+        case batteryPauseThreshold = "battery_pause_threshold"
+        case batteryDeferHeavyThreshold = "battery_defer_heavy_threshold"
+        case thermalPauseThreshold = "thermal_pause_threshold"
+        case thermalDeferHeavyThreshold = "thermal_defer_heavy_threshold"
+        case modelIdleTimeoutMinutes = "model_idle_timeout_minutes"
+    }
+}
+
+struct MailConfigResponse: Codable {
+    let mailboxes: [String]
+    let batchSize: Int
+    let syncIntervalMinutes: Int
+    let initialSyncMonths: Int
+    let deepSyncMaxMonths: Int
+
+    enum CodingKeys: String, CodingKey {
+        case mailboxes
+        case batchSize = "batch_size"
+        case syncIntervalMinutes = "sync_interval_minutes"
+        case initialSyncMonths = "initial_sync_months"
+        case deepSyncMaxMonths = "deep_sync_max_months"
+    }
+}
+
+struct CalendarConfigResponse: Codable {
+    let syncWindowPastDays: Int
+    let syncWindowFutureDays: Int
+    let syncIntervalMinutes: Int
+
+    enum CodingKeys: String, CodingKey {
+        case syncWindowPastDays = "sync_window_past_days"
+        case syncWindowFutureDays = "sync_window_future_days"
+        case syncIntervalMinutes = "sync_interval_minutes"
+    }
+}
+
+struct AgentsConfigResponse: Codable {
+    let enabled: Bool
+    let routingEnabled: Bool
+    let maxExecutionSeconds: Int
+
+    enum CodingKeys: String, CodingKey {
+        case enabled
+        case routingEnabled = "routing_enabled"
+        case maxExecutionSeconds = "max_execution_seconds"
+    }
+}
+
+struct GoalsConfigResponse: Codable {
+    let strategyIntervalHours: Int
+    let dailyReviewHour: Int
+    let maxStrategiesPerRun: Int
+    let planHorizonDays: Int
+
+    enum CodingKeys: String, CodingKey {
+        case strategyIntervalHours = "strategy_interval_hours"
+        case dailyReviewHour = "daily_review_hour"
+        case maxStrategiesPerRun = "max_strategies_per_run"
+        case planHorizonDays = "plan_horizon_days"
+    }
+}
+
+struct ConfigResponse: Codable {
+    let llm: LLMConfigResponse
+    let voice: VoiceConfigResponse
+    let power: PowerConfigResponse
+    let mail: MailConfigResponse
+    let calendar: CalendarConfigResponse
+    let agents: AgentsConfigResponse
+    let goals: GoalsConfigResponse
+}
+
 // MARK: - SSE Event
 
 struct SSEEvent {
