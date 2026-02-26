@@ -77,6 +77,7 @@ MIGRATIONS: dict[int, str] = {
     """,
     6: "",  # ALTER-only migration; statements in _ALTER_MIGRATIONS[6]
     7: "",  # ALTER-only migration; statements in _ALTER_MIGRATIONS[7]
+    8: "",  # ALTER-only migration; statements in _ALTER_MIGRATIONS[8]
 }
 
 # ALTER TABLE must run as a separate execute() (not inside executescript).
@@ -97,6 +98,10 @@ _ALTER_MIGRATIONS: dict[int, list[str]] = {
     ],
     7: [
         "ALTER TABLE tasks ADD COLUMN classification TEXT",
+    ],
+    8: [
+        "ALTER TABLE tasks ADD COLUMN dismissal_reason TEXT DEFAULT ''",
+        "ALTER TABLE tasks ADD COLUMN dismissed_at TEXT",
     ],
 }
 

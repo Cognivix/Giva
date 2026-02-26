@@ -91,6 +91,22 @@ class APIService: APIServiceProtocol {
         return try await post("api/tasks/\(taskId)/status", body: UpdateTaskStatusRequest(status: status))
     }
 
+    func getDismissedTasks(limit: Int = 30) async throws -> DismissedTaskListResponse {
+        var components = URLComponents(
+            url: baseURL.appendingPathComponent("api/tasks/dismissed"),
+            resolvingAgainstBaseURL: false
+        )!
+        components.queryItems = [URLQueryItem(name: "limit", value: String(limit))]
+        guard let url = components.url else {
+            throw APIError.networkError(URLError(.badURL))
+        }
+        return try await getURL(url)
+    }
+
+    func restoreTask(taskId: Int) async throws -> RestoreTaskResponse {
+        return try await postNoBody("api/tasks/\(taskId)/restore")
+    }
+
     func triggerSync() async throws -> SyncResponse {
         return try await postNoBody("api/sync")
     }

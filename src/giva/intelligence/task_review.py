@@ -26,6 +26,13 @@ from giva.db.store import Store
 
 log = logging.getLogger(__name__)
 
+# Human-readable labels for sanity-check dismissal reasons.
+_SANITY_REASON_LABELS = {
+    "expired_deadline": "Deadline has passed",
+    "answered_email": "Email already answered",
+    "past_event": "Event already happened",
+}
+
 # ---------------------------------------------------------------------------
 # Prompts (inline, following daily_review.py convention)
 # ---------------------------------------------------------------------------
@@ -233,8 +240,9 @@ def _sanity_check_tasks(
             reason = "past_event"
 
         if reason:
+            readable = _SANITY_REASON_LABELS.get(reason, reason)
             store.update_task(task.id, classification="dismiss")
-            store.update_task_status(task.id, "dismissed")
+            store.dismiss_task(task.id, readable)
             log.info(
                 "Sanity check dismissed task #%d (%s): %s",
                 task.id, reason, task.title,
@@ -509,7 +517,7 @@ def _execute_merges(
 
         # Dismiss duplicates
         for dup_id in group["duplicate_ids"]:
-            store.update_task_status(dup_id, "dismissed")
+            store.dismiss_task(dup_id, f"Merged into #{canonical.id}")
             dismissed += 1
             log.info(
                 "Merged task #%d into #%d (dismissed as duplicate)",
@@ -751,7 +759,8 @@ def _route_dismiss(
     broadcast_fn: Optional[Callable] = None,
 ) -> Optional[dict]:
     """Dismiss a task that the LLM determined is unnecessary."""
-    store.update_task_status(task.id, "dismissed")
+    reason = classification.get("reasoning", "")
+    store.dismiss_task(task.id, reason)
     log.info(
         "LLM dismissed task #%d: %s (reason: %s)",
         task.id, task.title, classification.get("reasoning", ""),
@@ -793,7 +802,7 @@ def _route_project(
     goal_id = store.add_goal(goal)
 
     # Dismiss the original task (no longer actionable as a task)
-    store.update_task_status(task.id, "dismissed")
+    store.dismiss_task(task.id, f"Upgraded to goal #{goal_id}")
 
     log.info(
         "Task #%d upgraded to goal #%d: %s (%s)",

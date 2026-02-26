@@ -10,6 +10,8 @@ protocol APIServiceProtocol: AnyObject, Sendable {
     func getProfile() async throws -> ProfileResponse
     func getTasks(status: String?, limit: Int) async throws -> TaskListResponse
     func updateTaskStatus(taskId: Int, status: String) async throws -> UpdateTaskStatusResponse
+    func getDismissedTasks(limit: Int) async throws -> DismissedTaskListResponse
+    func restoreTask(taskId: Int) async throws -> RestoreTaskResponse
     func triggerSync() async throws -> SyncResponse
     func triggerExtract() async throws -> ExtractResponse
     func triggerReset() async throws -> ResetResponse
@@ -73,6 +75,9 @@ protocol APIServiceProtocol: AnyObject, Sendable {
 extension APIServiceProtocol {
     func getTasks(status: String? = "pending", limit: Int = 50) async throws -> TaskListResponse {
         try await getTasks(status: status, limit: limit)
+    }
+    func getDismissedTasks(limit: Int = 30) async throws -> DismissedTaskListResponse {
+        try await getDismissedTasks(limit: limit)
     }
     func streamChat(query: String, voice: Bool = false) -> AsyncThrowingStream<SSEEvent, Error> {
         streamChat(query: query, voice: voice)

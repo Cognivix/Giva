@@ -82,6 +82,8 @@ struct TaskItem: Codable, Identifiable {
     let dueDate: String?
     let status: String
     let classification: String?
+    let dismissalReason: String?
+    let dismissedAt: String?
     let createdAt: String?
 
     enum CodingKeys: String, CodingKey {
@@ -89,6 +91,8 @@ struct TaskItem: Codable, Identifiable {
         case sourceType = "source_type"
         case sourceId = "source_id"
         case dueDate = "due_date"
+        case dismissalReason = "dismissal_reason"
+        case dismissedAt = "dismissed_at"
         case createdAt = "created_at"
     }
 
@@ -126,6 +130,37 @@ struct UpdateTaskStatusResponse: Codable {
 
     enum CodingKeys: String, CodingKey {
         case success, status
+        case taskId = "task_id"
+    }
+}
+
+struct DismissedTaskItem: Codable, Identifiable {
+    let id: Int
+    let title: String
+    let dismissalReason: String
+    let dismissedAt: String?
+    let sourceType: String
+    let priority: String
+
+    enum CodingKeys: String, CodingKey {
+        case id, title, priority
+        case dismissalReason = "dismissal_reason"
+        case dismissedAt = "dismissed_at"
+        case sourceType = "source_type"
+    }
+}
+
+struct DismissedTaskListResponse: Codable {
+    let tasks: [DismissedTaskItem]
+    let count: Int
+}
+
+struct RestoreTaskResponse: Codable {
+    let success: Bool
+    let taskId: Int
+
+    enum CodingKeys: String, CodingKey {
+        case success
         case taskId = "task_id"
     }
 }

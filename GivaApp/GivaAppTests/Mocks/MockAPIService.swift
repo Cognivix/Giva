@@ -11,6 +11,8 @@ final class MockAPIService: APIServiceProtocol, @unchecked Sendable {
     var getProfileCallCount = 0
     var getTasksCallCount = 0
     var updateTaskStatusCallCount = 0
+    var getDismissedTasksCallCount = 0
+    var restoreTaskCallCount = 0
     var triggerSyncCallCount = 0
     var triggerExtractCallCount = 0
     var triggerResetCallCount = 0
@@ -66,6 +68,14 @@ final class MockAPIService: APIServiceProtocol, @unchecked Sendable {
 
     var updateTaskStatusResult: Result<UpdateTaskStatusResponse, Error> = .success(
         UpdateTaskStatusResponse(success: true, taskId: 1, status: "done")
+    )
+
+    var getDismissedTasksResult: Result<DismissedTaskListResponse, Error> = .success(
+        DismissedTaskListResponse(tasks: [], count: 0)
+    )
+
+    var restoreTaskResult: Result<RestoreTaskResponse, Error> = .success(
+        RestoreTaskResponse(success: true, taskId: 1)
     )
 
     var triggerSyncResult: Result<SyncResponse, Error> = .success(
@@ -213,6 +223,16 @@ final class MockAPIService: APIServiceProtocol, @unchecked Sendable {
     func updateTaskStatus(taskId: Int, status: String) async throws -> UpdateTaskStatusResponse {
         updateTaskStatusCallCount += 1
         return try throwOrReturn(updateTaskStatusResult)
+    }
+
+    func getDismissedTasks(limit: Int) async throws -> DismissedTaskListResponse {
+        getDismissedTasksCallCount += 1
+        return try throwOrReturn(getDismissedTasksResult)
+    }
+
+    func restoreTask(taskId: Int) async throws -> RestoreTaskResponse {
+        restoreTaskCallCount += 1
+        return try throwOrReturn(restoreTaskResult)
     }
 
     func triggerSync() async throws -> SyncResponse {

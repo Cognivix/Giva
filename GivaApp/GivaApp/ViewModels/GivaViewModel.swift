@@ -128,6 +128,10 @@ class GivaViewModel {
     var tasks: [TaskItem] = []
     var isLoadingTasks: Bool = false
 
+    // Dismissed tasks (undo queue)
+    var dismissedTasks: [DismissedTaskItem] = []
+    var showDismissedTasks: Bool = false
+
     // Task Chat (contextual AI for individual tasks)
     var taskChatTaskId: Int?
     var taskChatMessages: [ChatMessage] = []
@@ -1163,6 +1167,28 @@ class GivaViewModel {
         do {
             _ = try await api.updateTaskStatus(taskId: taskId, status: status)
             await loadTasks()
+            if status == "dismissed" { await loadDismissedTasks() }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func loadDismissedTasks() async {
+        guard let api = apiService else { return }
+        do {
+            let response = try await api.getDismissedTasks()
+            dismissedTasks = response.tasks
+        } catch {
+            // Non-critical — undo queue just won't show
+        }
+    }
+
+    func restoreTask(taskId: Int) async {
+        guard let api = apiService else { return }
+        do {
+            _ = try await api.restoreTask(taskId: taskId)
+            await loadTasks()
+            await loadDismissedTasks()
         } catch {
             errorMessage = error.localizedDescription
         }

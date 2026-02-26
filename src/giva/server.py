@@ -141,6 +141,8 @@ class TaskResponse(BaseModel):
     due_date: Optional[str] = None
     status: str
     classification: Optional[str] = None
+    dismissal_reason: str = ""
+    dismissed_at: Optional[str] = None
     created_at: Optional[str] = None
 
 
@@ -153,6 +155,29 @@ class UpdateStatusResponse(BaseModel):
     success: bool
     task_id: int
     status: str
+
+
+class DismissTaskRequest(BaseModel):
+    reason: str = ""
+
+
+class RestoreTaskResponse(BaseModel):
+    success: bool
+    task_id: int
+
+
+class DismissedTaskResponse(BaseModel):
+    id: int
+    title: str
+    dismissal_reason: str
+    dismissed_at: Optional[str] = None
+    source_type: str = ""
+    priority: str = "medium"
+
+
+class DismissedTaskListResponse(BaseModel):
+    tasks: list[DismissedTaskResponse]
+    count: int
 
 
 class TaskCreateRequest(BaseModel):
@@ -1062,6 +1087,24 @@ async def profile(request: Request) -> ProfileResponse:
     )
 
 
+def _task_response(t) -> TaskResponse:
+    """Convert a Task dataclass to a TaskResponse."""
+    return TaskResponse(
+        id=t.id,
+        title=t.title,
+        description=t.description,
+        source_type=t.source_type,
+        source_id=t.source_id,
+        priority=t.priority,
+        due_date=t.due_date.isoformat() if t.due_date else None,
+        status=t.status,
+        classification=t.classification,
+        dismissal_reason=t.dismissal_reason or "",
+        dismissed_at=t.dismissed_at.isoformat() if t.dismissed_at else None,
+        created_at=t.created_at.isoformat() if t.created_at else None,
+    )
+
+
 @app.get("/api/tasks")
 async def get_tasks(
     request: Request,
@@ -1072,21 +1115,7 @@ async def get_tasks(
     store: Store = request.app.state.store
     tasks = store.get_tasks(status=status, limit=limit)
 
-    task_list = [
-        TaskResponse(
-            id=t.id,
-            title=t.title,
-            description=t.description,
-            source_type=t.source_type,
-            source_id=t.source_id,
-            priority=t.priority,
-            due_date=t.due_date.isoformat() if t.due_date else None,
-            status=t.status,
-            classification=t.classification,
-            created_at=t.created_at.isoformat() if t.created_at else None,
-        )
-        for t in tasks
-    ]
+    task_list = [_task_response(t) for t in tasks]
 
     return TaskListResponse(tasks=task_list, count=len(task_list))
 
@@ -1100,7 +1129,10 @@ async def update_task_status(
     """Update a task's status (done, dismissed, etc.)."""
     store: Store = request.app.state.store
 
-    success = store.update_task_status(task_id, req.status)
+    if req.status == "dismissed":
+        success = store.dismiss_task(task_id, "Dismissed by user")
+    else:
+        success = store.update_task_status(task_id, req.status)
     if not success:
         raise HTTPException(status_code=404, detail="Task not found")
 
@@ -1160,18 +1192,7 @@ async def create_task(
     task_id = store.add_task(task)
     created = store.get_task(task_id)
 
-    return TaskResponse(
-        id=created.id,
-        title=created.title,
-        description=created.description,
-        source_type=created.source_type,
-        source_id=created.source_id,
-        priority=created.priority,
-        due_date=created.due_date.isoformat() if created.due_date else None,
-        status=created.status,
-        classification=created.classification,
-        created_at=created.created_at.isoformat() if created.created_at else None,
-    )
+    return _task_response(created)
 
 
 @app.put("/api/tasks/{task_id}")
@@ -1217,18 +1238,58 @@ async def update_task(
         raise HTTPException(status_code=404, detail="Task not found")
 
     updated = store.get_task(task_id)
-    return TaskResponse(
-        id=updated.id,
-        title=updated.title,
-        description=updated.description,
-        source_type=updated.source_type,
-        source_id=updated.source_id,
-        priority=updated.priority,
-        due_date=updated.due_date.isoformat() if updated.due_date else None,
-        status=updated.status,
-        classification=updated.classification,
-        created_at=updated.created_at.isoformat() if updated.created_at else None,
+    return _task_response(updated)
+
+
+@app.get("/api/tasks/dismissed")
+async def get_dismissed_tasks(
+    request: Request,
+    limit: int = Query(30, ge=1, le=100),
+) -> DismissedTaskListResponse:
+    """List recently dismissed tasks for the undo queue."""
+    store: Store = request.app.state.store
+    tasks = store.get_dismissed_tasks(limit=limit)
+    return DismissedTaskListResponse(
+        tasks=[
+            DismissedTaskResponse(
+                id=t.id,
+                title=t.title,
+                dismissal_reason=t.dismissal_reason or "",
+                dismissed_at=t.dismissed_at.isoformat() if t.dismissed_at else None,
+                source_type=t.source_type,
+                priority=t.priority,
+            )
+            for t in tasks
+        ],
+        count=len(tasks),
     )
+
+
+@app.post("/api/tasks/{task_id}/restore")
+async def restore_task(task_id: int, request: Request) -> RestoreTaskResponse:
+    """Restore a dismissed task back to pending."""
+    store: Store = request.app.state.store
+    success = store.restore_task(task_id)
+    if not success:
+        raise HTTPException(
+            status_code=404,
+            detail="Task not found or not dismissed",
+        )
+    return RestoreTaskResponse(success=True, task_id=task_id)
+
+
+@app.post("/api/tasks/{task_id}/dismiss")
+async def dismiss_task_endpoint(
+    task_id: int,
+    req: DismissTaskRequest,
+    request: Request,
+) -> UpdateStatusResponse:
+    """Dismiss a task with an explicit reason."""
+    store: Store = request.app.state.store
+    success = store.dismiss_task(task_id, req.reason)
+    if not success:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return UpdateStatusResponse(success=True, task_id=task_id, status="dismissed")
 
 
 @app.post("/api/tasks/{task_id}/ai")
