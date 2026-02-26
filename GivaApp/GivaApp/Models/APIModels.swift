@@ -858,7 +858,7 @@ struct ConversationMessageItem: Codable {
 
 // MARK: - Configuration
 
-struct LLMConfigResponse: Codable {
+struct LLMConfigResponse: Codable, Equatable {
     let model: String
     let filterModel: String
     let maxTokens: Int
@@ -875,7 +875,7 @@ struct LLMConfigResponse: Codable {
     }
 }
 
-struct VoiceConfigResponse: Codable {
+struct VoiceConfigResponse: Codable, Equatable {
     let enabled: Bool
     let ttsModel: String
     let ttsVoice: String
@@ -891,7 +891,7 @@ struct VoiceConfigResponse: Codable {
     }
 }
 
-struct PowerConfigResponse: Codable {
+struct PowerConfigResponse: Codable, Equatable {
     let enabled: Bool
     let batteryPauseThreshold: Int
     let batteryDeferHeavyThreshold: Int
@@ -909,7 +909,7 @@ struct PowerConfigResponse: Codable {
     }
 }
 
-struct MailConfigResponse: Codable {
+struct MailConfigResponse: Codable, Equatable {
     let mailboxes: [String]
     let batchSize: Int
     let syncIntervalMinutes: Int
@@ -925,7 +925,7 @@ struct MailConfigResponse: Codable {
     }
 }
 
-struct CalendarConfigResponse: Codable {
+struct CalendarConfigResponse: Codable, Equatable {
     let syncWindowPastDays: Int
     let syncWindowFutureDays: Int
     let syncIntervalMinutes: Int
@@ -937,7 +937,7 @@ struct CalendarConfigResponse: Codable {
     }
 }
 
-struct AgentsConfigResponse: Codable {
+struct AgentsConfigResponse: Codable, Equatable {
     let enabled: Bool
     let routingEnabled: Bool
     let maxExecutionSeconds: Int
@@ -949,7 +949,7 @@ struct AgentsConfigResponse: Codable {
     }
 }
 
-struct GoalsConfigResponse: Codable {
+struct GoalsConfigResponse: Codable, Equatable {
     let strategyIntervalHours: Int
     let dailyReviewHour: Int
     let maxStrategiesPerRun: Int
@@ -963,7 +963,7 @@ struct GoalsConfigResponse: Codable {
     }
 }
 
-struct ConfigResponse: Codable {
+struct ConfigResponse: Codable, Equatable {
     let llm: LLMConfigResponse
     let voice: VoiceConfigResponse
     let power: PowerConfigResponse
