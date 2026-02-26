@@ -1471,6 +1471,15 @@ async def _run_post_chat(
         if not response_text:
             return actions
 
+        # Extract source references so the post-chat agent can link
+        # created tasks to the email/event being discussed
+        context_sources = None
+        try:
+            from giva.intelligence.context import retrieve_context_sources
+            context_sources = retrieve_context_sources(query, store)
+        except Exception:
+            pass
+
         # 1. Run combined post-chat agent (intent + tagging + progress)
         try:
             from giva.intelligence.agents import run_post_chat_agent
@@ -1479,6 +1488,7 @@ async def _run_post_chat(
                 actions = run_post_chat_agent(
                     query, response_text, store, config,
                     goal_id=goal_id, task_id=task_id,
+                    context_sources=context_sources,
                 )
         except Exception as e:
             log.debug("Post-chat agent error: %s", e)

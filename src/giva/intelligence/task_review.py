@@ -1,9 +1,10 @@
 """Task review & classification pipeline.
 
 Runs after task extraction to:
-1. Merge semantic duplicates (filter model)
-2. Classify tasks by actionability (assistant model)
-3. Route classified tasks: queue autonomous agents, enrich context, upgrade projects
+1. Sanity-check tasks (code-level: expired, answered, past events)
+2. Merge semantic duplicates (filter model)
+3. Classify tasks by actionability (assistant model) — with dismissal learning
+4. Route classified tasks: queue autonomous agents, enrich context, upgrade projects
 
 Triggered by the sync scheduler in high-performance mode, deferred under
 power constraints.  Processes all unclassified pending tasks, not just
@@ -16,6 +17,7 @@ import json
 import logging
 import re
 import uuid
+from datetime import datetime
 from typing import Any, Callable, Optional
 
 from giva.config import GivaConfig
@@ -60,6 +62,10 @@ Active goals:
 Available agents (for autonomous execution):
 {agent_catalog}
 
+{review_memory}
+
+{dismissal_history}
+
 Tasks to classify:
 {tasks_block}
 
@@ -73,6 +79,13 @@ Examples: draft response where the approach isn't obvious, decide between multip
 make a personal decision). We remind and provide context.
 - "project": Tasks that are really complex, multi-step projects that should be upgraded \
 to mid-term goals with strategy brainstorming.
+- "dismiss": Tasks that should be dismissed because they are unnecessary, redundant, \
+or the user has consistently ignored similar tasks in the past. \
+Examples: trivial meeting prep for internal low-stakes meetings (the calendar is enough), \
+tasks whose deadlines have already passed, tasks about emails that have already been answered. \
+Consider the user's dismissal patterns above — if the user consistently dismisses a type of \
+task, that's a strong signal to dismiss similar ones. But evaluate each task individually; \
+context matters.
 
 Rules:
 - When in doubt, prefer "needs_input" over "autonomous" (safer).
@@ -81,10 +94,15 @@ Rules:
 relevant emails/events/notes for context.
 - For "project" tasks, provide goal_title (concise) and goal_tier ("mid_term" or \
 "short_term").
+- For "dismiss", explain why (reasoning field). This is important for learning.
+- If you notice recurring patterns in what should be dismissed, describe them in \
+the review_observations field at the top level.
 
 Respond with ONLY a JSON object:
-{{"tasks": [
-  {{"task_id": N, "classification": "autonomous|needs_input|user_only|project", \
+{{"review_observations": "optional: any patterns you noticed about the user's tasks or \
+preferences, or null",
+"tasks": [
+  {{"task_id": N, "classification": "autonomous|needs_input|user_only|project|dismiss", \
 "reasoning": "brief reason", "suggested_agent": "agent_id or null", \
 "enrichment_query": "search terms or null", \
 "goal_title": "goal title or null", "goal_tier": "mid_term"}}
@@ -149,6 +167,216 @@ def _parse_json_response(raw: str) -> Optional[dict]:
 
     log.debug("Failed to parse task review JSON: %s", raw[:200])
     return None
+
+
+# ---------------------------------------------------------------------------
+# Pre-classification sanity checks (code-level, no LLM)
+# ---------------------------------------------------------------------------
+
+
+def _is_expired_deadline(task: Task) -> bool:
+    """True if the task has a due date that has already passed."""
+    if not task.due_date:
+        return False
+    return task.due_date < datetime.now()
+
+
+def _is_answered_email(task: Task, store: Store) -> bool:
+    """True if the source email has been replied to (thread has a newer message)."""
+    if task.source_type != "email" or not task.source_id:
+        return False
+    email = store.get_email_by_id(task.source_id)
+    if not email:
+        return False
+    # Check if any email in the DB references this email (i.e. is a reply to it)
+    if email.message_id:
+        try:
+            with store._conn() as conn:
+                row = conn.execute(
+                    "SELECT COUNT(*) as c FROM emails WHERE in_reply_to = ?",
+                    (email.message_id,),
+                ).fetchone()
+                if row and row["c"] > 0:
+                    return True
+        except Exception:
+            pass
+    return False
+
+
+def _is_past_event(task: Task, store: Store) -> bool:
+    """True if the source event has already occurred."""
+    if task.source_type != "event" or not task.source_id:
+        return False
+    event = store.get_event_by_id(task.source_id)
+    if not event:
+        return False
+    return event.dtstart < datetime.now()
+
+
+def _sanity_check_tasks(
+    tasks: list[Task],
+    store: Store,
+    broadcast_fn: Optional[Callable] = None,
+) -> list[Task]:
+    """Run code-level sanity checks and auto-dismiss obviously stale tasks.
+
+    Returns the list of tasks that passed all checks (not dismissed).
+    """
+    surviving = []
+    for task in tasks:
+        reason = None
+        if _is_expired_deadline(task):
+            reason = "expired_deadline"
+        elif _is_answered_email(task, store):
+            reason = "answered_email"
+        elif _is_past_event(task, store):
+            reason = "past_event"
+
+        if reason:
+            store.update_task(task.id, classification="dismiss")
+            store.update_task_status(task.id, "dismissed")
+            log.info(
+                "Sanity check dismissed task #%d (%s): %s",
+                task.id, reason, task.title,
+            )
+            if broadcast_fn:
+                broadcast_fn({
+                    "event": "task_sanity_dismissed",
+                    "data": json.dumps({
+                        "task_id": task.id,
+                        "title": task.title,
+                        "reason": reason,
+                    }),
+                })
+        else:
+            surviving.append(task)
+
+    return surviving
+
+
+# ---------------------------------------------------------------------------
+# Review memory: dismissal patterns + LLM observations
+# ---------------------------------------------------------------------------
+
+
+def _get_dismissal_history(store: Store, limit: int = 30) -> str:
+    """Build a summary of recently dismissed tasks for the classify prompt."""
+    try:
+        dismissed = store.get_tasks(status="dismissed", limit=limit)
+        if not dismissed:
+            return ""
+        lines = ["Recently dismissed tasks (by user or system):"]
+        for t in dismissed[:20]:
+            src = f"source={t.source_type}"
+            cls = f", classification={t.classification}" if t.classification else ""
+            lines.append(f"- \"{t.title}\" ({src}{cls})")
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
+def _get_review_memory(store: Store) -> str:
+    """Retrieve cached review patterns from profile_data."""
+    try:
+        profile = store.get_profile()
+        if not profile:
+            return ""
+        patterns = profile.profile_data.get("task_review_patterns", {})
+        if not patterns:
+            return ""
+        lines = ["Review memory (patterns recognized from past reviews):"]
+        for obs in patterns.get("observations", []):
+            lines.append(f"- {obs}")
+        suppressed = patterns.get("suppressed_types", [])
+        if suppressed:
+            lines.append("Suppressed task types (user consistently dismisses these):")
+            for s in suppressed:
+                lines.append(f"  - {s}")
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
+def _learn_dismissal_patterns(store: Store) -> None:
+    """Analyze dismissed tasks and update review patterns in profile_data.
+
+    Looks for task types/keywords that are consistently dismissed and
+    records them for future review cycles.
+    """
+    try:
+        dismissed = store.get_tasks(status="dismissed", limit=100)
+        if len(dismissed) < 3:
+            return
+
+        # Count source_type + keyword patterns
+        type_counts: dict[str, int] = {}
+        for t in dismissed:
+            key = t.source_type
+            type_counts[key] = type_counts.get(key, 0) + 1
+
+        # Identify consistently dismissed source types (>= 5 occurrences)
+        suppressed = []
+        for src_type, count in type_counts.items():
+            if count >= 5:
+                suppressed.append(
+                    f"{src_type} tasks (dismissed {count} times)"
+                )
+
+        # Keyword frequency in dismissed task titles
+        word_counts: dict[str, int] = {}
+        for t in dismissed:
+            words = set(
+                w.lower()
+                for w in re.split(r"\W+", t.title)
+                if len(w) > 3
+            )
+            for w in words:
+                word_counts[w] = word_counts.get(w, 0) + 1
+
+        # Top keywords that appear in many dismissed tasks
+        frequent_keywords = [
+            f"\"{word}\" (in {count} dismissed tasks)"
+            for word, count in sorted(word_counts.items(), key=lambda x: -x[1])[:5]
+            if count >= 3
+        ]
+        if frequent_keywords:
+            suppressed.append(
+                "Common keywords in dismissed tasks: " + ", ".join(frequent_keywords)
+            )
+
+        # Update profile_data
+        profile = store.get_profile()
+        if not profile:
+            return
+
+        patterns = profile.profile_data.get("task_review_patterns", {})
+        patterns["suppressed_types"] = suppressed
+        patterns["last_learned"] = datetime.now().isoformat()
+        store.update_profile_data({"task_review_patterns": patterns})
+        log.info("Updated dismissal patterns: %d suppressed types", len(suppressed))
+
+    except Exception as e:
+        log.debug("Dismissal pattern learning error: %s", e)
+
+
+def _save_review_observations(observations: Optional[str], store: Store) -> None:
+    """Persist LLM review observations into profile_data."""
+    if not observations:
+        return
+    try:
+        profile = store.get_profile()
+        if not profile:
+            return
+        patterns = profile.profile_data.get("task_review_patterns", {})
+        obs_list = patterns.get("observations", [])
+        # Keep last 10 observations, deduplicate
+        if observations not in obs_list:
+            obs_list.append(observations)
+            obs_list = obs_list[-10:]
+        patterns["observations"] = obs_list
+        store.update_profile_data({"task_review_patterns": patterns})
+    except Exception as e:
+        log.debug("Save review observations error: %s", e)
 
 
 # ---------------------------------------------------------------------------
@@ -309,10 +537,11 @@ def _classify_tasks(
     tasks: list[Task],
     store: Store,
     config: GivaConfig,
-) -> list[dict]:
+) -> tuple[list[dict], Optional[str]]:
     """Classify tasks using the assistant model.
 
-    Returns a list of classification dicts per task.
+    Returns (classifications, review_observations) where observations
+    are optional LLM-generated patterns to cache for future reviews.
     """
     from giva.intelligence.goals import get_goals_summary
     from giva.intelligence.profile import get_profile_summary
@@ -328,12 +557,18 @@ def _classify_tasks(
     except Exception:
         agent_catalog = "No agents available."
 
+    # Build review memory and dismissal history for the LLM
+    review_memory = _get_review_memory(store)
+    dismissal_history = _get_dismissal_history(store)
+
     tasks_block = _format_tasks_for_prompt(tasks, max_desc_len=200)
 
     prompt = CLASSIFY_PROMPT.format(
         profile_summary=profile_summary,
         goals_summary=goals_summary,
         agent_catalog=agent_catalog,
+        review_memory=review_memory or "No review memory yet.",
+        dismissal_history=dismissal_history or "No dismissal history yet.",
         tasks_block=tasks_block,
     )
 
@@ -347,10 +582,13 @@ def _classify_tasks(
         )
         result = _parse_json_response(raw)
         if not result:
-            return []
+            return [], None
+
+        # Extract LLM observations for caching
+        observations = result.get("review_observations")
 
         valid_ids = {t.id for t in tasks}
-        valid_classes = {"autonomous", "needs_input", "user_only", "project"}
+        valid_classes = {"autonomous", "needs_input", "user_only", "project", "dismiss"}
         classifications = []
         for item in result.get("tasks", []):
             task_id = item.get("task_id")
@@ -369,11 +607,11 @@ def _classify_tasks(
                 "goal_tier": item.get("goal_tier", "mid_term"),
             })
 
-        return classifications
+        return classifications, observations
 
     except Exception as e:
         log.debug("Task classification error: %s", e)
-        return []
+        return [], None
 
 
 # ---------------------------------------------------------------------------
@@ -506,6 +744,34 @@ def _route_enrich(
     return None
 
 
+def _route_dismiss(
+    task: Task,
+    classification: dict,
+    store: Store,
+    broadcast_fn: Optional[Callable] = None,
+) -> Optional[dict]:
+    """Dismiss a task that the LLM determined is unnecessary."""
+    store.update_task_status(task.id, "dismissed")
+    log.info(
+        "LLM dismissed task #%d: %s (reason: %s)",
+        task.id, task.title, classification.get("reasoning", ""),
+    )
+    if broadcast_fn:
+        broadcast_fn({
+            "event": "task_dismissed",
+            "data": json.dumps({
+                "task_id": task.id,
+                "title": task.title,
+                "reasoning": classification.get("reasoning", ""),
+            }),
+        })
+    return {
+        "type": "task_dismissed",
+        "task_id": task.id,
+        "reasoning": classification.get("reasoning", ""),
+    }
+
+
 def _route_project(
     task: Task,
     classification: dict,
@@ -564,7 +830,7 @@ def review_pending_tasks(
     agent_queue: Any = None,
     broadcast_fn: Optional[Callable] = None,
 ) -> int:
-    """Run the full task review pipeline: dedup → classify → route.
+    """Run the full task review pipeline: sanity → dedup → classify → route → learn.
 
     Returns the number of tasks classified. Caller must hold _llm_lock.
     """
@@ -578,7 +844,12 @@ def review_pending_tasks(
 
     log.info("Task review: %d unclassified tasks to process", len(tasks))
 
-    # Step 2: Deduplicate (filter model)
+    # Step 2: Sanity checks (code-level, no LLM)
+    tasks = _sanity_check_tasks(tasks, store, broadcast_fn)
+    if not tasks:
+        return 0
+
+    # Step 3: Deduplicate (filter model)
     dedup_batch = tasks[:config.task_review.dedup_batch_size]
     if len(dedup_batch) >= 2:
         groups = _detect_duplicates(dedup_batch, config)
@@ -586,21 +857,24 @@ def review_pending_tasks(
             dismissed = _execute_merges(groups, store, broadcast_fn)
             log.info("Task review dedup: %d groups, %d tasks dismissed", len(groups), dismissed)
 
-    # Step 3: Reload after dedup, then classify (assistant model)
+    # Step 4: Reload after dedup, then classify (assistant model)
     tasks = store.get_unclassified_tasks(limit=config.task_review.classify_batch_size)
     if not tasks:
         return 0
 
-    classifications = _classify_tasks(tasks, store, config)
+    classifications, observations = _classify_tasks(tasks, store, config)
     if not classifications:
         return 0
+
+    # Save LLM observations for future review cycles
+    _save_review_observations(observations, store)
 
     # Build lookup
     id_to_task = {t.id: t for t in tasks}
     actions = []
     classified_count = 0
 
-    # Step 4: Store classifications and route
+    # Step 5: Store classifications and route
     for cls in classifications:
         task_id = cls["task_id"]
         task = id_to_task.get(task_id)
@@ -627,6 +901,14 @@ def review_pending_tasks(
             action = _route_project(task, cls, store, broadcast_fn)
             if action:
                 actions.append(action)
+
+        elif category == "dismiss":
+            action = _route_dismiss(task, cls, store, broadcast_fn)
+            if action:
+                actions.append(action)
+
+    # Step 6: Learn from dismissal patterns (update profile_data)
+    _learn_dismissal_patterns(store)
 
     # Broadcast completion summary
     if broadcast_fn and classified_count > 0:

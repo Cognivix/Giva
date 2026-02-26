@@ -103,6 +103,7 @@ class TaskClassification(str, Enum):
     needs_input = "needs_input"
     user_only = "user_only"
     project = "project"
+    dismiss = "dismiss"
 
 
 class DuplicateGroup(BaseModel):

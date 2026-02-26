@@ -130,6 +130,7 @@ def run_post_chat_agent(
     config: GivaConfig,
     goal_id: Optional[int] = None,
     task_id: Optional[int] = None,
+    context_sources: Optional[dict] = None,
 ) -> list[dict]:
     """Run the combined post-chat agent after a chat response.
 
@@ -142,6 +143,9 @@ def run_post_chat_agent(
         goal_id: When set, auto-links created tasks/objectives to this goal
             and injects goal context into the prompt.
         task_id: When set, injects task context into the prompt.
+        context_sources: Optional dict with ``email_ids`` and ``event_ids``
+            lists from context retrieval. Used to link created tasks back
+            to their source email/event instead of ``source_type="chat"``.
 
     Returns a list of action dicts for SSE broadcasting.
     """
@@ -212,7 +216,10 @@ def run_post_chat_agent(
             intent_type = intent.get("type", "none")
 
             if intent_type == "create_task":
-                action = _handle_create_task(intent, store, goal_id=goal_id)
+                action = _handle_create_task(
+                    intent, store, goal_id=goal_id,
+                    context_sources=context_sources,
+                )
                 if action:
                     actions.append(action)
 
@@ -220,6 +227,7 @@ def run_post_chat_agent(
                 action = _handle_create_objective(
                     intent, store, goal_id=goal_id,
                     full_query=query, full_response=response, config=config,
+                    context_sources=context_sources,
                 )
                 if action:
                     extra = action.pop("extra_actions", [])
@@ -254,10 +262,34 @@ def run_post_chat_agent(
     return actions
 
 
+def _pick_best_source(context_sources: Optional[dict] = None) -> tuple[str, int]:
+    """Pick the best source reference from context_sources.
+
+    Prefers email (most likely the user is discussing an email) over event.
+    Falls back to ("chat", 0) when no sources are available.
+    """
+    if not context_sources:
+        return "chat", 0
+    email_ids = context_sources.get("email_ids", [])
+    if email_ids:
+        return "email", email_ids[0]
+    event_ids = context_sources.get("event_ids", [])
+    if event_ids:
+        return "event", event_ids[0]
+    return "chat", 0
+
+
 def _handle_create_task(
-    intent: dict, store: Store, goal_id: Optional[int] = None
+    intent: dict,
+    store: Store,
+    goal_id: Optional[int] = None,
+    context_sources: Optional[dict] = None,
 ) -> Optional[dict]:
-    """Create a task from a detected intent, auto-linking to a goal if possible."""
+    """Create a task from a detected intent, auto-linking to a goal if possible.
+
+    Uses context_sources to preserve the link to the email or event being
+    discussed, instead of defaulting to source_type="chat", source_id=0.
+    """
     title = intent.get("title")
     if not title:
         return None
@@ -274,17 +306,21 @@ def _handle_create_task(
     if not intent_goal_id:
         intent_goal_id = _auto_link_goal(title, intent.get("description", ""), store)
 
+    # Determine source: prefer email > event from context, fallback to chat
+    source_type, source_id = _pick_best_source(context_sources)
+
     task = Task(
         title=title,
         description=intent.get("description", "") or "",
-        source_type="chat",
-        source_id=0,
+        source_type=source_type,
+        source_id=source_id,
         priority=intent.get("priority") or "medium",
         goal_id=intent_goal_id,
     )
     task_id = store.add_task(task)
     log.info(
-        "Post-chat agent created task #%d: %s (goal=%s)", task_id, title, intent_goal_id
+        "Post-chat agent created task #%d: %s (goal=%s, source=%s:%d)",
+        task_id, title, intent_goal_id, source_type, source_id,
     )
 
     return {
@@ -358,6 +394,7 @@ def _decompose_objective_to_tasks(
     store: Store,
     config: GivaConfig,
     goal_context_id: Optional[int] = None,
+    context_sources: Optional[dict] = None,
 ) -> list[dict]:
     """Break down a newly created objective into concrete tasks.
 
@@ -405,6 +442,8 @@ def _decompose_objective_to_tasks(
         existing = store.get_tasks(status="pending", limit=50)
         existing_titles = {t.title.lower() for t in existing}
 
+        source_type, source_id = _pick_best_source(context_sources)
+
         for task_data in result.get("tasks", []):
             title = task_data.get("title")
             if not title or title.lower() in existing_titles:
@@ -413,8 +452,8 @@ def _decompose_objective_to_tasks(
             task = Task(
                 title=title,
                 description=task_data.get("description", "") or "",
-                source_type="chat",
-                source_id=0,
+                source_type=source_type,
+                source_id=source_id,
                 priority=task_data.get("priority") or "medium",
                 goal_id=goal_id,
             )
@@ -445,6 +484,7 @@ def _handle_create_objective(
     full_query: str = "",
     full_response: str = "",
     config: Optional[GivaConfig] = None,
+    context_sources: Optional[dict] = None,
 ) -> Optional[dict]:
     """Create a child goal (objective) from a detected intent.
 
@@ -512,7 +552,7 @@ def _handle_create_objective(
 
         decomposition = _decompose_objective_to_tasks(
             new_goal_id, full_query, full_response, store, config,
-            goal_context_id=goal_id,
+            goal_context_id=goal_id, context_sources=context_sources,
         )
         action["extra_actions"].extend(decomposition)
 

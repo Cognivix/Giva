@@ -12,7 +12,7 @@ All data stays on your device. No cloud APIs, no telemetry.
 - **Calendar sync** — EventKit (native) with AppleScript fallback
 - **Local LLM inference** — Dual-model architecture: large assistant (Qwen3-30B-A3B) for queries, small filter (Qwen3-8B) for classification. Models auto-recommended based on your hardware (chip, RAM, GPU cores) with live benchmark data
 - **Goal tracking** — Hierarchical goals (long-term → mid-term → short-term) with strategy generation, objective decomposition, and daily reviews with reflection
-- **Task extraction & review** — Automatic task detection from emails, events, and chat. Background review pipeline merges duplicates, classifies tasks by actionability (autonomous, needs input, user-only, or project), and routes them: queues agent work, enriches context, or upgrades complex tasks to goals
+- **Task extraction & review** — Automatic task detection from emails, events, and chat. Background review pipeline: sanity checks (expired deadlines, answered emails, past events), semantic dedup, 5-way classification (autonomous, needs input, user-only, project, dismiss), and intelligent routing. Learns from user dismissal patterns and caches review memory for future cycles
 - **Pluggable agent framework** — Extensible agent system with protocol-based discovery, two-stage routing (keyword pre-filter → LLM classification), and a thread-safe priority queue. Built-in agents: orchestrator (multi-step planning), email drafter, and MCP server wrappers
 - **Post-chat agents** — Intent detection, task creation, progress tracking, conversation tagging, and preference learning run automatically after every chat turn using the filter model
 - **Three-tier conversation memory** — Active window (recent turns), session summary (compressed by filter model), and learned facts (permanent preferences extracted during daily review)
@@ -226,7 +226,7 @@ docs/                   # Agent architecture + bootstrap design
 - **Budget-aware context** — token budget scales with model size (system 5%, query 5%, conversation 25%, retrieved 55%, headroom 10%). Auto-scales: ≤1B→2K, ≤8B→4K, ≤32B→8K, >32B→12K tokens
 - **Three-tier conversation memory** — Tier 1: active window (recent turns). Tier 2: session summary (compressed by filter model, resets daily). Tier 3: learned facts (permanent preferences, always in system prompt)
 - **Server-side state machine** — `ServerPhase` checkpoint is the single source of truth (unknown → downloading → awaiting_model_selection → validating → ready → syncing → onboarding → operational). The SwiftUI app is a thin observer, never drives transitions
-- **Post-chat agent pipeline** — intent detection, task creation, progress tracking, and preference learning run automatically after every chat turn using the filter model
+- **Post-chat agent pipeline** — intent detection, task creation, progress tracking, and preference learning run automatically after every chat turn using the filter model. Created tasks preserve links to the source email/event from the conversation context
 - **Pluggable agents** — protocol-based discovery with two-stage routing. New agents register by dropping a module into `giva/agents/`. Filter model for classification agents, assistant model for synthesis agents
 - **Power-aware scheduling** — sync defers on low battery (≤50%) or thermal pressure (≥ serious). Models auto-unload after configurable idle timeout
 - **Goal-scoped conversations** — conversations table has nullable `goal_id`; global and goal chat are cleanly separated in the DB and UI

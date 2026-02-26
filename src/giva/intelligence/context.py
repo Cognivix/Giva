@@ -335,3 +335,54 @@ def _ensure_bodies(emails: list, store: Store) -> None:
         if body:
             email.body_plain = body
             store.update_email_body(email.message_id, body)
+
+
+def retrieve_context_sources(query: str, store: Store) -> dict:
+    """Extract structured source references (email/event IDs) relevant to a query.
+
+    Returns {"email_ids": [int, ...], "event_ids": [int, ...]} — the DB row IDs
+    of emails and events that were retrieved as context for this query.
+    Used by the post-chat agent to preserve source links when creating tasks.
+    """
+    email_ids = []
+    event_ids = []
+
+    # FTS email search (most relevant to query)
+    try:
+        emails = store.search_emails(query, limit=5)
+        email_ids.extend(e.id for e in emails if e.id)
+    except Exception:
+        pass
+
+    # Recent emails (supplement if FTS missed some)
+    try:
+        recent = store.get_recent_emails(limit=3)
+        seen = set(email_ids)
+        for e in recent:
+            if e.id and e.id not in seen:
+                email_ids.append(e.id)
+                seen.add(e.id)
+    except Exception:
+        pass
+
+    # Upcoming events
+    try:
+        events = store.get_upcoming_events(days=7)
+        event_ids.extend(ev.id for ev in events if ev.id)
+    except Exception:
+        pass
+
+    # Recent past events
+    try:
+        from datetime import datetime as dt, timedelta
+        past_start = dt.now() - timedelta(days=7)
+        past_events = store.get_events_range(past_start, dt.now())
+        seen = set(event_ids)
+        for ev in past_events:
+            if ev.id and ev.id not in seen:
+                event_ids.append(ev.id)
+                seen.add(ev.id)
+    except Exception:
+        pass
+
+    return {"email_ids": email_ids, "event_ids": event_ids}
