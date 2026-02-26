@@ -76,6 +76,7 @@ MIGRATIONS: dict[int, str] = {
         );
     """,
     6: "",  # ALTER-only migration; statements in _ALTER_MIGRATIONS[6]
+    7: "",  # ALTER-only migration; statements in _ALTER_MIGRATIONS[7]
 }
 
 # ALTER TABLE must run as a separate execute() (not inside executescript).
@@ -93,6 +94,9 @@ _ALTER_MIGRATIONS: dict[int, list[str]] = {
     6: [
         "ALTER TABLE conversations ADD COLUMN task_id INTEGER"
         " REFERENCES tasks(id) ON DELETE CASCADE",
+    ],
+    7: [
+        "ALTER TABLE tasks ADD COLUMN classification TEXT",
     ],
 }
 

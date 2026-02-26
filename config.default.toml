@@ -103,6 +103,16 @@ max_execution_seconds = 60
 # timeout_seconds = 30
 # description = "Send and receive Discord messages"
 
+[task_review]
+# Post-extraction review: dedup + classify + route tasks automatically
+enabled = true
+# Max tasks to process per review cycle
+batch_size = 30
+# Max tasks for duplicate detection (filter model)
+dedup_batch_size = 30
+# Max tasks per classification call (assistant model)
+classify_batch_size = 15
+
 [power]
 # Power-aware scheduling: adapts background work to battery and thermal state
 enabled = true

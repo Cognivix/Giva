@@ -79,6 +79,14 @@ class AgentsConfig:
 
 
 @dataclass(frozen=True)
+class TaskReviewConfig:
+    enabled: bool = True
+    batch_size: int = 30           # Max tasks to process per review cycle
+    dedup_batch_size: int = 30     # Max tasks for duplicate detection
+    classify_batch_size: int = 15  # Max tasks per classification call
+
+
+@dataclass(frozen=True)
 class PowerConfig:
     enabled: bool = True
     battery_pause_threshold: int = 20       # Below this %, skip ALL background work
@@ -98,6 +106,7 @@ class GivaConfig:
     voice: VoiceConfig = field(default_factory=VoiceConfig)
     goals: GoalsConfig = field(default_factory=GoalsConfig)
     agents: AgentsConfig = field(default_factory=AgentsConfig)
+    task_review: TaskReviewConfig = field(default_factory=TaskReviewConfig)
     power: PowerConfig = field(default_factory=PowerConfig)
 
     @property
@@ -393,6 +402,16 @@ def load_config() -> GivaConfig:
             ),
             scheduler_agent_interval_minutes=int(
                 raw.get("agents", {}).get("scheduler_agent_interval_minutes", 60)
+            ),
+        ),
+        task_review=TaskReviewConfig(
+            enabled=_to_bool(raw.get("task_review", {}).get("enabled", True)),
+            batch_size=int(raw.get("task_review", {}).get("batch_size", 30)),
+            dedup_batch_size=int(
+                raw.get("task_review", {}).get("dedup_batch_size", 30)
+            ),
+            classify_batch_size=int(
+                raw.get("task_review", {}).get("classify_batch_size", 15)
             ),
         ),
         power=PowerConfig(

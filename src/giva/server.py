@@ -140,6 +140,7 @@ class TaskResponse(BaseModel):
     priority: str
     due_date: Optional[str] = None
     status: str
+    classification: Optional[str] = None
     created_at: Optional[str] = None
 
 
@@ -1081,6 +1082,7 @@ async def get_tasks(
             priority=t.priority,
             due_date=t.due_date.isoformat() if t.due_date else None,
             status=t.status,
+            classification=t.classification,
             created_at=t.created_at.isoformat() if t.created_at else None,
         )
         for t in tasks
@@ -1167,6 +1169,7 @@ async def create_task(
         priority=created.priority,
         due_date=created.due_date.isoformat() if created.due_date else None,
         status=created.status,
+        classification=created.classification,
         created_at=created.created_at.isoformat() if created.created_at else None,
     )
 
@@ -1223,6 +1226,7 @@ async def update_task(
         priority=updated.priority,
         due_date=updated.due_date.isoformat() if updated.due_date else None,
         status=updated.status,
+        classification=updated.classification,
         created_at=updated.created_at.isoformat() if updated.created_at else None,
     )
 

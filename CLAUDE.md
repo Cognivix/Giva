@@ -35,7 +35,7 @@ src/giva/
 ├── benchmarks.py       # Live LLM benchmark fetching (Open LLM Leaderboard, LMArena)
 ├── db/
 │   ├── models.py       # Dataclasses: Email, Event, Task, UserProfile, Goal, GoalStrategy
-│   ├── store.py        # SQLite + FTS5 data layer (WAL mode, schema v4)
+│   ├── store.py        # SQLite + FTS5 data layer (WAL mode, schema v7)
 │   └── migrations.py   # Schema versioning + ALTER migrations
 ├── sync/
 │   ├── mail.py         # Apple Mail sync via JXA, chunked headers + LLM filter
@@ -55,6 +55,7 @@ src/giva/
 │   ├── agents.py       # Post-chat agent pipeline: intent detection + action routing
 │   ├── context.py      # Budget-aware context assembly + conversation memory
 │   ├── daily_review.py # Daily goal review + reflection
+│   ├── task_review.py  # Post-extraction task dedup, classify, route
 │   └── mcp_observations.py # MCP source observation gathering for onboarding/context
 ├── agents/
 │   ├── base.py         # Agent Protocol, AgentManifest, AgentResult, BaseAgent
@@ -128,7 +129,7 @@ tests/                  # pytest test suite mirroring src/ structure
 ├── test_cli.py, test_server.py, test_server_extended.py
 ├── test_models.py, test_benchmarks.py, test_hardware.py
 ├── test_db/            # store, config, migrations, models, goals
-├── test_intelligence/  # agents, context, goals, onboarding, profile, queries, tasks, mcp_observations
+├── test_intelligence/  # agents, context, goals, onboarding, profile, queries, tasks, task_review, mcp_observations
 ├── test_agents/        # base, registry, router, queue, orchestrator, email_drafter, mcp_agent
 ├── test_sync/          # mail_sync, calendar, filter, scheduler
 ├── test_audio/         # tts, stt
@@ -198,6 +199,7 @@ High-level AI features built on top of the LLM + data layers.
 | `src/giva/intelligence/context.py` | Budget-aware context assembly + 3-tier conversation memory |
 | `src/giva/intelligence/daily_review.py` | Daily goal review, reflection, fact extraction to Tier 3 |
 | `src/giva/intelligence/mcp_observations.py` | Gathers observations from MCP sources (Notes, Messages, Discord) |
+| `src/giva/intelligence/task_review.py` | Post-extraction task dedup, 4-way classification, action routing |
 
 ### 5. Pluggable Agent Framework
 The extensible agent system: protocol, discovery, routing, execution queue, and built-in agents.
@@ -298,7 +300,7 @@ Test infrastructure across both Python and Swift.
 |---|---|
 | `tests/conftest.py` | Shared pytest fixtures: `tmp_db`, `config` (isolated temp dirs) |
 | `tests/test_db/` | Store, config, migrations, models, goals (7 files) |
-| `tests/test_intelligence/` | Agents, context, goals, onboarding, profile, queries, tasks (11 files) |
+| `tests/test_intelligence/` | Agents, context, goals, onboarding, profile, queries, tasks, task_review (12 files) |
 | `tests/test_agents/` | Base, registry, router, queue, orchestrator, email_drafter, MCP (12 files) |
 | `tests/test_sync/` | Mail sync, calendar, filter, scheduler (5 files) |
 | `tests/test_audio/` | TTS, STT (2 files) |
@@ -326,6 +328,7 @@ Test infrastructure across both Python and Swift.
 - **Daemon restart port-polling**: `launchctl bootout` is async w.r.t. process termination. `BootstrapManager.bootoutIfLoaded()` polls port 7483 availability (via `socket()`+`bind()` probe) every 0.25s up to 15s before starting the new process. The launchd plist sets `ExitTimeOut: 5` to SIGKILL after 5s if SIGTERM doesn't work. `restartDaemon()` is async to keep the UI responsive.
 - **Goal-scoped conversations**: The `conversations` table has a nullable `goal_id` column. Global chat uses `WHERE goal_id IS NULL`; goal chat uses `WHERE goal_id = ?`. The `handle_query()` function separates the original query (saved to DB) from the enriched context prefix (sent to LLM only). Conversation compression only touches global messages.
 - **Post-chat agents in goal chat**: The `/api/goals/{goal_id}/chat` endpoint runs the same post-chat agent pipeline as regular chat. The agent prompt includes the goal context and supports `create_objective` intents (auto-creating child goals with tier inferred from parent). Agent actions are broadcast via `agent_actions` SSE events.
+- **Task review & classification**: After task extraction, a background review pipeline (1) merges semantic duplicates via the filter model, (2) classifies tasks into four categories—`autonomous` (agent prepares, user confirms), `needs_input` (enriched with context), `user_only` (reminder context), `project` (upgraded to mid-term goal)—via the assistant model, and (3) routes each accordingly. Power-gated: runs immediately in high-performance mode, deferred when battery/thermal-constrained. Unclassified tasks accumulate and are batch-processed on next eligible cycle.
 
 ## Agent Architecture
 
@@ -391,7 +394,7 @@ Uses the **Swift Testing** framework (`@Test`, `#expect`, `@Suite`). Test target
 
 ## Conventions
 
-- Python 3.13+, ruff line-length 100
+- Python 3.11+, ruff line-length 100
 - `src/` layout with `setuptools`
 - Frozen dataclasses for config, mutable for DB models
 - All LLM prompt templates live in `src/giva/llm/prompts.py`
