@@ -12,7 +12,7 @@ All data stays on your device. No cloud APIs, no telemetry.
 - **Calendar sync** — EventKit (native) with AppleScript fallback
 - **Local LLM inference** — Dual-model architecture: large assistant (Qwen3-30B-A3B) for queries, small filter (Qwen3-8B) for classification. Models auto-recommended based on your hardware (chip, RAM, GPU cores) with live benchmark data
 - **Goal tracking** — Hierarchical goals (long-term → mid-term → short-term) with strategy generation, objective decomposition, and daily reviews with reflection
-- **Task extraction** — Automatic task detection from emails and calendar events, with auto-linking to goals
+- **Task extraction & review** — Automatic task detection from emails, events, and chat. Background review pipeline merges duplicates, classifies tasks by actionability (autonomous, needs input, user-only, or project), and routes them: queues agent work, enriches context, or upgrades complex tasks to goals
 - **Pluggable agent framework** — Extensible agent system with protocol-based discovery, two-stage routing (keyword pre-filter → LLM classification), and a thread-safe priority queue. Built-in agents: orchestrator (multi-step planning), email drafter, and MCP server wrappers
 - **Post-chat agents** — Intent detection, task creation, progress tracking, conversation tagging, and preference learning run automatically after every chat turn using the filter model
 - **Three-tier conversation memory** — Active window (recent turns), session summary (compressed by filter model), and learned facts (permanent preferences extracted during daily review)
@@ -33,7 +33,7 @@ All data stays on your device. No cloud APIs, no telemetry.
 ## Requirements
 
 - **macOS 26** (Tahoe) with **Apple Silicon** (M1 or later)
-- **Python 3.13+**
+- **Python 3.11+**
 - **Xcode 26+**
 - **Node.js 18+** (for MCP servers)
 - ~16 GB RAM recommended (for 30B assistant model)
@@ -162,6 +162,7 @@ src/giva/
 │   ├── agents.py       # Post-chat agent pipeline
 │   ├── context.py      # Budget-aware context assembly
 │   ├── daily_review.py # Daily goal review + reflection
+│   ├── task_review.py  # Post-extraction task dedup, classify, route
 │   └── mcp_observations.py # MCP source observations
 ├── agents/
 │   ├── base.py         # Agent Protocol + AgentManifest

@@ -147,6 +147,7 @@ class Task:
     due_date: Optional[datetime] = None
     status: str = "pending"  # pending, in_progress, done, dismissed
     goal_id: Optional[int] = None  # FK to goals table
+    classification: Optional[str] = None  # autonomous, needs_input, user_only, project
     id: Optional[int] = None
     created_at: Optional[datetime] = None
 

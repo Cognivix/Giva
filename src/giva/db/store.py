@@ -23,7 +23,7 @@ from giva.db.models import (
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -101,6 +101,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     status TEXT NOT NULL DEFAULT 'pending'
         CHECK(status IN ('pending', 'in_progress', 'done', 'dismissed')),
     goal_id INTEGER REFERENCES goals(id) ON DELETE SET NULL,
+    classification TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -408,8 +409,8 @@ class Store:
         with self._conn() as conn:
             cursor = conn.execute(
                 """INSERT INTO tasks (title, description, source_type, source_id,
-                                      priority, due_date, status, goal_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                                      priority, due_date, status, goal_id, classification)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     task.title,
                     task.description,
@@ -419,6 +420,7 @@ class Store:
                     task.due_date.isoformat() if task.due_date else None,
                     task.status,
                     task.goal_id,
+                    task.classification,
                 ),
             )
             return cursor.lastrowid
@@ -460,9 +462,9 @@ class Store:
     def update_task(self, task_id: int, **kwargs) -> bool:
         """Update task fields. Returns True if the task was found.
 
-        Allowed fields: title, description, priority, due_date, status, goal_id.
+        Allowed fields: title, description, priority, due_date, status, goal_id, classification.
         """
-        allowed = {"title", "description", "priority", "due_date", "status", "goal_id"}
+        allowed = {"title", "description", "priority", "due_date", "status", "goal_id", "classification"}
         fields = {k: v for k, v in kwargs.items() if k in allowed}
         if not fields:
             return False
@@ -491,6 +493,19 @@ class Store:
             ).fetchall()
             return [self._task_from_row(dict(r)) for r in rows]
 
+    def get_unclassified_tasks(self, limit: int = 30) -> list[Task]:
+        """Get pending/in_progress tasks that have not been classified yet."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM tasks
+                   WHERE status IN ('pending', 'in_progress')
+                     AND classification IS NULL
+                   ORDER BY created_at DESC
+                   LIMIT ?""",
+                (limit,),
+            ).fetchall()
+            return [self._task_from_row(dict(r)) for r in rows]
+
     @staticmethod
     def _task_from_row(row: dict) -> Task:
         return Task(
@@ -503,6 +518,7 @@ class Store:
             due_date=datetime.fromisoformat(row["due_date"]) if row.get("due_date") else None,
             status=row["status"],
             goal_id=row.get("goal_id"),
+            classification=row.get("classification"),
             created_at=datetime.fromisoformat(row["created_at"]) if row.get("created_at") else None,
         )
 

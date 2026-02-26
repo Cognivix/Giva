@@ -81,10 +81,11 @@ struct TaskItem: Codable, Identifiable {
     let priority: String
     let dueDate: String?
     let status: String
+    let classification: String?
     let createdAt: String?
 
     enum CodingKeys: String, CodingKey {
-        case id, title, description, priority, status
+        case id, title, description, priority, status, classification
         case sourceType = "source_type"
         case sourceId = "source_id"
         case dueDate = "due_date"
@@ -460,9 +461,10 @@ struct GoalTaskItem: Codable, Identifiable {
     let priority: String
     let status: String
     let dueDate: String?
+    let classification: String?
 
     enum CodingKeys: String, CodingKey {
-        case id, title, priority, status
+        case id, title, priority, status, classification
         case dueDate = "due_date"
     }
 }

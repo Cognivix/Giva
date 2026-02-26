@@ -96,6 +96,58 @@ class TacticalPlan(BaseModel):
     search_queries: list[str] = Field(default_factory=list)
 
 
+class TaskClassification(str, Enum):
+    """Classification categories for the task review pipeline."""
+
+    autonomous = "autonomous"
+    needs_input = "needs_input"
+    user_only = "user_only"
+    project = "project"
+
+
+class DuplicateGroup(BaseModel):
+    """A group of semantically duplicate tasks to merge."""
+
+    canonical_id: int = Field(description="Task ID to keep as the canonical version")
+    duplicate_ids: list[int] = Field(default_factory=list)
+    merged_title: Optional[str] = Field(
+        default=None, description="Improved title for the canonical task, or null to keep as-is"
+    )
+    merged_description: Optional[str] = Field(
+        default=None, description="Combined description, or null to keep as-is"
+    )
+
+
+class DeduplicationResult(BaseModel):
+    """Result of semantic duplicate detection across tasks."""
+
+    groups: list[DuplicateGroup] = Field(default_factory=list)
+
+
+class ClassifiedTask(BaseModel):
+    """A single task's classification and routing metadata."""
+
+    task_id: int
+    classification: TaskClassification
+    reasoning: str = ""
+    suggested_agent: Optional[str] = Field(
+        default=None, description="Agent ID for autonomous tasks"
+    )
+    enrichment_query: Optional[str] = Field(
+        default=None, description="FTS search terms for context enrichment"
+    )
+    goal_title: Optional[str] = Field(
+        default=None, description="Goal title for project-class tasks"
+    )
+    goal_tier: str = Field(default="mid_term", description="Tier for upgraded goals")
+
+
+class TaskReviewResult(BaseModel):
+    """Result of the task classification step."""
+
+    tasks: list[ClassifiedTask] = Field(default_factory=list)
+
+
 class DailyReviewResult(BaseModel):
     """Structured daily review output."""
 

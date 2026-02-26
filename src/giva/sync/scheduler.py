@@ -265,6 +265,27 @@ class SyncScheduler:
         except Exception as e:
             log.error("Background task extraction error: %s", e)
 
+        # Review and classify unclassified pending tasks (power-gated)
+        if self.config.task_review.enabled:
+            heavy_skip = self._should_skip_heavy()
+            if heavy_skip:
+                log.info("Deferring task review: %s", heavy_skip)
+            else:
+                try:
+                    from giva.intelligence.task_review import review_pending_tasks
+
+                    with self._acquire_llm():
+                        review_count = review_pending_tasks(
+                            self.store,
+                            self.config,
+                            agent_queue=self._agent_queue,
+                            broadcast_fn=self._broadcast,
+                        )
+                    if review_count > 0:
+                        log.info("Task review: %d tasks classified", review_count)
+                except Exception as e:
+                    log.error("Background task review error: %s", e)
+
         # Update user profile from latest email patterns (may use LLM for topics)
         try:
             from giva.intelligence.profile import update_profile
