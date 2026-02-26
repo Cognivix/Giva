@@ -42,6 +42,7 @@ src/giva/
 │   ├── calendar.py     # EventKit (fast, needs TCC grant) or AppleScript fallback
 │   └── scheduler.py    # Background sync via threading.Timer
 ├── llm/
+│   ├── apple_adapter.py # Apple Foundation Model adapter (on-device ~3B)
 │   ├── engine.py       # MLX ModelManager: dual-model (assistant 30B + filter 8B)
 │   ├── prompts.py      # All prompt templates
 │   ├── structured.py   # Pydantic models for structured LLM output
@@ -143,7 +144,7 @@ tests/                  # pytest test suite mirroring src/ structure
 ├── test_agents/        # base, registry, router, queue, orchestrator, email_drafter, mcp_agent, web_orchestrator
 ├── test_sync/          # mail_sync, calendar, filter, scheduler
 ├── test_audio/         # tts, stt
-├── test_llm/           # prompts, structured
+├── test_llm/           # apple_adapter, prompts, structured
 └── test_utils/         # applescript, email_parser, recents
 
 scripts/                # One-shot utility scripts
@@ -165,6 +166,7 @@ The local LLM pipeline: model loading, prompt construction, structured output pa
 
 | File | Role |
 |---|---|
+| `src/giva/llm/apple_adapter.py` | Apple Foundation Model adapter: on-device ~3B model as filter option |
 | `src/giva/llm/engine.py` | MLX ModelManager: lazy dual-model loading, generate/stream, idle unload |
 | `src/giva/llm/prompts.py` | Every prompt template (chat, filter, onboarding, agents, goals, etc.) |
 | `src/giva/llm/structured.py` | Pydantic models for typed LLM output (intents, plans, profile updates) |
@@ -316,7 +318,7 @@ Test infrastructure across both Python and Swift.
 | `tests/test_agents/` | Base, registry, router, queue, orchestrator, email_drafter, MCP, web_orchestrator (13 files) |
 | `tests/test_sync/` | Mail sync, calendar, filter, scheduler (5 files) |
 | `tests/test_audio/` | TTS, STT (2 files) |
-| `tests/test_llm/` | Prompts, structured output (2 files) |
+| `tests/test_llm/` | Apple adapter, prompts, structured output (3 files) |
 | `tests/test_utils/` | AppleScript, email parser, recents (3 files) |
 | `tests/test_server.py`, `test_server_extended.py`, `test_server_vlm.py` | API endpoint tests |
 | `tests/test_cli.py` | CLI interaction tests |
@@ -360,6 +362,7 @@ Visual browser task execution via Chrome extension + VLM inference.
 - **Post-chat agents in goal chat**: The `/api/goals/{goal_id}/chat` endpoint runs the same post-chat agent pipeline as regular chat. The agent prompt includes the goal context and supports `create_objective` intents (auto-creating child goals with tier inferred from parent). Agent actions are broadcast via `agent_actions` SSE events.
 - **Task review & classification**: After task extraction, a background review pipeline runs: (0) **sanity checks** dismiss obviously stale tasks without LLM (expired deadlines, answered emails, past events), (1) **dedup** merges semantic duplicates via filter model, (2) **classify** assigns each task to one of five categories—`autonomous` (agent prepares, user confirms), `needs_input` (enriched with context), `user_only` (reminder context), `project` (upgraded to goal), `dismiss` (unnecessary/trivial)—via assistant model with review memory and dismissal history, (3) **route** each accordingly, (4) **learn** from dismissal patterns and persist LLM observations to `profile_data["task_review_patterns"]`. Power-gated: runs immediately in high-performance mode, deferred when battery/thermal-constrained. Unclassified tasks accumulate and are batch-processed on next eligible cycle.
 - **Source preservation in post-chat agent**: When the post-chat agent creates tasks from chat, `retrieve_context_sources()` extracts the email/event IDs from the query's retrieved context, and `_handle_create_task()` uses the most relevant source (email > event > chat) instead of defaulting to `source_type="chat", source_id=0`. This preserves the link between a task and the email or event being discussed.
+- **Apple Foundation Model as filter**: Setting `filter_model = "apple"` in config routes all filter model calls to Apple's on-device ~3B Foundation Model via `apple_fm_sdk` (Python SDK). This eliminates the need to download a separate HuggingFace filter model. The adapter translates chat-format messages to `(instructions, prompt)` pairs for the Apple API. Requires macOS 26+ with Apple Intelligence enabled. The SDK is optional — if unavailable, bootstrap logs a warning but doesn't fail. The `ModelManager` transparently routes `generate()` calls: Apple model ID → `AppleModelAdapter`, anything else → MLX `mlx-lm`.
 - **Dismissed task undo queue**: Dismissed tasks are soft-deleted (status → "dismissed") and retain `dismissal_reason` and `dismissed_at` metadata. All dismissal paths (sanity checks, LLM classification, duplicate merge, user action, goal upgrade) record a human-readable reason. The `TaskListView` shows a normally-hidden collapsible "Dismissed" section at the bottom; users can skim the title + reason and restore with a single click. API: `GET /api/tasks/dismissed`, `POST /api/tasks/{id}/restore`, `POST /api/tasks/{id}/dismiss`.
 - **VLM browser automation — agent chain decoupling**: The `WebOrchestratorAgent` runs synchronously within the agent queue (holds `_llm_lock` for planning), writes VLM subtasks to `vlm_task_queue` in SQLite, and returns immediately. The Chrome extension polls `/api/vlm/tasks/current` and drives the VLM execution loop asynchronously. VLM inference uses a separate `_vlm_lock` (not `_llm_lock`) so text LLM and VLM can coexist on Apple Silicon. Each subtask has a `sequence` number; the extension only sees the current (lowest-sequence queued/in_progress) subtask. When all subtasks for a `job_id` complete, the server broadcasts a `vlm_job_completed` SSE event.
 

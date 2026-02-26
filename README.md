@@ -10,7 +10,7 @@ All data stays on your device. No cloud APIs, no telemetry.
 
 - **Email sync & classification** — JXA-based Apple Mail integration with LLM-powered filtering (headers-only sync, lazy body fetching)
 - **Calendar sync** — EventKit (native) with AppleScript fallback
-- **Local LLM inference** — Dual-model architecture: large assistant (Qwen3-30B-A3B) for queries, small filter (Qwen3-8B) for classification. Models auto-recommended based on your hardware (chip, RAM, GPU cores) with live benchmark data
+- **Local LLM inference** — Dual-model architecture: large assistant (Qwen3-30B-A3B) for queries, small filter (Qwen3-8B) for classification. Models auto-recommended based on your hardware (chip, RAM, GPU cores) with live benchmark data. Optional: use Apple's on-device Foundation Model (~3B) as the filter model — no download required
 - **Goal tracking** — Hierarchical goals (long-term → mid-term → short-term) with strategy generation, objective decomposition, and daily reviews with reflection
 - **Task extraction & review** — Automatic task detection from emails, events, and chat. Background review pipeline: sanity checks (expired deadlines, answered emails, past events), semantic dedup, 5-way classification (autonomous, needs input, user-only, project, dismiss), and intelligent routing. Learns from user dismissal patterns and caches review memory for future cycles. Dismissed tasks are kept in a collapsible undo queue with reasons — restore with one click
 - **Pluggable agent framework** — Extensible agent system with protocol-based discovery, two-stage routing (keyword pre-filter → LLM classification), and a thread-safe priority queue. Built-in agents: orchestrator (multi-step planning), email drafter, and MCP server wrappers
@@ -126,7 +126,7 @@ Key environment overrides:
 | Variable | Description |
 |----------|-------------|
 | `GIVA_LLM_MODEL` | Assistant model (e.g., `mlx-community/Qwen3-30B-A3B-4bit`) |
-| `GIVA_LLM_FILTER_MODEL` | Filter model for email classification |
+| `GIVA_LLM_FILTER_MODEL` | Filter model for classification (or `"apple"` for on-device model) |
 | `GIVA_DATA_DIR` | Data directory (default: `~/.local/share/giva`) |
 | `GIVA_LOG_LEVEL` | Log level: `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 
@@ -150,6 +150,7 @@ src/giva/
 │   ├── calendar.py     # EventKit or AppleScript fallback
 │   └── scheduler.py    # Background sync via threading.Timer
 ├── llm/
+│   ├── apple_adapter.py # Apple Foundation Model adapter
 │   ├── engine.py       # MLX dual-model: assistant + filter
 │   ├── prompts.py      # All prompt templates
 │   ├── structured.py   # Pydantic models for structured output
@@ -227,7 +228,7 @@ docs/                   # Agent architecture + bootstrap design
 ### Key Design Decisions
 
 - **Local-only** — all data in SQLite at `~/.local/share/giva/giva.db`
-- **Dual LLM** — assistant model (30B+) for reasoning and synthesis; filter model (≤8B) for high-frequency classification, extraction, and structured JSON
+- **Dual LLM** — assistant model (30B+) for reasoning and synthesis; filter model (≤8B or Apple's on-device ~3B) for high-frequency classification, extraction, and structured JSON
 - **Lazy email bodies** — sync fetches headers; bodies fetched on-demand when the LLM needs them
 - **Budget-aware context** — token budget scales with model size (system 5%, query 5%, conversation 25%, retrieved 55%, headroom 10%). Auto-scales: ≤1B→2K, ≤8B→4K, ≤32B→8K, >32B→12K tokens
 - **Three-tier conversation memory** — Tier 1: active window (recent turns). Tier 2: session summary (compressed by filter model, resets daily). Tier 3: learned facts (permanent preferences, always in system prompt)
