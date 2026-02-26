@@ -235,6 +235,97 @@ struct GivaViewModelTests {
         #expect(vm.isLoadingTasks == false)
     }
 
+    // MARK: - Dismissed Tasks (Undo Queue)
+
+    @Test("loadDismissedTasks populates dismissedTasks from API")
+    func loadDismissedTasksSuccess() async {
+        let vm = GivaViewModel()
+        let mock = MockAPIService()
+        mock.getDismissedTasksResult = .success(DismissedTaskListResponse(
+            tasks: [
+                DismissedTaskItem(id: 1, title: "Old task",
+                                  dismissalReason: "Deadline has passed",
+                                  dismissedAt: "2026-02-25T10:00:00",
+                                  sourceType: "email", priority: "medium"),
+                DismissedTaskItem(id: 2, title: "Dupe",
+                                  dismissalReason: "Merged into #1",
+                                  dismissedAt: "2026-02-25T11:00:00",
+                                  sourceType: "event", priority: "low"),
+            ],
+            count: 2
+        ))
+        vm.apiService = mock
+
+        await vm.loadDismissedTasks()
+
+        #expect(vm.dismissedTasks.count == 2)
+        #expect(vm.dismissedTasks[0].title == "Old task")
+        #expect(vm.dismissedTasks[0].dismissalReason == "Deadline has passed")
+        #expect(mock.getDismissedTasksCallCount == 1)
+    }
+
+    @Test("loadDismissedTasks guards when no apiService")
+    func loadDismissedTasksNoApi() async {
+        let vm = GivaViewModel()
+        vm.apiService = nil
+
+        await vm.loadDismissedTasks()
+
+        #expect(vm.dismissedTasks.isEmpty)
+    }
+
+    @Test("restoreTask calls API and reloads both lists")
+    func restoreTaskSuccess() async {
+        let vm = GivaViewModel()
+        let mock = MockAPIService()
+        mock.restoreTaskResult = .success(RestoreTaskResponse(success: true, taskId: 5))
+        mock.getTasksResult = .success(TaskListResponse(tasks: [], count: 0))
+        mock.getDismissedTasksResult = .success(DismissedTaskListResponse(tasks: [], count: 0))
+        vm.apiService = mock
+
+        await vm.restoreTask(taskId: 5)
+
+        #expect(mock.restoreTaskCallCount == 1)
+        // loadTasks + loadDismissedTasks called after restore
+        #expect(mock.getTasksCallCount == 1)
+        #expect(mock.getDismissedTasksCallCount == 1)
+    }
+
+    @Test("restoreTask sets error on failure")
+    func restoreTaskFailure() async {
+        let vm = GivaViewModel()
+        let mock = MockAPIService()
+        mock.restoreTaskResult = .failure(NSError(domain: "Test", code: 404,
+                                                   userInfo: [NSLocalizedDescriptionKey: "Not found"]))
+        vm.apiService = mock
+
+        await vm.restoreTask(taskId: 99)
+
+        #expect(vm.errorMessage != nil)
+    }
+
+    @Test("updateTaskStatus with dismissed reloads dismissed tasks")
+    func dismissReloadsDismissedList() async {
+        let vm = GivaViewModel()
+        let mock = MockAPIService()
+        mock.updateTaskStatusResult = .success(
+            UpdateTaskStatusResponse(success: true, taskId: 1, status: "dismissed"))
+        mock.getTasksResult = .success(TaskListResponse(tasks: [], count: 0))
+        mock.getDismissedTasksResult = .success(DismissedTaskListResponse(tasks: [], count: 0))
+        vm.apiService = mock
+
+        await vm.updateTaskStatus(taskId: 1, status: "dismissed")
+
+        #expect(mock.updateTaskStatusCallCount == 1)
+        #expect(mock.getDismissedTasksCallCount == 1)
+    }
+
+    @Test("showDismissedTasks defaults to false")
+    func dismissedQueueHiddenByDefault() {
+        let vm = GivaViewModel()
+        #expect(vm.showDismissedTasks == false)
+    }
+
     // MARK: - Phase behavior
 
     @Test("All phases produce correct isChatEnabled")

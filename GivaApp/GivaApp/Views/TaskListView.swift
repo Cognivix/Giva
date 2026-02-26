@@ -18,7 +18,7 @@ struct TaskListView: View {
                         .foregroundColor(.secondary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if viewModel.tasks.isEmpty {
+            } else if viewModel.tasks.isEmpty && viewModel.dismissedTasks.isEmpty {
                 VStack(spacing: 12) {
                     Image(systemName: "checkmark.circle")
                         .font(.system(size: 32))
@@ -54,14 +54,120 @@ struct TaskListView: View {
                         }
                     }
                     .padding(8)
+
+                    // Dismissed tasks undo queue
+                    if !viewModel.dismissedTasks.isEmpty {
+                        DismissedTasksSection()
+                    }
                 }
             }
         }
         .onAppear {
-            Task { await viewModel.loadTasks() }
+            Task {
+                await viewModel.loadTasks()
+                await viewModel.loadDismissedTasks()
+            }
         }
     }
 }
+
+// MARK: - Dismissed Tasks Undo Queue
+
+struct DismissedTasksSection: View {
+    @Environment(GivaViewModel.self) private var viewModel
+
+    var body: some View {
+        @Bindable var vm = viewModel
+        VStack(spacing: 0) {
+            // Toggle header
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    vm.showDismissedTasks.toggle()
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: vm.showDismissedTasks
+                          ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundColor(.secondary)
+                    Text("Dismissed")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.secondary)
+                    Text("(\(viewModel.dismissedTasks.count))")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary.opacity(0.7))
+                    Spacer()
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 6)
+            }
+            .buttonStyle(.plain)
+
+            if vm.showDismissedTasks {
+                LazyVStack(spacing: 2) {
+                    ForEach(viewModel.dismissedTasks) { task in
+                        DismissedTaskRow(task: task, onRestore: {
+                            Task { await viewModel.restoreTask(taskId: task.id) }
+                        })
+                    }
+                }
+                .padding(.horizontal, 8)
+                .padding(.bottom, 8)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+    }
+}
+
+struct DismissedTaskRow: View {
+    let task: DismissedTaskItem
+    let onRestore: () -> Void
+
+    @State private var isHovering = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(task.title)
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .strikethrough(true, color: .secondary.opacity(0.4))
+
+                if !task.dismissalReason.isEmpty {
+                    Text(task.dismissalReason)
+                        .font(.system(size: 9))
+                        .foregroundColor(.secondary.opacity(0.6))
+                        .lineLimit(1)
+                }
+            }
+
+            Spacer()
+
+            if isHovering {
+                Button(action: onRestore) {
+                    Text("Restore")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.accentColor)
+                }
+                .buttonStyle(.plain)
+                .help("Restore this task")
+                .transition(.opacity)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(isHovering ? Color.primary.opacity(0.03) : Color.clear)
+        .cornerRadius(4)
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.15)) {
+                isHovering = hovering
+            }
+        }
+    }
+}
+
+// MARK: - Task Row
 
 struct TaskRow: View {
     let task: TaskItem
