@@ -445,6 +445,12 @@ of the codebase. They must stay accurate as the project evolves.
    *Voice / Audio* for the `_voice_lock`).
 3. **Test counts** — if test files are added/removed, update the parenthetical counts in
    topic 12 (*Testing*).
+4. **README.md** — as the final step, update `README.md` to reflect any changes. Keep the
+   README's Architecture tree, Features list, and Key Design Decisions consistent with
+   `CLAUDE.md`. The README is user-facing (concise, onboarding-oriented); `CLAUDE.md` is the
+   authoritative reference (exhaustive, AI-session-oriented). Don't duplicate every detail —
+   summarize new subsystems in Features, add new files to the Architecture tree, and add new
+   design decisions only when they affect how users understand or configure the system.
 
 **Rules:**
 - Keep tree entries alphabetically sorted within each directory level.
