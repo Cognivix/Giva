@@ -5,12 +5,14 @@ from pathlib import Path
 from giva.models import (
     _estimate_size_gb,
     _extract_keywords_from_benchmarks,
+    _get_recommendation_model,
     _heuristic_recommendation,
     _heuristic_vlm_recommendation,
     _parse_keyword_list,
     _parse_model_name,
     _parse_recommendation,
     _parse_vlm_recommendation,
+    discover_vlm_keywords,
     filter_compatible_models,
     is_model_setup_complete,
     recommend_vlm_model,
@@ -368,3 +370,56 @@ def test_save_model_choices_without_vlm(tmp_path, monkeypatch):
     assert "[llm]" in content
     # No [vlm] section when vlm_model is empty
     assert "[vlm]" not in content
+
+
+# --- Recommendation model selection ---
+
+
+def test_get_recommendation_model_no_config():
+    """Without config, should return DEFAULT_MODEL."""
+    result = _get_recommendation_model(None)
+    assert result == "mlx-community/Qwen3-8B-4bit"
+
+
+def test_get_recommendation_model_with_assistant(monkeypatch):
+    """When assistant model is downloaded, should prefer it."""
+    from types import SimpleNamespace
+
+    config = SimpleNamespace(
+        llm=SimpleNamespace(model="mlx-community/BigModel-30B-4bit", filter_model="small")
+    )
+    # Mock is_model_downloaded to return True for the assistant
+    monkeypatch.setattr(
+        "giva.models.is_model_downloaded", lambda mid: mid == "mlx-community/BigModel-30B-4bit"
+    )
+    result = _get_recommendation_model(config)
+    assert result == "mlx-community/BigModel-30B-4bit"
+
+
+def test_get_recommendation_model_assistant_not_downloaded(monkeypatch):
+    """When assistant model not downloaded, should fall back."""
+    from types import SimpleNamespace
+
+    config = SimpleNamespace(
+        llm=SimpleNamespace(model="mlx-community/BigModel-30B-4bit", filter_model="small-filter")
+    )
+    # Mock: assistant not downloaded, Apple not available
+    monkeypatch.setattr("giva.models.is_model_downloaded", lambda mid: False)
+    monkeypatch.setattr(
+        "giva.llm.apple_adapter.check_apple_model_availability",
+        lambda: (False, "not available"),
+    )
+    result = _get_recommendation_model(config)
+    assert result == "small-filter"
+
+
+# --- VLM keyword discovery ---
+
+
+def test_discover_vlm_keywords_fallback():
+    """Without LLM, should return fallback keywords."""
+    # No config → no LLM → fallback
+    keywords = discover_vlm_keywords(None)
+    assert isinstance(keywords, list)
+    assert len(keywords) > 0
+    assert "Qwen2.5-VL" in keywords

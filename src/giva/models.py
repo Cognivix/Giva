@@ -23,6 +23,42 @@ _CACHE_TTL_SECONDS = 24 * 3600  # 24 hours
 # Default model that fits any M-series Mac
 DEFAULT_MODEL = "mlx-community/Qwen3-8B-4bit"
 
+
+def _get_recommendation_model(config=None) -> str:
+    """Return the model ID to use for model recommendations.
+
+    Strategy:
+    1. If the assistant model is configured and downloaded → use it (most capable,
+       best for advising on model changes/upgrades in Settings).
+    2. Otherwise (bootstrap, first run) → use Apple Foundation Model (~3B) if
+       available on-device, smart enough for initial model selection.
+    3. Otherwise → fall back to configured filter model or DEFAULT_MODEL.
+    """
+    # Check if assistant model is available (Settings flow — post-bootstrap)
+    if config:
+        assistant = config.llm.model
+        if assistant:
+            try:
+                if is_model_downloaded(assistant):
+                    return assistant
+            except Exception:
+                pass
+
+    # Bootstrap flow — no assistant model yet, use Apple on-device model
+    try:
+        from giva.llm.apple_adapter import check_apple_model_availability
+
+        available, _ = check_apple_model_availability()
+        if available:
+            return "apple"
+    except Exception:
+        pass
+
+    # Final fallback
+    if config:
+        return config.llm.filter_model or DEFAULT_MODEL
+    return DEFAULT_MODEL
+
 # Prompt for LLM-based model recommendation
 _RECOMMEND_PROMPT = """You are a system configuration assistant. Pick the best MLX models for a \
 personal assistant app on Apple Silicon.
@@ -209,9 +245,7 @@ def discover_benchmark_keywords(config=None) -> list[str]:
     try:
         from giva.llm.engine import manager
 
-        model_id = DEFAULT_MODEL
-        if config:
-            model_id = config.llm.filter_model or DEFAULT_MODEL
+        model_id = _get_recommendation_model(config)
 
         prompt = _BENCHMARK_ANALYSIS_PROMPT.format(benchmark_data=benchmark_text)
 
@@ -251,9 +285,7 @@ def refine_model_search(
     try:
         from giva.llm.engine import manager
 
-        model_id = DEFAULT_MODEL
-        if config:
-            model_id = config.llm.filter_model or DEFAULT_MODEL
+        model_id = _get_recommendation_model(config)
 
         # Summarize what we found
         found_families = set()
@@ -398,9 +430,7 @@ def recommend_models(
     try:
         from giva.llm.engine import manager
 
-        model_id = DEFAULT_MODEL
-        if config:
-            model_id = config.llm.filter_model or DEFAULT_MODEL
+        model_id = _get_recommendation_model(config)
 
         response = manager.generate(
             model_id,
@@ -684,32 +714,171 @@ def is_model_setup_complete() -> bool:
 
 _VLM_CACHE_KEY = "vlm_model_cache.json"
 
-# Prompt for LLM-based VLM model recommendation
+_FALLBACK_VLM_KEYWORDS = [
+    "Qwen2.5-VL", "Qwen2-VL", "Qwen-VL", "InternVL",
+    "Pixtral", "Llama-3.2-Vision", "Phi-3.5-vision",
+    "Gemma-3-vision", "SmolVLM",
+]
+
+# Prompt for LLM-powered VLM keyword discovery
+_VLM_KEYWORD_PROMPT = """You are an AI vision expert. I need search keywords to find the best \
+open-source Vision-Language Models (VLMs) on HuggingFace's mlx-community repository.
+
+These VLMs must be able to understand screenshots and web pages for browser automation tasks: \
+clicking buttons, reading text on screen, filling forms, navigating websites.
+
+Key capabilities needed:
+- OCR and text recognition from screenshots
+- UI element detection (buttons, links, inputs)
+- Spatial reasoning (coordinates of elements)
+- Instruction following with structured output (JSON)
+
+Return ONLY a JSON array of 8-12 model family search keywords for MLX-quantized VLMs.
+Example: ["Qwen2.5-VL", "InternVL3", "Llama-4-Vision", "Phi-4-vision"]
+/no_think"""
+
+# Prompt for iterative VLM search refinement
+_VLM_REFINE_PROMPT = """I searched HuggingFace (mlx-community) for Vision-Language Models and found \
+these VLM families:
+
+Found: {found_families}
+
+Missing (no MLX version found): {missing_keywords}
+
+Are there additional VLM model families I should search for? Consider:
+- Newer VLM releases that might have MLX versions
+- Alternative names or aliases for VLM families
+- Models specifically good at screenshot understanding or UI interaction
+
+Return ONLY a JSON array of additional search keywords, or [] if done. /no_think"""
+
+# Prompt for LLM-based VLM model recommendation (enriched)
 _VLM_RECOMMEND_PROMPT = """Pick the best MLX Vision-Language Model for browser automation on Apple Silicon.
 
-Hardware: {chip}, {ram_gb}GB unified memory. Budget remaining after text models: {vlm_budget_gb:.1f}GB.
+Hardware: {chip}, {ram_gb}GB unified memory.
+Budget remaining after text models: {vlm_budget_gb:.1f}GB.
 
 VLM CANDIDATES (all fit in your remaining budget):
 {vlm_table}
 
-Rules:
-1. Pick the model that best balances visual understanding quality with size constraints.
-2. Prefer Qwen2.5-VL family (best open VLM for structured output).
-3. Prefer 4-bit quantization for efficiency.
-4. Pick the largest model that fits comfortably in the remaining budget.
-5. Avoid models smaller than 3B params (insufficient for browser task reasoning).
+The VLM needs to:
+1. Analyze browser screenshots and identify UI elements (buttons, links, text fields)
+2. Output structured JSON with action type and coordinates
+3. Understand web page layout and spatial relationships
+4. Follow multi-step instructions for web navigation
+
+Selection criteria (in priority order):
+1. **Visual understanding quality** — prefer models with strong OCR, UI detection, and spatial reasoning. \
+Qwen2.5-VL and InternVL families are proven for structured web tasks.
+2. **Structured output reliability** — the model must reliably produce JSON with coordinates. \
+Instruct/chat-tuned variants are strongly preferred.
+3. **Size vs quality tradeoff** — pick the largest model that fits comfortably (leave ≥1GB headroom). \
+Bigger models have better visual understanding, but must fit in the remaining budget.
+4. **Quantization** — prefer 4-bit quantization for best speed/quality on Apple Silicon.
+5. **Minimum viable size** — avoid models under 3B params (insufficient reasoning for multi-step web tasks).
+6. **Community adoption** — higher download counts indicate better testing and fewer edge-case failures.
 
 Respond with ONLY JSON:
 {{"vlm_model": "exact_model_id", "reasoning": "why"}} /no_think"""
 
 
+def discover_vlm_keywords(config=None) -> list[str]:
+    """Use the recommendation model to suggest VLM family keywords for HuggingFace search.
+
+    Returns a list of search keywords like ["Qwen2.5-VL", "InternVL3", "Llama-4-Vision"].
+    Falls back to static list if model is unavailable.
+    """
+    try:
+        from giva.llm.engine import manager
+
+        model_id = _get_recommendation_model(config)
+
+        response = manager.generate(
+            model_id,
+            [
+                {"role": "system", "content": "You are an AI vision expert."},
+                {"role": "user", "content": _VLM_KEYWORD_PROMPT},
+            ],
+            max_tokens=200,
+            temp=0.1,
+            top_p=0.95,
+        )
+        keywords = _parse_keyword_list(response)
+        if keywords:
+            log.info("LLM suggested VLM keywords: %s", keywords)
+            return keywords
+    except Exception as e:
+        log.warning("LLM VLM keyword discovery failed: %s", e)
+
+    return _FALLBACK_VLM_KEYWORDS[:]
+
+
+def refine_vlm_search(
+    initial_keywords: list[str],
+    found_models: list[dict],
+    config=None,
+) -> list[str]:
+    """Let the recommendation model review VLM search results and suggest more keywords.
+
+    Returns additional keywords to search, or empty list if search is complete.
+    """
+    try:
+        from giva.llm.engine import manager
+
+        model_id = _get_recommendation_model(config)
+
+        # Summarize found families
+        found_families = set()
+        for m in found_models:
+            parts = m["model_id"].split("/")[-1].split("-")
+            if parts:
+                found_families.add(parts[0])
+
+        found_summary = ", ".join(sorted(found_families)[:20])
+
+        found_lower = {m["model_id"].lower() for m in found_models}
+        missing = [
+            kw for kw in initial_keywords
+            if not any(kw.lower() in mid for mid in found_lower)
+        ]
+
+        prompt = _VLM_REFINE_PROMPT.format(
+            found_families=found_summary or "None",
+            missing_keywords=", ".join(missing) if missing else "None (all found)",
+        )
+
+        response = manager.generate(
+            model_id,
+            [
+                {"role": "system", "content": "You are an AI vision expert."},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=200,
+            temp=0.1,
+            top_p=0.95,
+        )
+        extra = _parse_keyword_list(response)
+        if extra:
+            log.info("LLM suggested additional VLM keywords: %s", extra)
+            return extra
+    except Exception as e:
+        log.warning("LLM VLM refinement failed: %s", e)
+
+    return []
+
+
 def list_mlx_vlm_models(
     cache_dir: Optional[Path] = None,
+    extra_keywords: Optional[list[str]] = None,
 ) -> list[dict]:
     """Query HuggingFace Hub for MLX vision-language models.
 
     Searches mlx-community for VLM models (image-text-to-text pipeline)
     and also searches by keyword for known VLM families.
+
+    Args:
+        cache_dir: Override cache directory.
+        extra_keywords: Additional VLM family names to search for (e.g. LLM-suggested).
 
     Returns a list of dicts with keys: model_id, size_gb, params, quant, downloads.
     Results are cached for 24h alongside text model cache.
@@ -757,12 +926,8 @@ def list_mlx_vlm_models(
     except Exception:
         pass
 
-    # Search 2: keyword searches for known VLM families
-    vlm_keywords = [
-        "Qwen2.5-VL", "Qwen2-VL", "Qwen-VL", "InternVL",
-        "Pixtral", "Llama-3.2-Vision", "Phi-3.5-vision",
-        "Gemma-3-vision", "SmolVLM",
-    ]
+    # Search 2: keyword searches (LLM-suggested + fallback)
+    vlm_keywords = list(extra_keywords or _FALLBACK_VLM_KEYWORDS)
     for keyword in vlm_keywords:
         try:
             _collect(api.list_models(
@@ -791,6 +956,7 @@ def recommend_vlm_model(
 ) -> dict:
     """Recommend the best VLM model for the user's hardware.
 
+    Uses the Apple Foundation Model (when available) for smarter recommendations.
     Takes into account the space already consumed by text models so the
     VLM model fits in remaining memory.
 
@@ -814,7 +980,7 @@ def recommend_vlm_model(
             "reasoning": "No VLM model fits in remaining memory budget.",
         }
 
-    # Build table for the prompt
+    # Build table for the prompt — include download counts for popularity signal
     vlm_lines = []
     for m in candidates[:15]:
         vlm_lines.append(
@@ -823,13 +989,11 @@ def recommend_vlm_model(
         )
     vlm_table = "\n".join(vlm_lines) if vlm_lines else "None found."
 
-    # Try LLM recommendation
+    # Try LLM recommendation (Apple model preferred for smarter analysis)
     try:
         from giva.llm.engine import manager
 
-        model_id = DEFAULT_MODEL
-        if config:
-            model_id = config.llm.filter_model or DEFAULT_MODEL
+        model_id = _get_recommendation_model(config)
 
         prompt = _VLM_RECOMMEND_PROMPT.format(
             chip=hardware_info.get("chip", "Unknown"),
@@ -844,7 +1008,7 @@ def recommend_vlm_model(
                 {"role": "system", "content": "You are a system configuration assistant."},
                 {"role": "user", "content": prompt},
             ],
-            max_tokens=200,
+            max_tokens=300,
             temp=0.1,
             top_p=0.95,
         )

@@ -237,8 +237,8 @@ docs/                   # Agent architecture + bootstrap design
 - **Pluggable agents** — protocol-based discovery with two-stage routing. New agents register by dropping a module into `giva/agents/`. Filter model for classification agents, assistant model for synthesis agents
 - **Power-aware scheduling** — sync defers on low battery (≤50%) or thermal pressure (≥ serious). Models auto-unload after configurable idle timeout
 - **Goal-scoped conversations** — conversations table has nullable `goal_id`; global and goal chat are cleanly separated in the DB and UI
-- **VLM agent chain decoupling** — WebOrchestratorAgent plans and writes VLM subtasks to SQLite, then returns immediately. Chrome extension polls and drives VLM execution asynchronously. Separate `_vlm_lock` for VLM inference keeps text LLM unblocked
-- **VLM model selection** — VLM model discovery, recommendation, and download are integrated into bootstrap and Settings. Models are filtered to only show MLX VLM models that fit in remaining memory after text models are loaded. Heuristic and LLM-based recommendation prefers Qwen2.5-VL family with 4-bit quantization
+- **VLM agent chain decoupling** — WebOrchestratorAgent plans and writes VLM subtasks to SQLite, then returns immediately. Chrome extension polls and drives VLM execution asynchronously. All model operations serialized via a single lock to prevent concurrent loading
+- **VLM model selection** — VLM model discovery uses LLM-powered keyword search and iterative refinement (same multi-phase approach as text models). Recommendations use the assistant model (Settings) or Apple Foundation Model (bootstrap) for intelligent selection. Models are filtered to only show MLX VLM models that fit in remaining memory after text models are loaded
 
 ## Development
 

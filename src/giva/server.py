@@ -59,14 +59,12 @@ def _get_git_commit() -> str:
 # Resolved once at import time so it's fast on every health check
 _GIT_COMMIT = _get_git_commit()
 
-# Lock to serialize all LLM calls (MLX ModelManager is not thread-safe)
+# Lock to serialize all model calls — text LLM, VLM, and recommendations.
+# Only one model operation at a time (MLX is not thread-safe).
 _llm_lock = threading.Lock()
 
 # Separate lock for voice models (TTS/STT use different MLX models)
 _voice_lock = threading.Lock()
-
-# Separate lock for VLM inference (mlx-vlm, not thread-safe)
-_vlm_lock = threading.Lock()
 
 # Cached STT engine singleton (lazy-initialised, protected by _voice_lock)
 _stt_engine = None
@@ -2128,7 +2126,7 @@ async def vlm_analyze(body: VlmAnalyzeRequest, request: Request):
     def _infer():
         from giva.llm.vlm import run_vlm_inference
 
-        with _vlm_lock:
+        with _llm_lock:
             return run_vlm_inference(body.screenshot_b64, task.objective)
 
     action = await loop.run_in_executor(None, _infer)
@@ -2485,6 +2483,7 @@ async def models_available(request: Request) -> AvailableModelsResponse:
         from giva.hardware import get_hardware_info, max_model_size_gb
         from giva.models import (
             discover_benchmark_keywords,
+            discover_vlm_keywords,
             filter_compatible_models,
             get_all_cached_model_ids,
             list_mlx_models,
@@ -2492,6 +2491,7 @@ async def models_available(request: Request) -> AvailableModelsResponse:
             recommend_models,
             recommend_vlm_model,
             refine_model_search,
+            refine_vlm_search,
         )
 
         hw = get_hardware_info()
@@ -2526,8 +2526,23 @@ async def models_available(request: Request) -> AvailableModelsResponse:
         with _llm_lock:
             rec = recommend_models(hw, compatible, config)
 
-        # Phase 5: Discover VLM models (memory-constrained to remaining budget)
-        vlm_all = list_mlx_vlm_models(cache_dir=config.data_dir)
+        # Phase 5: Discover VLM models — LLM-powered keyword discovery + refinement
+        with _llm_lock:
+            vlm_keywords = discover_vlm_keywords(config)
+
+        vlm_all = list_mlx_vlm_models(
+            cache_dir=config.data_dir, extra_keywords=vlm_keywords,
+        )
+
+        # Phase 5b: Let LLM review VLM results and suggest more keywords
+        with _llm_lock:
+            extra_vlm = refine_vlm_search(vlm_keywords, vlm_all, config)
+        if extra_vlm:
+            vlm_all = list_mlx_vlm_models(
+                cache_dir=config.data_dir,
+                extra_keywords=vlm_keywords + extra_vlm,
+            )
+
         vlm_compatible = filter_compatible_models(vlm_all, max_size)
 
         # Get sizes of recommended text models for VLM budget calculation

@@ -11,7 +11,8 @@ execution loop asynchronously.
 
 Lock discipline:
     model_tier="assistant" so the server holds _llm_lock during execute().
-    The agent releases the lock by returning; VLM execution uses _vlm_lock.
+    The agent releases the lock by returning; VLM execution also uses _llm_lock
+    (all model operations are serialized via a single lock).
 """
 
 from __future__ import annotations
