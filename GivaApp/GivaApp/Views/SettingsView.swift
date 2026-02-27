@@ -104,6 +104,10 @@ struct SettingsView: View {
             profileTab
                 .tabItem { Label("Profile", systemImage: "person.circle") }
                 .tag(SettingsTab.profile)
+
+            shortcutsTab
+                .tabItem { Label("Shortcuts", systemImage: "keyboard") }
+                .tag(SettingsTab.shortcuts)
         }
         .frame(width: 560, height: 460)
     }
@@ -564,6 +568,51 @@ struct SettingsView: View {
             }
         }
         .task { await viewModel.loadProfile() }
+    }
+
+    // MARK: - Shortcuts Tab
+
+    private var shortcutsTab: some View {
+        Form {
+            Section {
+                shortcutRow("New Chat", shortcut: "⌘N")
+                shortcutRow("Settings", shortcut: "⌘,")
+                shortcutRow("Quick Drop", shortcut: "⌥Space")
+            } header: {
+                Label("Global", systemImage: "globe")
+            } footer: {
+                Text("Quick Drop works from any app when Accessibility permission is granted.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
+                shortcutRow("Send Message", shortcut: "⏎")
+                shortcutRow("Stop Generating", shortcut: "Esc")
+            } header: {
+                Label("Chat", systemImage: "bubble.left.and.text.bubble.right")
+            }
+
+            Section {
+                shortcutRow("Send in Background", shortcut: "⏎")
+                shortcutRow("Open in Full Chat", shortcut: "⌘⏎")
+                shortcutRow("Dismiss", shortcut: "Esc")
+            } header: {
+                Label("Quick Drop", systemImage: "sparkle")
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    private func shortcutRow(_ action: String, shortcut: String) -> some View {
+        LabeledContent(action) {
+            Text(shortcut)
+                .font(.system(size: 12, design: .rounded).weight(.medium))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 5))
+                .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.secondary.opacity(0.3), lineWidth: 0.5))
+        }
     }
 
     // MARK: - Bottom Bar (Save / Revert)
