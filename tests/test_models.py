@@ -5,12 +5,17 @@ from pathlib import Path
 from giva.models import (
     _estimate_size_gb,
     _extract_keywords_from_benchmarks,
+    _get_recommendation_model,
     _heuristic_recommendation,
+    _heuristic_vlm_recommendation,
     _parse_keyword_list,
     _parse_model_name,
     _parse_recommendation,
+    _parse_vlm_recommendation,
+    discover_vlm_keywords,
     filter_compatible_models,
     is_model_setup_complete,
+    recommend_vlm_model,
 )
 
 
@@ -238,3 +243,183 @@ def test_is_model_setup_complete_false_no_file(tmp_path, monkeypatch):
     # Without monkeypatching the internal Path, we test the logic
     assert is_model_setup_complete() is True or is_model_setup_complete() is False
     # This test mainly verifies no crash occurs
+
+
+# --- VLM recommendation parsing ---
+
+
+def test_parse_vlm_recommendation_valid():
+    response = '{"vlm_model": "mlx-community/Qwen2.5-VL-7B-4bit", "reasoning": "good fit"}'
+    result = _parse_vlm_recommendation(response)
+    assert result is not None
+    assert result["vlm_model"] == "mlx-community/Qwen2.5-VL-7B-4bit"
+    assert "good fit" in result["reasoning"]
+
+
+def test_parse_vlm_recommendation_with_markdown():
+    response = '```json\n{"vlm_model": "mlx-community/Qwen2.5-VL-3B-4bit", "reasoning": "ok"}\n```'
+    result = _parse_vlm_recommendation(response)
+    assert result is not None
+    assert result["vlm_model"] == "mlx-community/Qwen2.5-VL-3B-4bit"
+
+
+def test_parse_vlm_recommendation_invalid():
+    result = _parse_vlm_recommendation("no json here")
+    assert result is None
+
+
+# --- VLM heuristic recommendation ---
+
+
+def test_heuristic_vlm_prefers_qwen25vl():
+    """Should prefer Qwen2.5-VL family over others."""
+    candidates = [
+        {"model_id": "mlx-community/InternVL2-8B-4bit", "size_gb": 4.5, "params": "8B", "quant": "4bit", "downloads": 200},
+        {"model_id": "mlx-community/Qwen2.5-VL-7B-Instruct-4bit", "size_gb": 4.2, "params": "7B", "quant": "4bit", "downloads": 150},
+        {"model_id": "mlx-community/SmolVLM-3B-4bit", "size_gb": 1.5, "params": "3B", "quant": "4bit", "downloads": 50},
+    ]
+    result = _heuristic_vlm_recommendation(candidates)
+    assert "Qwen2.5-VL" in result["vlm_model"]
+
+
+def test_heuristic_vlm_prefers_larger():
+    """Among same family, should prefer larger models."""
+    candidates = [
+        {"model_id": "mlx-community/Qwen2.5-VL-3B-4bit", "size_gb": 2.0, "params": "3B", "quant": "4bit", "downloads": 100},
+        {"model_id": "mlx-community/Qwen2.5-VL-7B-Instruct-4bit", "size_gb": 4.2, "params": "7B", "quant": "4bit", "downloads": 100},
+    ]
+    result = _heuristic_vlm_recommendation(candidates)
+    assert "7B" in result["vlm_model"]
+
+
+def test_heuristic_vlm_penalizes_tiny():
+    """Should not pick very small models (< 3B)."""
+    candidates = [
+        {"model_id": "mlx-community/TinyVLM-1B-4bit", "size_gb": 0.5, "params": "1B", "quant": "4bit", "downloads": 500},
+        {"model_id": "mlx-community/Qwen2.5-VL-3B-4bit", "size_gb": 2.0, "params": "3B", "quant": "4bit", "downloads": 50},
+    ]
+    result = _heuristic_vlm_recommendation(candidates)
+    assert "3B" in result["vlm_model"]
+
+
+# --- VLM model recommendation (full) ---
+
+
+def test_recommend_vlm_model_no_candidates():
+    """Should return empty model when no candidates fit."""
+    hw = {"chip": "M1", "ram_gb": 8, "gpu_cores": 8}
+    result = recommend_vlm_model(
+        hw, [], assistant_size_gb=5.0, filter_size_gb=3.0,
+    )
+    assert result["vlm_model"] == ""
+    assert "No VLM model fits" in result["reasoning"]
+
+
+def test_recommend_vlm_model_budget_filtering():
+    """Should filter VLM models by remaining memory budget."""
+    hw = {"chip": "M1 Pro", "ram_gb": 16, "gpu_cores": 16}
+    vlm_models = [
+        {"model_id": "vlm-small", "size_gb": 2.0, "params": "3B", "quant": "4bit", "downloads": 100},
+        {"model_id": "vlm-huge", "size_gb": 30.0, "params": "70B", "quant": "4bit", "downloads": 50},
+    ]
+    # With 16GB RAM, budget = 12 (75%), minus 8+3 text models = 1GB remaining
+    # Only vlm-small (2GB) should fit... actually budget = 12 - 8 - 3 = 1, so none fits
+    # Let's use smaller text models
+    result = recommend_vlm_model(
+        hw, vlm_models, assistant_size_gb=5.0, filter_size_gb=2.0,
+    )
+    # Budget = 12 - 5 - 2 = 5 GB, vlm-small (2GB) fits, vlm-huge doesn't
+    assert result["vlm_model"] == "vlm-small"
+
+
+# --- VLM config persistence ---
+
+
+def test_save_model_choices_with_vlm(tmp_path, monkeypatch):
+    """save_model_choices with vlm_model should write [vlm] section."""
+    config_path = tmp_path / "config.toml"
+    monkeypatch.setattr("giva.config._USER_CONFIG", config_path)
+
+    from giva.models import save_model_choices
+
+    save_model_choices(
+        assistant="mlx-community/Test-30B-4bit",
+        filter_model="mlx-community/Test-8B-4bit",
+        vlm_model="mlx-community/Qwen2.5-VL-7B-4bit",
+    )
+
+    content = config_path.read_text()
+    assert "mlx-community/Qwen2.5-VL-7B-4bit" in content
+    assert "[vlm]" in content
+    assert 'enabled = true' in content
+
+
+def test_save_model_choices_without_vlm(tmp_path, monkeypatch):
+    """save_model_choices without vlm_model should not create [vlm] section."""
+    config_path = tmp_path / "config.toml"
+    monkeypatch.setattr("giva.config._USER_CONFIG", config_path)
+
+    from giva.models import save_model_choices
+
+    save_model_choices(
+        assistant="mlx-community/Test-30B-4bit",
+        filter_model="mlx-community/Test-8B-4bit",
+    )
+
+    content = config_path.read_text()
+    assert "[llm]" in content
+    # No [vlm] section when vlm_model is empty
+    assert "[vlm]" not in content
+
+
+# --- Recommendation model selection ---
+
+
+def test_get_recommendation_model_no_config():
+    """Without config, should return DEFAULT_MODEL."""
+    result = _get_recommendation_model(None)
+    assert result == "mlx-community/Qwen3-8B-4bit"
+
+
+def test_get_recommendation_model_with_assistant(monkeypatch):
+    """When assistant model is downloaded, should prefer it."""
+    from types import SimpleNamespace
+
+    config = SimpleNamespace(
+        llm=SimpleNamespace(model="mlx-community/BigModel-30B-4bit", filter_model="small")
+    )
+    # Mock is_model_downloaded to return True for the assistant
+    monkeypatch.setattr(
+        "giva.models.is_model_downloaded", lambda mid: mid == "mlx-community/BigModel-30B-4bit"
+    )
+    result = _get_recommendation_model(config)
+    assert result == "mlx-community/BigModel-30B-4bit"
+
+
+def test_get_recommendation_model_assistant_not_downloaded(monkeypatch):
+    """When assistant model not downloaded, should fall back."""
+    from types import SimpleNamespace
+
+    config = SimpleNamespace(
+        llm=SimpleNamespace(model="mlx-community/BigModel-30B-4bit", filter_model="small-filter")
+    )
+    # Mock: assistant not downloaded, Apple not available
+    monkeypatch.setattr("giva.models.is_model_downloaded", lambda mid: False)
+    monkeypatch.setattr(
+        "giva.llm.apple_adapter.check_apple_model_availability",
+        lambda: (False, "not available"),
+    )
+    result = _get_recommendation_model(config)
+    assert result == "small-filter"
+
+
+# --- VLM keyword discovery ---
+
+
+def test_discover_vlm_keywords_fallback():
+    """Without LLM, should return fallback keywords."""
+    # No config → no LLM → fallback
+    keywords = discover_vlm_keywords(None)
+    assert isinstance(keywords, list)
+    assert len(keywords) > 0
+    assert "Qwen2.5-VL" in keywords

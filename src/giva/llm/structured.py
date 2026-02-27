@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -216,3 +216,50 @@ class SubTaskQA(BaseModel):
         default=None,
         description="Modified query for a retry attempt, or null if not needed",
     )
+
+
+# --- VLM Browser Automation ---
+
+
+class VlmAction(BaseModel):
+    """Structured output from VLM screenshot analysis."""
+
+    action_type: Literal["click", "type", "scroll", "navigate", "done", "fail"] = Field(
+        description="The browser action to perform"
+    )
+    coordinates: Optional[list[int]] = Field(
+        default=None, description="[x, y] pixel coordinates for click actions"
+    )
+    text_to_type: Optional[str] = Field(
+        default=None, description="Text to input for type actions"
+    )
+    scroll_amount: Optional[int] = Field(
+        default=None, description="Pixels to scroll (positive=down) for scroll actions"
+    )
+    url: Optional[str] = Field(
+        default=None, description="URL to navigate to for navigate actions"
+    )
+    reasoning: str = Field(
+        default="", description="Why this action was chosen"
+    )
+    summary: Optional[str] = Field(
+        default=None, description="Final report (only for done/fail actions)"
+    )
+
+
+class WebPlanSubtask(BaseModel):
+    """A single subtask in a web orchestrator plan."""
+
+    objective: str = Field(description="What this subtask should accomplish visually")
+    target_url: str = Field(description="URL to navigate to for this subtask")
+    expected_outcome: str = Field(
+        default="", description="What success looks like for this step"
+    )
+
+
+class WebPlan(BaseModel):
+    """LLM-generated plan for decomposing a web task into VLM subtasks."""
+
+    goal: str = Field(description="One-sentence restatement of the user's web task")
+    reasoning: str = Field(default="", description="Brief explanation of the plan")
+    subtasks: list[WebPlanSubtask] = Field(default_factory=list)

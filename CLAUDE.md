@@ -34,8 +34,8 @@ src/giva/
 ├── hardware.py         # Mac hardware detection (chip, RAM, GPU cores) for model sizing
 ├── benchmarks.py       # Live LLM benchmark fetching (Open LLM Leaderboard, LMArena)
 ├── db/
-│   ├── models.py       # Dataclasses: Email, Event, Task, UserProfile, Goal, GoalStrategy
-│   ├── store.py        # SQLite + FTS5 data layer (WAL mode, schema v8)
+│   ├── models.py       # Dataclasses: Email, Event, Task, UserProfile, Goal, VlmTask
+│   ├── store.py        # SQLite + FTS5 data layer (WAL mode, schema v9)
 │   └── migrations.py   # Schema versioning + ALTER migrations
 ├── sync/
 │   ├── mail.py         # Apple Mail sync via JXA, chunked headers + LLM filter
@@ -45,7 +45,8 @@ src/giva/
 │   ├── apple_adapter.py # Apple Foundation Model adapter (on-device ~3B)
 │   ├── engine.py       # MLX ModelManager: dual-model (assistant 30B + filter 8B)
 │   ├── prompts.py      # All prompt templates
-│   └── structured.py   # Pydantic models for structured LLM output
+│   ├── structured.py   # Pydantic models for structured LLM output
+│   └── vlm.py          # VLM inference placeholder (mlx-vlm integration)
 ├── intelligence/
 │   ├── queries.py      # NL query → FTS5 context retrieval → streamed LLM response
 │   ├── tasks.py        # Task extraction from emails/events via LLM
@@ -71,11 +72,14 @@ src/giva/
 │   ├── email_drafter/
 │   │   ├── agent.py    # EmailDrafterAgent: drafts emails using assistant model + history
 │   │   └── prompts.py  # Email drafting prompt templates
-│   └── mcp_agent/
-│       ├── agent.py    # MCPAgent: wraps MCP servers as Giva agents (no LLM)
-│       ├── config.py   # MCPServerConfig: parsed MCP server definitions
-│       ├── lifecycle.py # MCPConnection: stdio/SSE process management
-│       └── _compat.py  # MCP SDK version compatibility shim
+│   ├── mcp_agent/
+│   │   ├── agent.py    # MCPAgent: wraps MCP servers as Giva agents (no LLM)
+│   │   ├── config.py   # MCPServerConfig: parsed MCP server definitions
+│   │   ├── lifecycle.py # MCPConnection: stdio/SSE process management
+│   │   └── _compat.py  # MCP SDK version compatibility shim
+│   └── web_orchestrator/
+│       ├── agent.py    # WebOrchestratorAgent: plan → write VLM subtasks → return
+│       └── prompts.py  # Web task decomposition prompt templates
 ├── audio/
 │   ├── tts.py          # Qwen3-TTS via mlx-audio, per-sentence synthesis
 │   ├── stt.py          # Lightning Whisper MLX speech-to-text
@@ -125,13 +129,19 @@ GivaApp/                        # SwiftUI macOS app (Xcode project)
     ├── GivaViewModelTests.swift
     └── GoalsViewModelTests.swift
 
+extensions/                     # Browser extensions (outside Python src)
+└── chrome-vlm-bridge/
+    ├── manifest.json           # Manifest V3: permissions, service worker
+    ├── background.js           # Polling loop + screenshot + VLM action dispatch
+    └── content.js              # DOM action executor (click, type, scroll)
+
 tests/                  # pytest test suite mirroring src/ structure
 ├── conftest.py         # Shared fixtures: tmp_db, config
-├── test_cli.py, test_server.py, test_server_extended.py
+├── test_cli.py, test_server.py, test_server_extended.py, test_server_vlm.py
 ├── test_models.py, test_benchmarks.py, test_hardware.py
-├── test_db/            # store, config, migrations, models, goals
+├── test_db/            # store, config, migrations, models, goals, vlm_tasks
 ├── test_intelligence/  # agents, context, goals, onboarding, profile, queries, tasks, task_review, mcp_observations
-├── test_agents/        # base, registry, router, queue, orchestrator, email_drafter, mcp_agent
+├── test_agents/        # base, registry, router, queue, orchestrator, email_drafter, mcp_agent, web_orchestrator
 ├── test_sync/          # mail_sync, calendar, filter, scheduler
 ├── test_audio/         # tts, stt
 ├── test_llm/           # apple_adapter, prompts, structured
@@ -160,6 +170,7 @@ The local LLM pipeline: model loading, prompt construction, structured output pa
 | `src/giva/llm/engine.py` | MLX ModelManager: lazy dual-model loading, generate/stream, idle unload |
 | `src/giva/llm/prompts.py` | Every prompt template (chat, filter, onboarding, agents, goals, etc.) |
 | `src/giva/llm/structured.py` | Pydantic models for typed LLM output (intents, plans, profile updates) |
+| `src/giva/llm/vlm.py` | VLM inference placeholder for mlx-vlm screenshot analysis |
 | `src/giva/intelligence/context.py` | Budget-aware context assembly: slot allocation, conversation memory tiers |
 | `config.default.toml` `[llm]` | Model IDs, max tokens, temperature, context budget |
 
@@ -180,8 +191,8 @@ SQLite storage, schema management, and data type definitions.
 
 | File | Role |
 |---|---|
-| `src/giva/db/store.py` | SQLite + FTS5 data layer (WAL mode, SCHEMA_SQL constant, schema v8) |
-| `src/giva/db/models.py` | Dataclasses: Email, Event, Task, UserProfile, Goal, GoalStrategy |
+| `src/giva/db/store.py` | SQLite + FTS5 data layer (WAL mode, SCHEMA_SQL constant, schema v9) |
+| `src/giva/db/models.py` | Dataclasses: Email, Event, Task, UserProfile, Goal, GoalStrategy, VlmTask |
 | `src/giva/db/migrations.py` | Schema version detection + ALTER TABLE migrations |
 | `src/giva/config.py` | TOML config loading: default → user → env overlay |
 | `config.default.toml` | Full default configuration file |
@@ -215,6 +226,7 @@ The extensible agent system: protocol, discovery, routing, execution queue, and 
 | `src/giva/agents/orchestrator/` | Meta-agent: plan → validate → execute sub-agents → QA → synthesize |
 | `src/giva/agents/email_drafter/` | Drafts emails using assistant model + email history context |
 | `src/giva/agents/mcp_agent/` | Wraps MCP servers (filesystem, fetch, iMessage, Notes, Discord) as agents |
+| `src/giva/agents/web_orchestrator/` | Plans web tasks → writes VLM subtasks to queue → returns immediately |
 | `GivaApp/Services/AgentActionHandler.swift` | Swift-side: parses agent actions, confirmations, queued agent names |
 | `GivaApp/Views/AgentActivityPanel.swift` | UI: agent queue status inspector panel |
 | `GivaApp/Views/AgentConfirmationCard.swift` | UI: inline agent approval/dismissal card |
@@ -301,18 +313,36 @@ Test infrastructure across both Python and Swift.
 | File | Role |
 |---|---|
 | `tests/conftest.py` | Shared pytest fixtures: `tmp_db`, `config` (isolated temp dirs) |
-| `tests/test_db/` | Store, config, migrations, models, goals (7 files) |
+| `tests/test_db/` | Store, config, migrations, models, goals, vlm_tasks (8 files) |
 | `tests/test_intelligence/` | Agents, context, goals, onboarding, profile, queries, tasks, task_review (12 files) |
-| `tests/test_agents/` | Base, registry, router, queue, orchestrator, email_drafter, MCP (12 files) |
+| `tests/test_agents/` | Base, registry, router, queue, orchestrator, email_drafter, MCP, web_orchestrator (13 files) |
 | `tests/test_sync/` | Mail sync, calendar, filter, scheduler (5 files) |
 | `tests/test_audio/` | TTS, STT (2 files) |
 | `tests/test_llm/` | Apple adapter, prompts, structured output (3 files) |
 | `tests/test_utils/` | AppleScript, email parser, recents (3 files) |
-| `tests/test_server.py`, `test_server_extended.py` | API endpoint tests |
+| `tests/test_server.py`, `test_server_extended.py`, `test_server_vlm.py` | API endpoint tests |
 | `tests/test_cli.py` | CLI interaction tests |
 | `tests/test_models.py`, `test_benchmarks.py`, `test_hardware.py` | Model/hardware tests |
 | `GivaAppTests/Mocks/MockAPIService.swift` | Configurable mock with stubs + call counting |
 | `GivaAppTests/*.swift` | Swift Testing suite: ViewModel, ServerPhase, AgentAction, ServerManager |
+
+### 13. VLM Browser Automation
+Visual browser task execution via Chrome extension + VLM inference.
+
+| File | Role |
+|---|---|
+| `src/giva/llm/vlm.py` | VLM inference placeholder (mlx-vlm screenshot → action) |
+| `src/giva/llm/structured.py` (`VlmAction`, `WebPlan*`) | Pydantic models for VLM actions and web plans |
+| `src/giva/db/models.py` (`VlmTask`) | VLM task dataclass with status lifecycle |
+| `src/giva/db/store.py` (`vlm_task_queue`) | SQLite CRUD for VLM task queue (schema v9) |
+| `src/giva/agents/web_orchestrator/agent.py` | WebOrchestratorAgent: decomposes web tasks into VLM subtasks |
+| `src/giva/agents/web_orchestrator/prompts.py` | Prompt templates for web task decomposition |
+| `src/giva/server.py` (`/api/vlm/*`) | 5 VLM endpoints: create, list, current, analyze, complete |
+| `src/giva/config.py` (`VlmConfig`) | VLM configuration: enabled, model, poll interval, action delay |
+| `config.default.toml` `[vlm]` | Default VLM configuration |
+| `extensions/chrome-vlm-bridge/manifest.json` | Chrome extension Manifest V3 |
+| `extensions/chrome-vlm-bridge/background.js` | Polling loop, screenshot capture, VLM action dispatch |
+| `extensions/chrome-vlm-bridge/content.js` | DOM action executor (click, type, scroll) |
 
 ## Key Design Decisions
 
@@ -322,7 +352,7 @@ Test infrastructure across both Python and Swift.
 - **Fail-safe LLM parsing**: JSON extraction from LLM output uses regex + multi-level fallback (always defaults to "keep" on error)
 - **Calendar dual backend**: EventKit (fast, native) if TCC access granted; AppleScript fallback (no dialog, background-safe)
 - **SSE streaming**: server bridges sync generators to async SSE via `asyncio.Queue` + thread pool
-- **Thread safety**: single `_llm_lock` serializes all LLM calls (MLX ModelManager is not thread-safe)
+- **Thread safety**: `_llm_lock` serializes all model calls — text LLM, VLM, and recommendations (only one model operation at a time; MLX not thread-safe); `_voice_lock` serializes TTS/STT
 - **First-run bootstrap**: SwiftUI app auto-creates venv at `~/.local/share/giva/.venv`, pip-installs the project, and registers a `com.giva.server` launchd user agent for the API daemon
 - **Daemon lifecycle**: server runs as a launchd user agent (auto-restart on crash, start at login). App connects via health polling, never spawns its own server process
 - **One state machine, server-side**: The server's `bootstrap.checkpoint` is the single authoritative state (unknown → downloading_default_model → awaiting_model_selection → downloading_user_models → validating → ready → syncing → onboarding → operational). The SwiftUI app is a thin observer — it mirrors the phase, never drives transitions. ViewModel has no shadow booleans; all UI derives from `serverPhase`. Client-side flags (`isResetting`, `isUpgrading`) are transient overlays, not part of the state machine. On reset/upgrade, the client disconnects, kicks the daemon, and hands control back to bootstrap observation — no client-side reconnect logic.
@@ -334,6 +364,9 @@ Test infrastructure across both Python and Swift.
 - **Source preservation in post-chat agent**: When the post-chat agent creates tasks from chat, `retrieve_context_sources()` extracts the email/event IDs from the query's retrieved context, and `_handle_create_task()` uses the most relevant source (email > event > chat) instead of defaulting to `source_type="chat", source_id=0`. This preserves the link between a task and the email or event being discussed.
 - **Apple Foundation Model as filter**: Setting `filter_model = "apple"` in config routes all filter model calls to Apple's on-device ~3B Foundation Model via `apple_fm_sdk` (Python SDK). This eliminates the need to download a separate HuggingFace filter model. The adapter translates chat-format messages to `(instructions, prompt)` pairs for the Apple API. Requires macOS 26+ with Apple Intelligence enabled. The SDK is optional — if unavailable, bootstrap logs a warning but doesn't fail. The `ModelManager` transparently routes `generate()` calls: Apple model ID → `AppleModelAdapter`, anything else → MLX `mlx-lm`.
 - **Dismissed task undo queue**: Dismissed tasks are soft-deleted (status → "dismissed") and retain `dismissal_reason` and `dismissed_at` metadata. All dismissal paths (sanity checks, LLM classification, duplicate merge, user action, goal upgrade) record a human-readable reason. The `TaskListView` shows a normally-hidden collapsible "Dismissed" section at the bottom; users can skim the title + reason and restore with a single click. API: `GET /api/tasks/dismissed`, `POST /api/tasks/{id}/restore`, `POST /api/tasks/{id}/dismiss`.
+- **VLM browser automation — agent chain decoupling**: The `WebOrchestratorAgent` runs synchronously within the agent queue (holds `_llm_lock` for planning), writes VLM subtasks to `vlm_task_queue` in SQLite, and returns immediately. The Chrome extension polls `/api/vlm/tasks/current` and drives the VLM execution loop asynchronously. VLM inference uses the same `_llm_lock` as text LLM — only one model operation at a time to prevent concurrent model loading. Each subtask has a `sequence` number; the extension only sees the current (lowest-sequence queued/in_progress) subtask. When all subtasks for a `job_id` complete, the server broadcasts a `vlm_job_completed` SSE event.
+- **VLM model selection in bootstrap & settings**: VLM model selection is integrated into both the bootstrap wizard (ModelSetupView) and Settings → Models tab. `list_mlx_vlm_models()` queries HuggingFace for mlx-community VLM models (image-text-to-text pipeline + LLM-powered keyword discovery) and caches results for 24h. `recommend_vlm_model()` calculates the remaining memory budget after text models (assistant + filter) are accounted for, then uses the Apple Foundation Model (preferred) or filter model to pick the best VLM that fits. The recommendation uses an enriched prompt covering visual understanding quality, structured output reliability, size/quality tradeoff, quantization, minimum viable size, and community adoption. Fallback heuristic prefers Qwen2.5-VL family, 4-bit quant, larger sizes. `save_model_choices()` and `/api/models/select` accept an optional `vlm_model` parameter; when provided, `[vlm]` config is written with `enabled = true`. Bootstrap downloads the VLM model alongside text models. The `/api/config` endpoint exposes the full `[vlm]` section (enabled, model, poll_interval_seconds, action_delay_ms) for Settings UI binding.
+- **Tiered recommendation model**: All model recommendation functions use `_get_recommendation_model()` which picks the best available model for the context: (1) **Settings flow** (post-bootstrap): uses the assistant model (e.g. Qwen3-30B) — the most capable reasoning LLM, best for advising on model changes/upgrades; (2) **Bootstrap flow** (first run, no models downloaded): uses the Apple Foundation Model (~3B) — always on-device, no download needed, smart enough for initial selection; (3) **Fallback**: configured filter model or DEFAULT_MODEL. This ensures recommendations are always as intelligent as possible given what's available.
 
 ## Agent Architecture
 

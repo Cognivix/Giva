@@ -530,10 +530,11 @@ async def _download_user_models(
     app, state: BootstrapState, notifier: BootstrapNotifier,
     loop: asyncio.AbstractEventLoop,
 ) -> None:
-    """Download user-configured models (assistant + filter).
+    """Download user-configured models (assistant + filter + VLM).
 
     Skips the Apple on-device model (``"apple"``) since it requires no
-    download — it's part of macOS.
+    download — it's part of macOS.  Skips the VLM model if VLM is
+    disabled or no model is configured.
     """
     from giva.llm.apple_adapter import is_apple_model
 
@@ -542,6 +543,10 @@ async def _download_user_models(
     models_to_download.add(config.llm.model)
     if not is_apple_model(config.llm.filter_model):
         models_to_download.add(config.llm.filter_model)
+
+    # Include VLM model if configured and enabled
+    if config.vlm.enabled and config.vlm.model:
+        models_to_download.add(config.vlm.model)
 
     state.advance("downloading_user_models")
     notifier.notify()
@@ -565,6 +570,7 @@ async def _validate_models(app, loop: asyncio.AbstractEventLoop) -> None:
 
     The Apple on-device model (``"apple"``) is validated via the SDK's
     availability check instead of the HuggingFace cache.
+    VLM model is validated only if VLM is enabled and configured.
     """
     from giva.llm.apple_adapter import check_apple_model_availability, is_apple_model
     from giva.models import is_model_downloaded
@@ -583,6 +589,11 @@ async def _validate_models(app, loop: asyncio.AbstractEventLoop) -> None:
                 # (e.g. still downloading in the background by macOS).
         elif not is_model_downloaded(config.llm.filter_model):
             raise RuntimeError(f"Filter model not downloaded: {config.llm.filter_model}")
+
+        # Validate VLM model if enabled
+        if config.vlm.enabled and config.vlm.model:
+            if not is_model_downloaded(config.vlm.model):
+                raise RuntimeError(f"VLM model not downloaded: {config.vlm.model}")
 
     await loop.run_in_executor(None, _check)
 

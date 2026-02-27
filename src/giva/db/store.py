@@ -19,11 +19,12 @@ from giva.db.models import (
     GoalStrategy,
     Task,
     UserProfile,
+    VlmTask,
 )
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -225,6 +226,23 @@ CREATE TABLE IF NOT EXISTS agent_executions (
     error TEXT DEFAULT '',
     duration_ms INTEGER DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS vlm_task_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_uuid TEXT UNIQUE NOT NULL,
+    goal_id INTEGER NOT NULL,
+    objective TEXT NOT NULL,
+    target_url TEXT NOT NULL,
+    job_id TEXT DEFAULT '',
+    sequence INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'queued'
+        CHECK(status IN ('queued', 'in_progress', 'completed', 'failed')),
+    vlm_report TEXT DEFAULT '',
+    error_message TEXT DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (goal_id) REFERENCES goals(id) ON DELETE CASCADE
 );
 """
 
@@ -1131,3 +1149,104 @@ class Store:
                 (goal_id,),
             ).fetchall()
             return [self._task_from_row(dict(r)) for r in rows]
+
+    # --- VLM Task Queue ---
+
+    def add_vlm_task(self, task: VlmTask) -> int:
+        """Insert a new VLM task. Returns the task ID."""
+        row = task.to_row()
+        with self._conn() as conn:
+            cursor = conn.execute(
+                """INSERT INTO vlm_task_queue
+                   (task_uuid, goal_id, objective, target_url,
+                    job_id, sequence, status, vlm_report, error_message)
+                   VALUES (:task_uuid, :goal_id, :objective, :target_url,
+                           :job_id, :sequence, :status, :vlm_report, :error_message)""",
+                row,
+            )
+            return cursor.lastrowid
+
+    def get_vlm_task(self, task_id: int) -> Optional[VlmTask]:
+        """Get a VLM task by ID."""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM vlm_task_queue WHERE id = ?", (task_id,)
+            ).fetchone()
+            return VlmTask.from_row(dict(row)) if row else None
+
+    def get_vlm_task_by_uuid(self, task_uuid: str) -> Optional[VlmTask]:
+        """Get a VLM task by its external UUID."""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM vlm_task_queue WHERE task_uuid = ?", (task_uuid,)
+            ).fetchone()
+            return VlmTask.from_row(dict(row)) if row else None
+
+    def get_current_vlm_task(self) -> Optional[VlmTask]:
+        """Get the current VLM task: first in_progress, or oldest queued.
+
+        Orders by sequence within the same job_id so multi-step plans
+        execute in order.
+        """
+        with self._conn() as conn:
+            # Prefer in_progress tasks
+            row = conn.execute(
+                "SELECT * FROM vlm_task_queue WHERE status = 'in_progress' "
+                "ORDER BY sequence ASC LIMIT 1"
+            ).fetchone()
+            if row:
+                return VlmTask.from_row(dict(row))
+            # Otherwise oldest queued
+            row = conn.execute(
+                "SELECT * FROM vlm_task_queue WHERE status = 'queued' "
+                "ORDER BY sequence ASC, created_at ASC LIMIT 1"
+            ).fetchone()
+            return VlmTask.from_row(dict(row)) if row else None
+
+    def update_vlm_task_status(
+        self, task_id: int, status: str, **kwargs
+    ) -> bool:
+        """Update VLM task status and optional fields.
+
+        Accepted kwargs: vlm_report, error_message.
+        Returns True if task was found and updated.
+        """
+        allowed = {"vlm_report", "error_message"}
+        fields = {k: v for k, v in kwargs.items() if k in allowed}
+        sets = ["status = ?", "updated_at = datetime('now')"]
+        vals: list = [status]
+        for k, v in fields.items():
+            sets.append(f"{k} = ?")
+            vals.append(v)
+        vals.append(task_id)
+        with self._conn() as conn:
+            cursor = conn.execute(
+                f"UPDATE vlm_task_queue SET {', '.join(sets)} WHERE id = ?",
+                vals,
+            )
+            return cursor.rowcount > 0
+
+    def get_vlm_tasks(
+        self,
+        status: Optional[str] = None,
+        job_id: Optional[str] = None,
+        limit: int = 50,
+    ) -> list[VlmTask]:
+        """List VLM tasks, optionally filtered by status and/or job_id."""
+        with self._conn() as conn:
+            conditions: list[str] = []
+            params: list = []
+            if status:
+                conditions.append("status = ?")
+                params.append(status)
+            if job_id:
+                conditions.append("job_id = ?")
+                params.append(job_id)
+            where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+            params.append(limit)
+            rows = conn.execute(
+                f"SELECT * FROM vlm_task_queue {where} "
+                "ORDER BY sequence ASC, created_at DESC LIMIT ?",
+                params,
+            ).fetchall()
+            return [VlmTask.from_row(dict(r)) for r in rows]

@@ -59,7 +59,8 @@ def _get_git_commit() -> str:
 # Resolved once at import time so it's fast on every health check
 _GIT_COMMIT = _get_git_commit()
 
-# Lock to serialize all LLM calls (MLX ModelManager is not thread-safe)
+# Lock to serialize all model calls — text LLM, VLM, and recommendations.
+# Only one model operation at a time (MLX is not thread-safe).
 _llm_lock = threading.Lock()
 
 # Separate lock for voice models (TTS/STT use different MLX models)
@@ -289,10 +290,16 @@ class ModelInfoResponse(BaseModel):
     download_status: str = "not_downloaded"  # complete | partial | not_downloaded
 
 
+class VlmRecommendationResponse(BaseModel):
+    vlm_model: str
+    reasoning: str
+
+
 class ModelRecommendationResponse(BaseModel):
     assistant: str
     filter: str
     reasoning: str
+    vlm: Optional[VlmRecommendationResponse] = None
 
 
 class AppleModelInfoResponse(BaseModel):
@@ -304,6 +311,8 @@ class ModelStatusResponse(BaseModel):
     setup_completed: bool
     current_assistant: str
     current_filter: str
+    current_vlm: str = ""
+    vlm_enabled: bool = False
     hardware: HardwareInfoResponse
     apple_model: Optional[AppleModelInfoResponse] = None
 
@@ -313,11 +322,13 @@ class AvailableModelsResponse(BaseModel):
     compatible_models: list[ModelInfoResponse]
     recommended: ModelRecommendationResponse
     apple_model: Optional[AppleModelInfoResponse] = None
+    vlm_models: list[ModelInfoResponse] = []
 
 
 class ModelSelectRequest(BaseModel):
     assistant_model: str = Field(..., min_length=1)
     filter_model: str = Field(..., min_length=1)
+    vlm_model: str = ""  # Optional — empty string means no VLM
 
 
 class ModelSelectResponse(BaseModel):
@@ -381,6 +392,13 @@ class GoalsConfigResponse(BaseModel):
     plan_horizon_days: int
 
 
+class VlmConfigResponse(BaseModel):
+    enabled: bool
+    model: str
+    poll_interval_seconds: int
+    action_delay_ms: int
+
+
 class ConfigResponse(BaseModel):
     llm: LLMConfigResponse
     voice: VoiceConfigResponse
@@ -389,6 +407,7 @@ class ConfigResponse(BaseModel):
     calendar: CalendarConfigResponse
     agents: AgentsConfigResponse
     goals: GoalsConfigResponse
+    vlm: VlmConfigResponse
 
 
 class ConfigUpdateRequest(BaseModel):
@@ -399,6 +418,7 @@ class ConfigUpdateRequest(BaseModel):
     calendar: Optional[dict] = None
     agents: Optional[dict] = None
     goals: Optional[dict] = None
+    vlm: Optional[dict] = None
 
 
 # --- Goal Pydantic Models ---
@@ -635,6 +655,7 @@ app.add_middleware(
         "http://127.0.0.1",
         "http://localhost",
     ],
+    allow_origin_regex=r"^chrome-extension://.*$",
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -1030,6 +1051,12 @@ async def get_config(request: Request) -> ConfigResponse:
             max_strategies_per_run=config.goals.max_strategies_per_run,
             plan_horizon_days=config.goals.plan_horizon_days,
         ),
+        vlm=VlmConfigResponse(
+            enabled=config.vlm.enabled,
+            model=config.vlm.model,
+            poll_interval_seconds=config.vlm.poll_interval_seconds,
+            action_delay_ms=config.vlm.action_delay_ms,
+        ),
     )
 
 
@@ -1057,6 +1084,8 @@ async def update_config(request: Request, body: ConfigUpdateRequest):
         updates["agents"] = body.agents
     if body.goals is not None:
         updates["goals"] = body.goals
+    if body.vlm is not None:
+        updates["vlm"] = body.vlm
 
     if not updates:
         raise HTTPException(status_code=400, detail="No config sections provided")
@@ -1951,6 +1980,222 @@ async def get_agent_job(job_id: str, request: Request):
 
 
 # ---------------------------------------------------------------------------
+# VLM Task Queue
+# ---------------------------------------------------------------------------
+
+
+class VlmTaskCreateRequest(BaseModel):
+    goal_id: int
+    objective: str
+    target_url: str
+    job_id: str = ""
+    sequence: int = 0
+
+
+class VlmTaskResponse(BaseModel):
+    id: int
+    task_uuid: str
+    goal_id: int
+    objective: str
+    target_url: str
+    job_id: str
+    sequence: int
+    status: str
+    vlm_report: str
+    error_message: str
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class VlmAnalyzeRequest(BaseModel):
+    task_uuid: str
+    screenshot_b64: str = Field(description="Base64-encoded PNG screenshot")
+
+
+class VlmAnalyzeResponse(BaseModel):
+    action_type: str
+    coordinates: Optional[list[int]] = None
+    text_to_type: Optional[str] = None
+    scroll_amount: Optional[int] = None
+    url: Optional[str] = None
+    reasoning: str = ""
+
+
+class VlmTaskCompleteRequest(BaseModel):
+    task_uuid: str
+    vlm_report: str
+    success: bool = True
+
+
+def _vlm_task_response(t) -> VlmTaskResponse:
+    """Convert a VlmTask to a VlmTaskResponse."""
+    return VlmTaskResponse(
+        id=t.id,
+        task_uuid=t.task_uuid,
+        goal_id=t.goal_id,
+        objective=t.objective,
+        target_url=t.target_url,
+        job_id=t.job_id,
+        sequence=t.sequence,
+        status=t.status,
+        vlm_report=t.vlm_report,
+        error_message=t.error_message,
+        created_at=t.created_at.isoformat() if t.created_at else None,
+        updated_at=t.updated_at.isoformat() if t.updated_at else None,
+    )
+
+
+@app.post("/api/vlm/tasks")
+async def create_vlm_task(body: VlmTaskCreateRequest, request: Request):
+    """Create a new VLM task in the queue."""
+    import uuid
+
+    from giva.db.models import VlmTask
+
+    store: Store = request.app.state.store
+
+    task = VlmTask(
+        task_uuid=str(uuid.uuid4()),
+        goal_id=body.goal_id,
+        objective=body.objective,
+        target_url=body.target_url,
+        job_id=body.job_id,
+        sequence=body.sequence,
+    )
+    task_id = store.add_vlm_task(task)
+    created = store.get_vlm_task(task_id)
+    log.info("VLM task created: id=%d uuid=%s", task_id, task.task_uuid)
+    return _vlm_task_response(created)
+
+
+@app.get("/api/vlm/tasks")
+async def list_vlm_tasks(
+    request: Request,
+    status: Optional[str] = Query(None),
+    job_id: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+):
+    """List VLM tasks with optional filters."""
+    store: Store = request.app.state.store
+    tasks = store.get_vlm_tasks(status=status, job_id=job_id, limit=limit)
+    return [_vlm_task_response(t) for t in tasks]
+
+
+@app.get("/api/vlm/tasks/current")
+async def get_current_vlm_task(request: Request):
+    """Get the current VLM task for the Chrome extension.
+
+    Returns the active task (in_progress or next queued).
+    Returns 204 No Content if no task is available.
+    """
+    from fastapi.responses import Response
+
+    store: Store = request.app.state.store
+    task = store.get_current_vlm_task()
+    if task is None:
+        return Response(status_code=204)
+
+    # Auto-transition queued → in_progress when polled
+    if task.status == "queued":
+        store.update_vlm_task_status(task.id, "in_progress")
+        task.status = "in_progress"
+        log.info("VLM task %d transitioned to in_progress", task.id)
+
+    return _vlm_task_response(task)
+
+
+@app.post("/api/vlm/vision/analyze")
+async def vlm_analyze(body: VlmAnalyzeRequest, request: Request):
+    """Accept a screenshot, run VLM inference, return the next action.
+
+    The Chrome extension captures the visible tab and sends the base64 PNG here.
+    The VLM analyzes the screenshot against the task objective and returns
+    what to click, type, scroll, or navigate.
+    """
+    store: Store = request.app.state.store
+    task = store.get_vlm_task_by_uuid(body.task_uuid)
+    if task is None:
+        raise HTTPException(status_code=404, detail="VLM task not found")
+    if task.status not in ("in_progress", "queued"):
+        raise HTTPException(
+            status_code=409, detail=f"Task status is '{task.status}', expected in_progress"
+        )
+
+    loop = asyncio.get_event_loop()
+
+    def _infer():
+        from giva.llm.vlm import run_vlm_inference
+
+        with _llm_lock:
+            return run_vlm_inference(body.screenshot_b64, task.objective)
+
+    action = await loop.run_in_executor(None, _infer)
+    log.info(
+        "VLM analyze: task=%s action=%s reasoning=%s",
+        body.task_uuid[:8], action.action_type, action.reasoning[:80],
+    )
+
+    return VlmAnalyzeResponse(
+        action_type=action.action_type,
+        coordinates=action.coordinates,
+        text_to_type=action.text_to_type,
+        scroll_amount=action.scroll_amount,
+        url=action.url,
+        reasoning=action.reasoning,
+    )
+
+
+@app.post("/api/vlm/tasks/complete")
+async def complete_vlm_task(body: VlmTaskCompleteRequest, request: Request):
+    """Mark a VLM task as completed or failed with a report."""
+    store: Store = request.app.state.store
+    task = store.get_vlm_task_by_uuid(body.task_uuid)
+    if task is None:
+        raise HTTPException(status_code=404, detail="VLM task not found")
+
+    new_status = "completed" if body.success else "failed"
+    store.update_vlm_task_status(
+        task.id, new_status, vlm_report=body.vlm_report,
+    )
+    log.info(
+        "VLM task %s marked %s (report: %d chars)",
+        body.task_uuid[:8], new_status, len(body.vlm_report),
+    )
+
+    # Check if all subtasks for this job are done
+    if task.job_id:
+        remaining = store.get_vlm_tasks(status="queued", job_id=task.job_id)
+        in_progress = store.get_vlm_tasks(status="in_progress", job_id=task.job_id)
+        if not remaining and not in_progress:
+            # All subtasks done — broadcast completion
+            all_tasks = store.get_vlm_tasks(job_id=task.job_id)
+            combined_report = "\n\n---\n\n".join(
+                f"**Step {t.sequence + 1}** ({t.status}): {t.vlm_report}"
+                for t in all_tasks if t.vlm_report
+            )
+            log.info(
+                "All VLM subtasks for job %s complete (%d tasks)",
+                task.job_id[:8], len(all_tasks),
+            )
+            # Broadcast SSE event if broadcast function available
+            broadcast = getattr(request.app.state, "broadcast_fn", None)
+            if broadcast:
+                broadcast({
+                    "event": "vlm_job_completed",
+                    "data": json.dumps({
+                        "job_id": task.job_id,
+                        "task_count": len(all_tasks),
+                        "succeeded": sum(1 for t in all_tasks if t.status == "completed"),
+                        "failed": sum(1 for t in all_tasks if t.status == "failed"),
+                        "report": combined_report,
+                    }),
+                })
+
+    updated = store.get_vlm_task_by_uuid(body.task_uuid)
+    return _vlm_task_response(updated)
+
+
+# ---------------------------------------------------------------------------
 # Onboarding
 # ---------------------------------------------------------------------------
 
@@ -2215,6 +2460,8 @@ async def models_status(request: Request) -> ModelStatusResponse:
         setup_completed=is_model_setup_complete(),
         current_assistant=config.llm.model,
         current_filter=config.llm.filter_model,
+        current_vlm=config.vlm.model,
+        vlm_enabled=config.vlm.enabled,
         hardware=HardwareInfoResponse(
             chip=hw["chip"],
             ram_gb=hw["ram_gb"],
@@ -2236,11 +2483,15 @@ async def models_available(request: Request) -> AvailableModelsResponse:
         from giva.hardware import get_hardware_info, max_model_size_gb
         from giva.models import (
             discover_benchmark_keywords,
+            discover_vlm_keywords,
             filter_compatible_models,
             get_all_cached_model_ids,
             list_mlx_models,
+            list_mlx_vlm_models,
             recommend_models,
+            recommend_vlm_model,
             refine_model_search,
+            refine_vlm_search,
         )
 
         hw = get_hardware_info()
@@ -2275,17 +2526,55 @@ async def models_available(request: Request) -> AvailableModelsResponse:
         with _llm_lock:
             rec = recommend_models(hw, compatible, config)
 
-        return hw, compatible, rec, cached_statuses
+        # Phase 5: Discover VLM models — LLM-powered keyword discovery + refinement
+        with _llm_lock:
+            vlm_keywords = discover_vlm_keywords(config)
+
+        vlm_all = list_mlx_vlm_models(
+            cache_dir=config.data_dir, extra_keywords=vlm_keywords,
+        )
+
+        # Phase 5b: Let LLM review VLM results and suggest more keywords
+        with _llm_lock:
+            extra_vlm = refine_vlm_search(vlm_keywords, vlm_all, config)
+        if extra_vlm:
+            vlm_all = list_mlx_vlm_models(
+                cache_dir=config.data_dir,
+                extra_keywords=vlm_keywords + extra_vlm,
+            )
+
+        vlm_compatible = filter_compatible_models(vlm_all, max_size)
+
+        # Get sizes of recommended text models for VLM budget calculation
+        model_map = {m["model_id"]: m for m in compatible}
+        assistant_gb = model_map.get(rec["assistant"], {}).get("size_gb", 0)
+        filter_gb = model_map.get(rec["filter"], {}).get("size_gb", 0)
+
+        # Phase 6: Recommend VLM model with remaining budget
+        with _llm_lock:
+            vlm_rec = recommend_vlm_model(
+                hw, vlm_compatible,
+                assistant_size_gb=assistant_gb,
+                filter_size_gb=filter_gb,
+                config=config,
+            )
+
+        return hw, compatible, rec, cached_statuses, vlm_compatible, vlm_rec
 
     loop = asyncio.get_event_loop()
-    hw, compatible, rec, cached_statuses = await loop.run_in_executor(
-        None, _run
+    hw, compatible, rec, cached_statuses, vlm_compatible, vlm_rec = (
+        await loop.run_in_executor(None, _run)
     )
 
     from giva.llm.apple_adapter import check_apple_model_availability
 
     available, reason = check_apple_model_availability()
     apple_info = AppleModelInfoResponse(available=available, reason=reason)
+
+    vlm_rec_response = VlmRecommendationResponse(
+        vlm_model=vlm_rec["vlm_model"],
+        reasoning=vlm_rec["reasoning"],
+    ) if vlm_rec.get("vlm_model") else None
 
     return AvailableModelsResponse(
         hardware=HardwareInfoResponse(
@@ -2311,8 +2600,23 @@ async def models_available(request: Request) -> AvailableModelsResponse:
             assistant=rec["assistant"],
             filter=rec["filter"],
             reasoning=rec["reasoning"],
+            vlm=vlm_rec_response,
         ),
         apple_model=apple_info,
+        vlm_models=[
+            ModelInfoResponse(
+                model_id=m["model_id"],
+                size_gb=m["size_gb"],
+                params=m["params"],
+                quant=m["quant"],
+                downloads=m["downloads"],
+                is_downloaded=cached_statuses.get(m["model_id"]) == "complete",
+                download_status=cached_statuses.get(
+                    m["model_id"], "not_downloaded"
+                ),
+            )
+            for m in vlm_compatible
+        ],
     )
 
 
@@ -2322,7 +2626,7 @@ async def models_select(req: ModelSelectRequest, request: Request) -> ModelSelec
     from giva.models import save_model_choices
 
     try:
-        save_model_choices(req.assistant_model, req.filter_model)
+        save_model_choices(req.assistant_model, req.filter_model, vlm_model=req.vlm_model)
 
         # Reload config so the server uses the new models
         from giva.config import load_config
@@ -2338,9 +2642,10 @@ async def models_select(req: ModelSelectRequest, request: Request) -> ModelSelec
                 resume_after_model_selection(request.app)
             )
 
+        vlm_msg = f", vlm={req.vlm_model}" if req.vlm_model else ""
         return ModelSelectResponse(
             success=True,
-            message=f"Models updated: assistant={req.assistant_model}, filter={req.filter_model}",
+            message=f"Models updated: assistant={req.assistant_model}, filter={req.filter_model}{vlm_msg}",
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save model choices: {e}")

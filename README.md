@@ -18,6 +18,7 @@ All data stays on your device. No cloud APIs, no telemetry.
 - **Three-tier conversation memory** — Active window (recent turns), session summary (compressed by filter model), and learned facts (permanent preferences extracted during daily review)
 - **Proactive suggestions** — Morning briefing, priority engine, and upcoming event summaries
 - **Voice mode** — Optional TTS (Qwen3-TTS) and STT (Lightning Whisper) via mlx-audio, with two-tier silence detection and progressive chunk transcription
+- **VLM browser automation** — Visual web task execution via Chrome extension + VLM inference. A WebOrchestratorAgent decomposes high-level web tasks into ordered subtasks, writes them to a SQLite queue, and a Chrome extension polls the API to drive screenshot capture → VLM analysis → DOM actions (click, type, scroll). VLM model selection is integrated into bootstrap and Settings — the system discovers MLX VLM models from HuggingFace, filters by remaining memory budget, and recommends models (preferring Qwen2.5-VL). Opt-in via `[vlm]` config section
 - **MCP integration** — Pluggable Model Context Protocol servers for filesystem, web fetch, iMessage, Notes, Discord, and more. Servers auto-register as agents at startup
 - **Writing style profiling** — Learns your communication patterns from sent emails
 - **Power-aware scheduling** — Sync and model loading defer when on battery (≤50%), under thermal pressure, or high memory usage
@@ -141,8 +142,8 @@ src/giva/
 ├── hardware.py         # Mac hardware detection (chip, RAM, GPU cores)
 ├── benchmarks.py       # Live LLM benchmark fetching
 ├── db/
-│   ├── models.py       # Dataclasses: Email, Event, Task, Goal, etc.
-│   ├── store.py        # SQLite + FTS5 data layer (WAL mode)
+│   ├── models.py       # Dataclasses: Email, Event, Task, Goal, VlmTask
+│   ├── store.py        # SQLite + FTS5 data layer (WAL mode, v9)
 │   └── migrations.py   # Schema versioning + ALTER migrations
 ├── sync/
 │   ├── mail.py         # Apple Mail sync via JXA + LLM filter
@@ -152,7 +153,8 @@ src/giva/
 │   ├── apple_adapter.py # Apple Foundation Model adapter
 │   ├── engine.py       # MLX dual-model: assistant + filter
 │   ├── prompts.py      # All prompt templates
-│   └── structured.py   # Pydantic models for structured output
+│   ├── structured.py   # Pydantic models for structured output
+│   └── vlm.py          # VLM inference placeholder (mlx-vlm)
 ├── intelligence/
 │   ├── queries.py      # NL query → FTS5 → streamed LLM response
 │   ├── tasks.py        # Task extraction from emails/events
@@ -172,7 +174,8 @@ src/giva/
 │   ├── queue.py        # Thread-safe priority queue + SSE
 │   ├── orchestrator/   # Plan → validate → execute → QA
 │   ├── email_drafter/  # Email drafting with history context
-│   └── mcp_agent/      # MCP server wrappers (no LLM)
+│   ├── mcp_agent/      # MCP server wrappers (no LLM)
+│   └── web_orchestrator/ # Web task → VLM subtask planning
 ├── audio/
 │   ├── tts.py          # Qwen3-TTS via mlx-audio
 │   ├── stt.py          # Lightning Whisper MLX
@@ -214,6 +217,9 @@ GivaApp/                        # SwiftUI macOS app (Xcode project)
 │   └── AgentConfirmationCard.swift # Agent approval card
 └── GivaAppTests/               # Swift Testing suite
 
+extensions/                     # Browser extensions
+└── chrome-vlm-bridge/          # VLM browser automation (Manifest V3)
+
 tests/                  # pytest suite mirroring src/ structure
 scripts/                # Bootstrap + demo scripts
 docs/                   # Agent architecture + bootstrap design
@@ -231,6 +237,8 @@ docs/                   # Agent architecture + bootstrap design
 - **Pluggable agents** — protocol-based discovery with two-stage routing. New agents register by dropping a module into `giva/agents/`. Filter model for classification agents, assistant model for synthesis agents
 - **Power-aware scheduling** — sync defers on low battery (≤50%) or thermal pressure (≥ serious). Models auto-unload after configurable idle timeout
 - **Goal-scoped conversations** — conversations table has nullable `goal_id`; global and goal chat are cleanly separated in the DB and UI
+- **VLM agent chain decoupling** — WebOrchestratorAgent plans and writes VLM subtasks to SQLite, then returns immediately. Chrome extension polls and drives VLM execution asynchronously. All model operations serialized via a single lock to prevent concurrent loading
+- **VLM model selection** — VLM model discovery uses LLM-powered keyword search and iterative refinement (same multi-phase approach as text models). Recommendations use the assistant model (Settings) or Apple Foundation Model (bootstrap) for intelligent selection. Models are filtered to only show MLX VLM models that fit in remaining memory after text models are loaded
 
 ## Development
 

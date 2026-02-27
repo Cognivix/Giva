@@ -297,22 +297,37 @@ struct ModelInfo: Codable, Identifiable {
     }
 }
 
+struct VlmRecommendation: Codable {
+    let vlmModel: String
+    let reasoning: String
+
+    enum CodingKeys: String, CodingKey {
+        case vlmModel = "vlm_model"
+        case reasoning
+    }
+}
+
 struct ModelRecommendation: Codable {
     let assistant: String
     let filter: String
     let reasoning: String
+    let vlm: VlmRecommendation?
 }
 
 struct ModelStatusResponse: Codable {
     let setupCompleted: Bool
     let currentAssistant: String
     let currentFilter: String
+    let currentVlm: String?
+    let vlmEnabled: Bool?
     let hardware: HardwareInfo
 
     enum CodingKeys: String, CodingKey {
         case setupCompleted = "setup_completed"
         case currentAssistant = "current_assistant"
         case currentFilter = "current_filter"
+        case currentVlm = "current_vlm"
+        case vlmEnabled = "vlm_enabled"
         case hardware
     }
 }
@@ -321,21 +336,25 @@ struct AvailableModelsResponse: Codable {
     let hardware: HardwareInfo
     let compatibleModels: [ModelInfo]
     let recommended: ModelRecommendation
+    let vlmModels: [ModelInfo]?
 
     enum CodingKeys: String, CodingKey {
         case hardware
         case compatibleModels = "compatible_models"
         case recommended
+        case vlmModels = "vlm_models"
     }
 }
 
 struct ModelSelectRequest: Encodable {
     let assistantModel: String
     let filterModel: String
+    var vlmModel: String = ""
 
     enum CodingKeys: String, CodingKey {
         case assistantModel = "assistant_model"
         case filterModel = "filter_model"
+        case vlmModel = "vlm_model"
     }
 }
 
@@ -1004,6 +1023,19 @@ struct GoalsConfigResponse: Codable, Equatable {
     }
 }
 
+struct VlmConfigResponse: Codable, Equatable {
+    let enabled: Bool
+    let model: String
+    let pollIntervalSeconds: Int
+    let actionDelayMs: Int
+
+    enum CodingKeys: String, CodingKey {
+        case enabled, model
+        case pollIntervalSeconds = "poll_interval_seconds"
+        case actionDelayMs = "action_delay_ms"
+    }
+}
+
 struct ConfigResponse: Codable, Equatable {
     let llm: LLMConfigResponse
     let voice: VoiceConfigResponse
@@ -1012,6 +1044,7 @@ struct ConfigResponse: Codable, Equatable {
     let calendar: CalendarConfigResponse
     let agents: AgentsConfigResponse
     let goals: GoalsConfigResponse
+    let vlm: VlmConfigResponse
 }
 
 // MARK: - SSE Event

@@ -19,7 +19,7 @@ protocol APIServiceProtocol: AnyObject, Sendable {
     func updateConfig(updates: [String: Any]) async throws -> [String: Any]
     func getSession() async throws -> SessionStateResponse
     func getAvailableModels() async throws -> AvailableModelsResponse
-    func selectModels(assistant: String, filter: String) async throws -> ModelSelectResponse
+    func selectModels(assistant: String, filter: String, vlm: String) async throws -> ModelSelectResponse
     func getReviewStatus() async throws -> ReviewStatusResponse
     func getAgentQueue(status: String?, limit: Int) async throws -> AgentQueueResponse
     func confirmAgent(jobId: String) async throws
@@ -73,6 +73,9 @@ protocol APIServiceProtocol: AnyObject, Sendable {
 
 // Default parameter values for callers using the protocol type.
 extension APIServiceProtocol {
+    func selectModels(assistant: String, filter: String, vlm: String = "") async throws -> ModelSelectResponse {
+        try await selectModels(assistant: assistant, filter: filter, vlm: vlm)
+    }
     func getTasks(status: String? = "pending", limit: Int = 50) async throws -> TaskListResponse {
         try await getTasks(status: status, limit: limit)
     }
