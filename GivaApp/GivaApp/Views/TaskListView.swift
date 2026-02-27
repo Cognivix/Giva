@@ -48,7 +48,6 @@ struct TaskListView: View {
                                 } else {
                                     // In popover: signal main window to open task chat
                                     viewModel.pendingTaskChatId = task.id
-                                    viewModel.lastUsedFullWindow = true
                                 }
                             })
                         }
