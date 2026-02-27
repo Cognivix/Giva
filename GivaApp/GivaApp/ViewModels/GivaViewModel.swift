@@ -36,6 +36,7 @@ enum SettingsTab: Hashable {
     case general
     case goals
     case profile
+    case shortcuts
 }
 
 /// Voice input mode. Dictate places text in the input field for editing;

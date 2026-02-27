@@ -5,6 +5,7 @@ import SwiftUI
 
 struct ChatView: View {
     @Environment(GivaViewModel.self) private var viewModel
+    @FocusState private var isInputFocused: Bool
 
     var body: some View {
         @Bindable var viewModel = viewModel
@@ -172,6 +173,7 @@ struct ChatView: View {
                     .textFieldStyle(.plain)
                     .font(.system(size: 13))
                     .lineLimit(1...8)
+                    .focused($isInputFocused)
                     .onSubmit {
                         viewModel.sendMessage()
                     }
@@ -218,6 +220,9 @@ struct ChatView: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
+        }
+        .onAppear {
+            isInputFocused = true
         }
     }
 }
