@@ -191,10 +191,14 @@ def save_config(updates: dict) -> None:
     _write_toml(_USER_CONFIG, raw)
 
 
-def save_llm_config(model: str, filter_model: str) -> None:
-    """Persist LLM model choices to the user config file.
+def save_llm_config(
+    model: str,
+    filter_model: str,
+    vlm_model: str = "",
+) -> None:
+    """Persist LLM and VLM model choices to the user config file.
 
-    Creates or updates ~/.config/giva/config.toml with the [llm] section.
+    Creates or updates ~/.config/giva/config.toml with the [llm] and [vlm] sections.
     Next load_config() call will pick up the changes.
     """
     _USER_CONFIG.parent.mkdir(parents=True, exist_ok=True)
@@ -210,6 +214,16 @@ def save_llm_config(model: str, filter_model: str) -> None:
         raw["llm"] = {}
     raw["llm"]["model"] = model
     raw["llm"]["filter_model"] = filter_model
+
+    # Update vlm section if a VLM model is provided
+    if vlm_model:
+        if "vlm" not in raw:
+            raw["vlm"] = {}
+        raw["vlm"]["model"] = vlm_model
+        raw["vlm"]["enabled"] = True
+    elif "vlm" in raw and raw["vlm"].get("model"):
+        # Keep existing VLM config if present
+        pass
 
     # Write back as TOML
     _write_toml(_USER_CONFIG, raw)

@@ -292,10 +292,16 @@ class ModelInfoResponse(BaseModel):
     download_status: str = "not_downloaded"  # complete | partial | not_downloaded
 
 
+class VlmRecommendationResponse(BaseModel):
+    vlm_model: str
+    reasoning: str
+
+
 class ModelRecommendationResponse(BaseModel):
     assistant: str
     filter: str
     reasoning: str
+    vlm: Optional[VlmRecommendationResponse] = None
 
 
 class AppleModelInfoResponse(BaseModel):
@@ -307,6 +313,8 @@ class ModelStatusResponse(BaseModel):
     setup_completed: bool
     current_assistant: str
     current_filter: str
+    current_vlm: str = ""
+    vlm_enabled: bool = False
     hardware: HardwareInfoResponse
     apple_model: Optional[AppleModelInfoResponse] = None
 
@@ -316,11 +324,13 @@ class AvailableModelsResponse(BaseModel):
     compatible_models: list[ModelInfoResponse]
     recommended: ModelRecommendationResponse
     apple_model: Optional[AppleModelInfoResponse] = None
+    vlm_models: list[ModelInfoResponse] = []
 
 
 class ModelSelectRequest(BaseModel):
     assistant_model: str = Field(..., min_length=1)
     filter_model: str = Field(..., min_length=1)
+    vlm_model: str = ""  # Optional — empty string means no VLM
 
 
 class ModelSelectResponse(BaseModel):
@@ -384,6 +394,13 @@ class GoalsConfigResponse(BaseModel):
     plan_horizon_days: int
 
 
+class VlmConfigResponse(BaseModel):
+    enabled: bool
+    model: str
+    poll_interval_seconds: int
+    action_delay_ms: int
+
+
 class ConfigResponse(BaseModel):
     llm: LLMConfigResponse
     voice: VoiceConfigResponse
@@ -392,6 +409,7 @@ class ConfigResponse(BaseModel):
     calendar: CalendarConfigResponse
     agents: AgentsConfigResponse
     goals: GoalsConfigResponse
+    vlm: VlmConfigResponse
 
 
 class ConfigUpdateRequest(BaseModel):
@@ -402,6 +420,7 @@ class ConfigUpdateRequest(BaseModel):
     calendar: Optional[dict] = None
     agents: Optional[dict] = None
     goals: Optional[dict] = None
+    vlm: Optional[dict] = None
 
 
 # --- Goal Pydantic Models ---
@@ -1034,6 +1053,12 @@ async def get_config(request: Request) -> ConfigResponse:
             max_strategies_per_run=config.goals.max_strategies_per_run,
             plan_horizon_days=config.goals.plan_horizon_days,
         ),
+        vlm=VlmConfigResponse(
+            enabled=config.vlm.enabled,
+            model=config.vlm.model,
+            poll_interval_seconds=config.vlm.poll_interval_seconds,
+            action_delay_ms=config.vlm.action_delay_ms,
+        ),
     )
 
 
@@ -1061,6 +1086,8 @@ async def update_config(request: Request, body: ConfigUpdateRequest):
         updates["agents"] = body.agents
     if body.goals is not None:
         updates["goals"] = body.goals
+    if body.vlm is not None:
+        updates["vlm"] = body.vlm
 
     if not updates:
         raise HTTPException(status_code=400, detail="No config sections provided")
@@ -2435,6 +2462,8 @@ async def models_status(request: Request) -> ModelStatusResponse:
         setup_completed=is_model_setup_complete(),
         current_assistant=config.llm.model,
         current_filter=config.llm.filter_model,
+        current_vlm=config.vlm.model,
+        vlm_enabled=config.vlm.enabled,
         hardware=HardwareInfoResponse(
             chip=hw["chip"],
             ram_gb=hw["ram_gb"],
@@ -2459,7 +2488,9 @@ async def models_available(request: Request) -> AvailableModelsResponse:
             filter_compatible_models,
             get_all_cached_model_ids,
             list_mlx_models,
+            list_mlx_vlm_models,
             recommend_models,
+            recommend_vlm_model,
             refine_model_search,
         )
 
@@ -2495,17 +2526,40 @@ async def models_available(request: Request) -> AvailableModelsResponse:
         with _llm_lock:
             rec = recommend_models(hw, compatible, config)
 
-        return hw, compatible, rec, cached_statuses
+        # Phase 5: Discover VLM models (memory-constrained to remaining budget)
+        vlm_all = list_mlx_vlm_models(cache_dir=config.data_dir)
+        vlm_compatible = filter_compatible_models(vlm_all, max_size)
+
+        # Get sizes of recommended text models for VLM budget calculation
+        model_map = {m["model_id"]: m for m in compatible}
+        assistant_gb = model_map.get(rec["assistant"], {}).get("size_gb", 0)
+        filter_gb = model_map.get(rec["filter"], {}).get("size_gb", 0)
+
+        # Phase 6: Recommend VLM model with remaining budget
+        with _llm_lock:
+            vlm_rec = recommend_vlm_model(
+                hw, vlm_compatible,
+                assistant_size_gb=assistant_gb,
+                filter_size_gb=filter_gb,
+                config=config,
+            )
+
+        return hw, compatible, rec, cached_statuses, vlm_compatible, vlm_rec
 
     loop = asyncio.get_event_loop()
-    hw, compatible, rec, cached_statuses = await loop.run_in_executor(
-        None, _run
+    hw, compatible, rec, cached_statuses, vlm_compatible, vlm_rec = (
+        await loop.run_in_executor(None, _run)
     )
 
     from giva.llm.apple_adapter import check_apple_model_availability
 
     available, reason = check_apple_model_availability()
     apple_info = AppleModelInfoResponse(available=available, reason=reason)
+
+    vlm_rec_response = VlmRecommendationResponse(
+        vlm_model=vlm_rec["vlm_model"],
+        reasoning=vlm_rec["reasoning"],
+    ) if vlm_rec.get("vlm_model") else None
 
     return AvailableModelsResponse(
         hardware=HardwareInfoResponse(
@@ -2531,8 +2585,23 @@ async def models_available(request: Request) -> AvailableModelsResponse:
             assistant=rec["assistant"],
             filter=rec["filter"],
             reasoning=rec["reasoning"],
+            vlm=vlm_rec_response,
         ),
         apple_model=apple_info,
+        vlm_models=[
+            ModelInfoResponse(
+                model_id=m["model_id"],
+                size_gb=m["size_gb"],
+                params=m["params"],
+                quant=m["quant"],
+                downloads=m["downloads"],
+                is_downloaded=cached_statuses.get(m["model_id"]) == "complete",
+                download_status=cached_statuses.get(
+                    m["model_id"], "not_downloaded"
+                ),
+            )
+            for m in vlm_compatible
+        ],
     )
 
 
@@ -2542,7 +2611,7 @@ async def models_select(req: ModelSelectRequest, request: Request) -> ModelSelec
     from giva.models import save_model_choices
 
     try:
-        save_model_choices(req.assistant_model, req.filter_model)
+        save_model_choices(req.assistant_model, req.filter_model, vlm_model=req.vlm_model)
 
         # Reload config so the server uses the new models
         from giva.config import load_config
@@ -2558,9 +2627,10 @@ async def models_select(req: ModelSelectRequest, request: Request) -> ModelSelec
                 resume_after_model_selection(request.app)
             )
 
+        vlm_msg = f", vlm={req.vlm_model}" if req.vlm_model else ""
         return ModelSelectResponse(
             success=True,
-            message=f"Models updated: assistant={req.assistant_model}, filter={req.filter_model}",
+            message=f"Models updated: assistant={req.assistant_model}, filter={req.filter_model}{vlm_msg}",
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save model choices: {e}")

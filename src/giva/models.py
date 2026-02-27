@@ -622,11 +622,21 @@ def get_model_size_gb(model_id: str) -> float:
     return total / (1024 ** 3) if total else 0.0
 
 
-def save_model_choices(assistant: str, filter_model: str) -> None:
-    """Persist model choices to the user config file."""
+def save_model_choices(
+    assistant: str,
+    filter_model: str,
+    vlm_model: str = "",
+) -> None:
+    """Persist model choices to the user config file.
+
+    Args:
+        assistant: HuggingFace model ID for the assistant (text) model.
+        filter_model: HuggingFace model ID or ``"apple"`` for the filter model.
+        vlm_model: HuggingFace model ID for the VLM model (optional).
+    """
     from giva.config import save_llm_config
 
-    save_llm_config(model=assistant, filter_model=filter_model)
+    save_llm_config(model=assistant, filter_model=filter_model, vlm_model=vlm_model)
 
 
 def is_model_setup_complete() -> bool:
@@ -667,6 +677,245 @@ def is_model_setup_complete() -> bool:
     except Exception as e:
         log.warning("is_model_setup_complete: exception %s → False", e)
         return False
+
+
+# --- VLM model discovery ---
+
+
+_VLM_CACHE_KEY = "vlm_model_cache.json"
+
+# Prompt for LLM-based VLM model recommendation
+_VLM_RECOMMEND_PROMPT = """Pick the best MLX Vision-Language Model for browser automation on Apple Silicon.
+
+Hardware: {chip}, {ram_gb}GB unified memory. Budget remaining after text models: {vlm_budget_gb:.1f}GB.
+
+VLM CANDIDATES (all fit in your remaining budget):
+{vlm_table}
+
+Rules:
+1. Pick the model that best balances visual understanding quality with size constraints.
+2. Prefer Qwen2.5-VL family (best open VLM for structured output).
+3. Prefer 4-bit quantization for efficiency.
+4. Pick the largest model that fits comfortably in the remaining budget.
+5. Avoid models smaller than 3B params (insufficient for browser task reasoning).
+
+Respond with ONLY JSON:
+{{"vlm_model": "exact_model_id", "reasoning": "why"}} /no_think"""
+
+
+def list_mlx_vlm_models(
+    cache_dir: Optional[Path] = None,
+) -> list[dict]:
+    """Query HuggingFace Hub for MLX vision-language models.
+
+    Searches mlx-community for VLM models (image-text-to-text pipeline)
+    and also searches by keyword for known VLM families.
+
+    Returns a list of dicts with keys: model_id, size_gb, params, quant, downloads.
+    Results are cached for 24h alongside text model cache.
+    """
+    base = cache_dir or Path("~/.local/share/giva").expanduser()
+    cache_path = base / _VLM_CACHE_KEY
+    cached = _load_cache(cache_path)
+    if cached is not None:
+        return cached
+
+    from huggingface_hub import HfApi
+
+    api = HfApi()
+    seen_ids: set[str] = set()
+    models: list[dict] = []
+
+    def _collect(raw_models):
+        for m in raw_models:
+            model_id = m.id
+            if model_id in seen_ids:
+                continue
+            name_lower = model_id.lower()
+            if any(k in name_lower for k in ("embedding", "reward", "reranker", "gguf")):
+                continue
+            params, quant = _parse_model_name(model_id)
+            if not params:
+                continue
+            seen_ids.add(model_id)
+            models.append({
+                "model_id": model_id,
+                "size_gb": _estimate_size_gb(params, quant),
+                "params": params,
+                "quant": quant,
+                "downloads": m.downloads or 0,
+            })
+
+    # Search 1: image-text-to-text pipeline (official VLM tag)
+    try:
+        _collect(api.list_models(
+            author="mlx-community",
+            pipeline_tag="image-text-to-text",
+            sort="downloads",
+            limit=100,
+        ))
+    except Exception:
+        pass
+
+    # Search 2: keyword searches for known VLM families
+    vlm_keywords = [
+        "Qwen2.5-VL", "Qwen2-VL", "Qwen-VL", "InternVL",
+        "Pixtral", "Llama-3.2-Vision", "Phi-3.5-vision",
+        "Gemma-3-vision", "SmolVLM",
+    ]
+    for keyword in vlm_keywords:
+        try:
+            _collect(api.list_models(
+                author="mlx-community",
+                search=keyword,
+                sort="downloads",
+                limit=20,
+            ))
+        except Exception:
+            pass
+
+    # Enrich top models with actual file sizes
+    by_size = sorted(models, key=lambda m: m["size_gb"], reverse=True)
+    _enrich_sizes(api, by_size[:20])
+
+    _save_cache(cache_path, models)
+    return models
+
+
+def recommend_vlm_model(
+    hardware_info: dict,
+    vlm_models: list[dict],
+    assistant_size_gb: float = 0.0,
+    filter_size_gb: float = 0.0,
+    config=None,
+) -> dict:
+    """Recommend the best VLM model for the user's hardware.
+
+    Takes into account the space already consumed by text models so the
+    VLM model fits in remaining memory.
+
+    Returns {"vlm_model": model_id, "reasoning": str}.
+    Falls back to heuristic if LLM fails.
+    """
+    ram_gb = hardware_info.get("ram_gb", 8)
+    max_size = max_model_size_gb(ram_gb)
+    vlm_budget = max(max_size - assistant_size_gb - filter_size_gb, 2.0)
+
+    # Filter to models that fit
+    candidates = sorted(
+        [m for m in vlm_models if m["size_gb"] <= vlm_budget],
+        key=lambda m: m["size_gb"],
+        reverse=True,
+    )
+
+    if not candidates:
+        return {
+            "vlm_model": "",
+            "reasoning": "No VLM model fits in remaining memory budget.",
+        }
+
+    # Build table for the prompt
+    vlm_lines = []
+    for m in candidates[:15]:
+        vlm_lines.append(
+            f"- {m['model_id']}  size={m['size_gb']:.1f}GB  "
+            f"params={m['params']}  quant={m['quant']}  downloads={m['downloads']}"
+        )
+    vlm_table = "\n".join(vlm_lines) if vlm_lines else "None found."
+
+    # Try LLM recommendation
+    try:
+        from giva.llm.engine import manager
+
+        model_id = DEFAULT_MODEL
+        if config:
+            model_id = config.llm.filter_model or DEFAULT_MODEL
+
+        prompt = _VLM_RECOMMEND_PROMPT.format(
+            chip=hardware_info.get("chip", "Unknown"),
+            ram_gb=ram_gb,
+            vlm_budget_gb=vlm_budget,
+            vlm_table=vlm_table,
+        )
+
+        response = manager.generate(
+            model_id,
+            [
+                {"role": "system", "content": "You are a system configuration assistant."},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=200,
+            temp=0.1,
+            top_p=0.95,
+        )
+
+        result = _parse_vlm_recommendation(response)
+        if result:
+            # Validate that model is in our candidate list
+            valid_ids = {m["model_id"] for m in candidates}
+            if result["vlm_model"] in valid_ids:
+                return result
+            log.warning(
+                "LLM VLM recommendation not in candidates: %s", result["vlm_model"]
+            )
+    except Exception as e:
+        log.warning("LLM VLM recommendation failed, using heuristic: %s", e)
+
+    return _heuristic_vlm_recommendation(candidates)
+
+
+def _parse_vlm_recommendation(response: str) -> Optional[dict]:
+    """Parse the LLM's JSON VLM recommendation response."""
+    json_match = re.search(r'\{[^{}]*"vlm_model"[^{}]*\}', response, re.DOTALL)
+    if not json_match:
+        return None
+    try:
+        data = json.loads(json_match.group())
+        if "vlm_model" in data:
+            return {
+                "vlm_model": str(data["vlm_model"]),
+                "reasoning": str(data.get("reasoning", "")),
+            }
+    except (json.JSONDecodeError, KeyError):
+        pass
+    return None
+
+
+def _heuristic_vlm_recommendation(candidates: list[dict]) -> dict:
+    """Fallback heuristic VLM recommendation.
+
+    Prefers: Qwen2.5-VL family, 4-bit quant, larger size, Instruct variant.
+    """
+    def _score(m: dict) -> float:
+        mid = m["model_id"].lower()
+        s = 0.0
+        # Prefer Qwen2.5-VL (best open VLM for structured tasks)
+        if "qwen2.5-vl" in mid:
+            s += 30
+        elif "qwen2-vl" in mid or "qwen-vl" in mid:
+            s += 20
+        # Prefer larger models (better visual understanding)
+        s += min(m["size_gb"] * 3, 30)
+        # Prefer 4-bit for efficiency
+        if m.get("quant", "") == "4bit":
+            s += 10
+        # Prefer Instruct variants
+        if "instruct" in mid:
+            s += 10
+        # Penalize very small models
+        param_match = re.match(r"(\d+(?:\.\d+)?)", m.get("params", "0"))
+        if param_match and float(param_match.group(1)) < 3:
+            s -= 20
+        return s
+
+    best = max(candidates, key=_score)
+    return {
+        "vlm_model": best["model_id"],
+        "reasoning": (
+            f"Selected {best['model_id']} ({best['size_gb']:.1f} GB) as the best "
+            "VLM for browser automation within the remaining memory budget."
+        ),
+    }
 
 
 # --- Internal helpers ---

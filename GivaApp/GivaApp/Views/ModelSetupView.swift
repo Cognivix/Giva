@@ -12,6 +12,8 @@ struct ModelSetupView: View {
     var bootstrap: BootstrapManager
     @State private var selectedAssistant: String = ""
     @State private var selectedFilter: String = ""
+    @State private var selectedVlm: String = ""
+    @State private var vlmEnabled = false
     @State private var showCustomize = false
 
     var body: some View {
@@ -41,7 +43,7 @@ struct ModelSetupView: View {
             footer
                 .padding()
         }
-        .frame(width: 420, height: 520)
+        .frame(width: 420, height: 580)
         .task {
             if viewModel.availableModels == nil && !viewModel.isSettingUpModels {
                 // Use bootstrap's apiService if viewModel doesn't have one yet
@@ -122,9 +124,12 @@ struct ModelSetupView: View {
                 Button(action: {
                     selectedAssistant = models.recommended.assistant
                     selectedFilter = models.recommended.filter
+                    let vlm = models.recommended.vlm?.vlmModel ?? ""
+                    selectedVlm = vlm
                     viewModel.selectModels(
                         assistant: models.recommended.assistant,
-                        filter: models.recommended.filter
+                        filter: models.recommended.filter,
+                        vlm: vlm
                     )
                 }) {
                     Label("Use Recommended", systemImage: "sparkles")
@@ -139,12 +144,17 @@ struct ModelSetupView: View {
             }
 
             if !viewModel.isDownloadingModels {
+                vlmSection(models)
                 customizeSection(models)
             }
         }
         .onAppear {
             selectedAssistant = models.recommended.assistant
             selectedFilter = models.recommended.filter
+            if let vlmRec = models.recommended.vlm {
+                selectedVlm = vlmRec.vlmModel
+                vlmEnabled = !vlmRec.vlmModel.isEmpty
+            }
         }
     }
 
@@ -185,11 +195,25 @@ struct ModelSetupView: View {
                 }
             }
 
-            if status.assistant == "complete" && status.filter == "complete" {
-                Label("Both models already downloaded", systemImage: "checkmark.circle")
+            if let vlmRec = rec.vlm, !vlmRec.vlmModel.isEmpty {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 4) {
+                        Text("Vision (VLM)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        downloadStatusIcon(status.vlm)
+                    }
+                    Text(vlmRec.vlmModel.replacingOccurrences(of: "mlx-community/", with: ""))
+                        .font(.callout.bold())
+                }
+            }
+
+            if status.assistant == "complete" && status.filter == "complete"
+                && (status.vlm == "complete" || rec.vlm == nil || (rec.vlm?.vlmModel.isEmpty ?? true)) {
+                Label("All models already downloaded", systemImage: "checkmark.circle")
                     .font(.caption)
                     .foregroundStyle(.green)
-            } else if status.assistant == "partial" || status.filter == "partial" {
+            } else if status.assistant == "partial" || status.filter == "partial" || status.vlm == "partial" {
                 Label("Interrupted download detected — will resume", systemImage: "arrow.clockwise.circle")
                     .font(.caption)
                     .foregroundStyle(.orange)
@@ -213,6 +237,50 @@ struct ModelSetupView: View {
         default:
             EmptyView()
         }
+    }
+
+    // MARK: - VLM Section
+
+    private func vlmSection(_ models: AvailableModelsResponse) -> some View {
+        let hasVlmModels = !(models.vlmModels ?? []).isEmpty
+        return Group {
+            if hasVlmModels {
+                VStack(alignment: .leading, spacing: 8) {
+                    Toggle(isOn: $vlmEnabled) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Browser Automation (VLM)")
+                                .font(.callout.bold())
+                            Text("Enable visual AI for web tasks via Chrome extension")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .toggleStyle(.switch)
+
+                    if vlmEnabled {
+                        Picker("VLM Model", selection: $selectedVlm) {
+                            Text("None").tag("")
+                            ForEach(vlmModels(models)) { model in
+                                Text(modelPickerLabel(model))
+                                    .tag(model.modelId)
+                            }
+                        }
+                        .labelsHidden()
+                    }
+                }
+                .padding()
+                .background(.fill.tertiary, in: RoundedRectangle(cornerRadius: 10))
+            }
+        }
+    }
+
+    private func vlmModels(_ models: AvailableModelsResponse) -> [ModelInfo] {
+        (models.vlmModels ?? [])
+            .sorted {
+                let order0 = downloadSortOrder($0), order1 = downloadSortOrder($1)
+                if order0 != order1 { return order0 < order1 }
+                return $0.sizeGb > $1.sizeGb
+            }
     }
 
     // MARK: - Download Progress
@@ -353,7 +421,8 @@ struct ModelSetupView: View {
                 Button("Download Custom Selection") {
                     viewModel.selectModels(
                         assistant: selectedAssistant,
-                        filter: selectedFilter
+                        filter: selectedFilter,
+                        vlm: vlmEnabled ? selectedVlm : ""
                     )
                 }
                 .disabled(selectedAssistant.isEmpty || selectedFilter.isEmpty)
@@ -372,14 +441,24 @@ struct ModelSetupView: View {
         return "\(model.displayName) (\(model.sizeString))\(suffix)"
     }
 
-    private func recommendedDownloadStatus(_ models: AvailableModelsResponse) -> (assistant: String, filter: String) {
+    private func recommendedDownloadStatus(
+        _ models: AvailableModelsResponse
+    ) -> (assistant: String, filter: String, vlm: String) {
         let aStatus = models.compatibleModels.first {
             $0.modelId == models.recommended.assistant
         }?.downloadStatus ?? "not_downloaded"
         let fStatus = models.compatibleModels.first {
             $0.modelId == models.recommended.filter
         }?.downloadStatus ?? "not_downloaded"
-        return (aStatus, fStatus)
+        let vStatus: String
+        if let vlmId = models.recommended.vlm?.vlmModel, !vlmId.isEmpty {
+            vStatus = (models.vlmModels ?? []).first {
+                $0.modelId == vlmId
+            }?.downloadStatus ?? "not_downloaded"
+        } else {
+            vStatus = "not_downloaded"
+        }
+        return (aStatus, fStatus, vStatus)
     }
 
     // MARK: - Footer

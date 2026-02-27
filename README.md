@@ -18,7 +18,7 @@ All data stays on your device. No cloud APIs, no telemetry.
 - **Three-tier conversation memory** — Active window (recent turns), session summary (compressed by filter model), and learned facts (permanent preferences extracted during daily review)
 - **Proactive suggestions** — Morning briefing, priority engine, and upcoming event summaries
 - **Voice mode** — Optional TTS (Qwen3-TTS) and STT (Lightning Whisper) via mlx-audio, with two-tier silence detection and progressive chunk transcription
-- **VLM browser automation** — Visual web task execution via Chrome extension + VLM inference. A WebOrchestratorAgent decomposes high-level web tasks into ordered subtasks, writes them to a SQLite queue, and a Chrome extension polls the API to drive screenshot capture → VLM analysis → DOM actions (click, type, scroll). Opt-in via `[vlm]` config section
+- **VLM browser automation** — Visual web task execution via Chrome extension + VLM inference. A WebOrchestratorAgent decomposes high-level web tasks into ordered subtasks, writes them to a SQLite queue, and a Chrome extension polls the API to drive screenshot capture → VLM analysis → DOM actions (click, type, scroll). VLM model selection is integrated into bootstrap and Settings — the system discovers MLX VLM models from HuggingFace, filters by remaining memory budget, and recommends models (preferring Qwen2.5-VL). Opt-in via `[vlm]` config section
 - **MCP integration** — Pluggable Model Context Protocol servers for filesystem, web fetch, iMessage, Notes, Discord, and more. Servers auto-register as agents at startup
 - **Writing style profiling** — Learns your communication patterns from sent emails
 - **Power-aware scheduling** — Sync and model loading defer when on battery (≤50%), under thermal pressure, or high memory usage
@@ -238,6 +238,7 @@ docs/                   # Agent architecture + bootstrap design
 - **Power-aware scheduling** — sync defers on low battery (≤50%) or thermal pressure (≥ serious). Models auto-unload after configurable idle timeout
 - **Goal-scoped conversations** — conversations table has nullable `goal_id`; global and goal chat are cleanly separated in the DB and UI
 - **VLM agent chain decoupling** — WebOrchestratorAgent plans and writes VLM subtasks to SQLite, then returns immediately. Chrome extension polls and drives VLM execution asynchronously. Separate `_vlm_lock` for VLM inference keeps text LLM unblocked
+- **VLM model selection** — VLM model discovery, recommendation, and download are integrated into bootstrap and Settings. Models are filtered to only show MLX VLM models that fit in remaining memory after text models are loaded. Heuristic and LLM-based recommendation prefers Qwen2.5-VL family with 4-bit quantization
 
 ## Development
 

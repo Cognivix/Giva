@@ -1074,14 +1074,14 @@ class GivaViewModel {
 
     /// Tell the server which models to use.  The server-side bootstrap
     /// picks up from here and downloads them automatically.
-    func selectModels(assistant: String, filter: String) {
+    func selectModels(assistant: String, filter: String, vlm: String = "") {
         guard let api = apiService else { return }
         isDownloadingModels = true
         modelSetupError = nil
 
         Task {
             do {
-                _ = try await api.selectModels(assistant: assistant, filter: filter)
+                _ = try await api.selectModels(assistant: assistant, filter: filter, vlm: vlm)
                 // Bootstrap SSE stream will report download progress.
                 // The BootstrapManager observes it and updates isReady.
             } catch {

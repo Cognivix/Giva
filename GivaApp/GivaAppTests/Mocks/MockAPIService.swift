@@ -171,6 +171,10 @@ final class MockAPIService: APIServiceProtocol, @unchecked Sendable {
             goals: GoalsConfigResponse(
                 strategyIntervalHours: 6, dailyReviewHour: 18,
                 maxStrategiesPerRun: 1, planHorizonDays: 7
+            ),
+            vlm: VlmConfigResponse(
+                enabled: false, model: "",
+                pollIntervalSeconds: 3, actionDelayMs: 800
             )
         )
     )
@@ -268,7 +272,7 @@ final class MockAPIService: APIServiceProtocol, @unchecked Sendable {
                        userInfo: [NSLocalizedDescriptionKey: "No models result configured"])
     }
 
-    func selectModels(assistant: String, filter: String) async throws -> ModelSelectResponse {
+    func selectModels(assistant: String, filter: String, vlm: String) async throws -> ModelSelectResponse {
         selectModelsCallCount += 1
         return try throwOrReturn(selectModelsResult)
     }

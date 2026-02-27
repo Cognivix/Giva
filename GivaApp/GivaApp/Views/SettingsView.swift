@@ -43,6 +43,9 @@ struct SettingsView: View {
     @State private var dailyReviewHour = 18
     @State private var planHorizonDays = 7
 
+    @State private var vlmEnabled = false
+    @State private var vlmModel = ""
+
     @State private var isSaving = false
     @State private var hasChanges = false
     @State private var saveMessage: String?
@@ -160,6 +163,21 @@ struct SettingsView: View {
                         .onChange(of: llmContextBudget) { _, _ in hasChanges = true }
                 }
             }
+
+            Section {
+                Toggle("Enable Browser Automation", isOn: $vlmEnabled)
+                    .onChange(of: vlmEnabled) { _, _ in hasChanges = true }
+
+                if vlmEnabled {
+                    vlmModelPickerField
+                }
+            } header: {
+                Label("Vision (VLM)", systemImage: "eye")
+            } footer: {
+                Text("VLM enables visual web task execution via the Chrome extension.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
         .safeAreaInset(edge: .bottom) { configBottomBar }
@@ -179,6 +197,47 @@ struct SettingsView: View {
 
     private var filterBinding: Binding<String> {
         Binding(get: { llmFilterModel }, set: { llmFilterModel = $0 })
+    }
+
+    @ViewBuilder
+    private var vlmModelPickerField: some View {
+        LabeledContent("VLM Model") {
+            if let models = availableModels, let vlmList = models.vlmModels, !vlmList.isEmpty {
+                let sorted = vlmList.sorted {
+                    let o0 = downloadSortOrder($0), o1 = downloadSortOrder($1)
+                    if o0 != o1 { return o0 < o1 }
+                    return $0.sizeGb > $1.sizeGb
+                }
+                Picker("", selection: $vlmModel) {
+                    ForEach(sorted) { model in
+                        Text(modelPickerLabel(model)).tag(model.modelId)
+                    }
+                    if !sorted.contains(where: { $0.modelId == vlmModel })
+                        && !vlmModel.isEmpty {
+                        Text(vlmModel
+                            .replacingOccurrences(of: "mlx-community/", with: ""))
+                            .tag(vlmModel)
+                    }
+                }
+                .frame(maxWidth: 360)
+                .onChange(of: vlmModel) { _, _ in hasChanges = true }
+            } else {
+                HStack {
+                    TextField("", text: $vlmModel)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 300)
+                        .onChange(of: vlmModel) { _, _ in hasChanges = true }
+
+                    if isLoadingModels {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Button("Browse") {
+                            Task { await loadAvailableModels() }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     @ViewBuilder
@@ -613,6 +672,9 @@ struct SettingsView: View {
         dailyReviewHour = cfg.goals.dailyReviewHour
         planHorizonDays = cfg.goals.planHorizonDays
 
+        vlmEnabled = cfg.vlm.enabled
+        vlmModel = cfg.vlm.model
+
         hasChanges = false
     }
 
@@ -686,6 +748,13 @@ struct SettingsView: View {
                 updates["goals"] = [
                     "daily_review_hour": dailyReviewHour,
                     "plan_horizon_days": planHorizonDays,
+                ] as [String: Any]
+            }
+
+            if vlmEnabled != cfg.vlm.enabled || vlmModel != cfg.vlm.model {
+                updates["vlm"] = [
+                    "enabled": vlmEnabled,
+                    "model": vlmModel,
                 ] as [String: Any]
             }
         }

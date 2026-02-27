@@ -404,10 +404,11 @@ class APIService: APIServiceProtocol {
         return try await get("/api/models/available")
     }
 
-    func selectModels(assistant: String, filter: String) async throws -> ModelSelectResponse {
+    func selectModels(assistant: String, filter: String, vlm: String) async throws -> ModelSelectResponse {
         return try await post("api/models/select", body: ModelSelectRequest(
             assistantModel: assistant,
-            filterModel: filter
+            filterModel: filter,
+            vlmModel: vlm
         ))
     }
 
