@@ -21,6 +21,7 @@ private enum SystemAction: Equatable {
     case restart
     case upgrade
     case reset
+    case quit
 }
 
 struct GivaMainWindowView: View {
@@ -98,11 +99,21 @@ struct GivaMainWindowView: View {
             titleVisibility: .visible
         ) {
             if let action = pendingSystemAction {
-                Button(systemActionConfirmLabel(action),
-                       role: action == .reset ? .destructive : nil) {
-                    Task { await performSystemAction(action) }
+                if action == .quit {
+                    Button("Quit") {
+                        Task { await viewModel.quitApp(stopServer: false) }
+                    }
+                    Button("Quit & Stop Server") {
+                        Task { await viewModel.quitApp(stopServer: true) }
+                    }
+                    Button("Cancel", role: .cancel) { }
+                } else {
+                    Button(systemActionConfirmLabel(action),
+                           role: action == .reset ? .destructive : nil) {
+                        Task { await performSystemAction(action) }
+                    }
+                    Button("Cancel", role: .cancel) { }
                 }
-                Button("Cancel", role: .cancel) { }
             }
         } message: {
             if let action = pendingSystemAction {
@@ -391,6 +402,15 @@ struct GivaMainWindowView: View {
 
     @ViewBuilder
     private var toolbarButtons: some View {
+        // New Chat
+        Button {
+            sidebarSelection = .chat
+            viewModel.newChat()
+        } label: {
+            Label("New Chat", systemImage: "plus.bubble")
+        }
+        .keyboardShortcut("n", modifiers: .command)
+
         // Sync button
         Button {
             Task { await viewModel.triggerSync() }
@@ -431,7 +451,6 @@ struct GivaMainWindowView: View {
 
         // Minimize to popover
         Button {
-            viewModel.lastUsedFullWindow = false
             NSApp.keyWindow?.close()
         } label: {
             Label("Minimize to Menu Bar", systemImage: "arrow.down.forward.and.arrow.up.backward")
@@ -488,9 +507,9 @@ struct GivaMainWindowView: View {
             Divider()
 
             Button {
-                NSApplication.shared.terminate(nil)
+                pendingSystemAction = .quit
             } label: {
-                Label("Quit Giva", systemImage: "power")
+                Label("Quit Giva...", systemImage: "power")
             }
         } label: {
             Label("Settings", systemImage: "gearshape")
@@ -510,6 +529,7 @@ struct GivaMainWindowView: View {
         case .restart: return "Restart Server"
         case .upgrade: return "Upgrade Code"
         case .reset: return "Reset All Data"
+        case .quit: return "Quit Giva"
         case nil: return ""
         }
     }
@@ -519,6 +539,7 @@ struct GivaMainWindowView: View {
         case .restart: return "Restart"
         case .upgrade: return "Upgrade"
         case .reset: return "Erase Everything"
+        case .quit: return "Quit"
         }
     }
 
@@ -530,6 +551,8 @@ struct GivaMainWindowView: View {
             return "Re-installs from source and restarts the server. Data is preserved."
         case .reset:
             return "Deletes emails, events, tasks, goals, profile, and settings. Models are kept."
+        case .quit:
+            return "The background server can keep running for CLI access, or stop with the app."
         }
     }
 
@@ -538,6 +561,7 @@ struct GivaMainWindowView: View {
         case .restart: await viewModel.triggerRestart()
         case .upgrade: await viewModel.triggerUpgrade()
         case .reset: await viewModel.triggerReset()
+        case .quit: break  // handled by dedicated quit confirmation buttons
         }
     }
 

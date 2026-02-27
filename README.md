@@ -29,7 +29,7 @@ All data stays on your device. No cloud APIs, no telemetry.
 |-----------|-------------|
 | `giva` | Interactive CLI (prompt-toolkit + rich) |
 | `giva-server` | REST API + SSE streaming on `127.0.0.1:7483` |
-| **Giva.app** | SwiftUI menu bar panel + full window with chat, tasks, goals, agent activity, and settings (⌘,) |
+| **Giva.app** | SwiftUI full window + menu bar panel with chat, tasks, goals, agent activity, quick-drop (⌥Space), and settings (⌘,) |
 
 ## Requirements
 
@@ -213,6 +213,7 @@ GivaApp/                        # SwiftUI macOS app (Xcode project)
 │   ├── GoalsWindowView.swift   # Goals detail window
 │   ├── SettingsView.swift      # Settings (⌘,): tabbed layout
 │   ├── QuickActionsView.swift  # Bottom action bar
+│   ├── QuickDropView.swift     # ⌥Space floating prompt capture
 │   ├── AgentActivityPanel.swift    # Agent queue inspector
 │   └── AgentConfirmationCard.swift # Agent approval card
 └── GivaAppTests/               # Swift Testing suite
@@ -239,6 +240,7 @@ docs/                   # Agent architecture + bootstrap design
 - **Goal-scoped conversations** — conversations table has nullable `goal_id`; global and goal chat are cleanly separated in the DB and UI
 - **VLM agent chain decoupling** — WebOrchestratorAgent plans and writes VLM subtasks to SQLite, then returns immediately. Chrome extension polls and drives VLM execution asynchronously. All model operations serialized via a single lock to prevent concurrent loading
 - **VLM model selection** — VLM model discovery uses LLM-powered keyword search and iterative refinement (same multi-phase approach as text models). Recommendations use the assistant model (Settings) or Apple Foundation Model (bootstrap) for intelligent selection. Models are filtered to only show MLX VLM models that fit in remaining memory after text models are loaded
+- **Full window on launch** — The app always opens the full window when the server is ready; the menu bar popover is the "minimized" state. Quick-drop prompt capture (⌥Space) and quit confirmation with server lifecycle choice round out the app UX
 
 ## Development
 

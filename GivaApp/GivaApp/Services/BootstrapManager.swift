@@ -422,6 +422,23 @@ class BootstrapManager {
         }
     }
 
+    /// Stop the launchd daemon without restarting.
+    /// Used when quitting the app with "stop server" option.
+    func stopDaemon() async {
+        log.info("Stopping daemon (bootout only, no reload)")
+        observeTask?.cancel()
+        observeTask = nil
+        pollTask?.cancel()
+        pollTask = nil
+
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global(qos: .userInitiated).async {
+                _ = self.bootoutIfLoaded()
+                continuation.resume()
+            }
+        }
+    }
+
     /// Restart the launchd daemon (bootout + re-load).
     /// Public so ViewModel can trigger a restart without a full upgrade.
     /// Runs blocking launchctl + port-polling on a background queue to keep

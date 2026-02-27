@@ -117,6 +117,7 @@ GivaApp/                        # SwiftUI macOS app (Xcode project)
 │   ├── GoalsWindowView.swift   # Goals detail window (strategy, objectives, goal chat)
 │   ├── SettingsView.swift      # Settings window (⌘,): Models, Sync, General, Goals, Profile
 │   ├── QuickActionsView.swift  # Bottom action bar
+│   ├── QuickDropView.swift     # Option+Space floating prompt capture
 │   ├── AgentActivityPanel.swift    # Inspector panel: agent queue status
 │   └── AgentConfirmationCard.swift # Inline agent approval/dismissal card
 └── GivaAppTests/               # Swift Testing test suite
@@ -306,6 +307,7 @@ The macOS frontend: menu bar panel, full window, and all UI views.
 | `GivaApp/Views/GoalsWindowView.swift` | Goals: strategy, objectives, goal-scoped chat |
 | `GivaApp/Views/SettingsView.swift` | Settings window (⌘,): Models, Sync, General, Goals, Profile tabs |
 | `GivaApp/Views/QuickActionsView.swift` | Bottom action bar (sync, voice, reset) |
+| `GivaApp/Views/QuickDropView.swift` | Option+Space floating prompt capture panel |
 
 ### 12. Testing
 Test infrastructure across both Python and Swift.
@@ -367,6 +369,9 @@ Visual browser task execution via Chrome extension + VLM inference.
 - **VLM browser automation — agent chain decoupling**: The `WebOrchestratorAgent` runs synchronously within the agent queue (holds `_llm_lock` for planning), writes VLM subtasks to `vlm_task_queue` in SQLite, and returns immediately. The Chrome extension polls `/api/vlm/tasks/current` and drives the VLM execution loop asynchronously. VLM inference uses the same `_llm_lock` as text LLM — only one model operation at a time to prevent concurrent model loading. Each subtask has a `sequence` number; the extension only sees the current (lowest-sequence queued/in_progress) subtask. When all subtasks for a `job_id` complete, the server broadcasts a `vlm_job_completed` SSE event.
 - **VLM model selection in bootstrap & settings**: VLM model selection is integrated into both the bootstrap wizard (ModelSetupView) and Settings → Models tab. `list_mlx_vlm_models()` queries HuggingFace for mlx-community VLM models (image-text-to-text pipeline + LLM-powered keyword discovery) and caches results for 24h. `recommend_vlm_model()` calculates the remaining memory budget after text models (assistant + filter) are accounted for, then uses the Apple Foundation Model (preferred) or filter model to pick the best VLM that fits. The recommendation uses an enriched prompt covering visual understanding quality, structured output reliability, size/quality tradeoff, quantization, minimum viable size, and community adoption. Fallback heuristic prefers Qwen2.5-VL family, 4-bit quant, larger sizes. `save_model_choices()` and `/api/models/select` accept an optional `vlm_model` parameter; when provided, `[vlm]` config is written with `enabled = true`. Bootstrap downloads the VLM model alongside text models. The `/api/config` endpoint exposes the full `[vlm]` section (enabled, model, poll_interval_seconds, action_delay_ms) for Settings UI binding.
 - **Tiered recommendation model**: All model recommendation functions use `_get_recommendation_model()` which picks the best available model for the context: (1) **Settings flow** (post-bootstrap): uses the assistant model (e.g. Qwen3-30B) — the most capable reasoning LLM, best for advising on model changes/upgrades; (2) **Bootstrap flow** (first run, no models downloaded): uses the Apple Foundation Model (~3B) — always on-device, no download needed, smart enough for initial selection; (3) **Fallback**: configured filter model or DEFAULT_MODEL. This ensures recommendations are always as intelligent as possible given what's available.
+- **Full window on launch**: The app always opens the full window when the server becomes ready, not just the menu bar popover. The menu bar popover is the "minimized" state — an active user choice (via the "Minimize to Menu Bar" toolbar button). The `FullWindowLauncherView` / `lastUsedFullWindow` preference are removed; `GivaApp.swift` now uses `MenuBarContent` (a dedicated View struct with `@Environment(\.openWindow)`) that auto-opens the main window in `onChange(of: bootstrap.isReady)`.
+- **Quick-drop panel (Option+Space)**: A lightweight floating text field for fast prompt capture. Registered via `NSEvent.addLocalMonitorForEvents` (works when app/menu bar active) + `addGlobalMonitorForEvents` (works from any app if Accessibility granted). Enter sends the prompt as a background chat message (fire-and-forget), Cmd+Enter opens the full UI with the prompt in the input field. The hotkey sets `viewModel.quickDropRequested`, and `MenuBarContent` bridges it to `openWindow(id: "quick-drop")`.
+- **Quit confirmation with server lifecycle**: The "Quit Giva" gear menu item shows a confirmation with two options: "Quit" (keeps the daemon running for CLI access) and "Quit & Stop Server" (bootouts the launchd daemon before terminating). Uses the established inline confirmation banner pattern in the popover and `.confirmationDialog` in the full window.
 
 ## Agent Architecture
 
@@ -447,6 +452,7 @@ Uses the **Swift Testing** framework (`@Test`, `#expect`, `@Suite`). Test target
 - **`AgentActionHandler`**: Shared agent action parsing (actions, confirmations, queued agent names) lives in `AgentActionHandler.swift`. Both `GivaViewModel` and `GoalsViewModel` use it — never duplicate parsing logic.
 - **No system dialogs in menu bar apps**: `.confirmationDialog`, `.alert`, and `.sheet` do not work reliably inside `MenuBarExtra(.window)` popovers — they appear behind the popover, fail to dismiss, or never show at all. **Always use inline confirmation banners** embedded in the view hierarchy instead. See `MainPanelView.confirmationBanner(for:)` for the pattern.
 - **Xcode project file**: When adding or removing `.swift` files outside of Xcode, you **must** manually update `GivaApp.xcodeproj/project.pbxproj`. Each new file requires entries in four places: (1) `PBXBuildFile` — a build reference pointing to the file reference, (2) `PBXFileReference` — the file's identity and type, (3) `PBXGroup` — add the file reference to its parent group's `children` list, (4) `PBXSourcesBuildPhase` — add the build reference to the `files` list. App source files use `A1xxxxxx`/`A2xxxxxx` IDs; test files use `B1xxxxxx`/`B2xxxxxx`. Forgetting any of these causes "Cannot find X in scope" build errors.
+- **Keyboard shortcuts**: `⌘N` = new chat, `⌘,` = settings, `⌥Space` = quick-drop prompt capture, `⌘⏎` in quick-drop = open in full chat, `⏎` in quick-drop = send in background, `Esc` = dismiss quick-drop. Shortcuts are registered as SwiftUI `.keyboardShortcut` modifiers (for in-app) and `NSEvent` monitors (for Option+Space global hotkey).
 
 ## Logging
 

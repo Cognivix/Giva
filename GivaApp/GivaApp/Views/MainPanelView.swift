@@ -20,6 +20,7 @@ struct MainPanelView: View {
         case restart
         case upgrade
         case reset
+        case quit
     }
 
     var body: some View {
@@ -231,7 +232,6 @@ struct MainPanelView: View {
 
             // Expand to full window
             Button {
-                viewModel.lastUsedFullWindow = true
                 openWindow(id: "main-window")
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                     NSApp.activate(ignoringOtherApps: true)
@@ -300,9 +300,9 @@ struct MainPanelView: View {
                 Divider()
 
                 Button {
-                    NSApplication.shared.terminate(nil)
+                    pendingAction = .quit
                 } label: {
-                    Label("Quit Giva", systemImage: "power")
+                    Label("Quit Giva...", systemImage: "power")
                 }
             } label: {
                 Image(systemName: "gearshape")
@@ -348,7 +348,74 @@ struct MainPanelView: View {
     // System dialogs (.confirmationDialog, .alert) do not work reliably inside
     // MenuBarExtra(.window) popovers. Use inline banners instead.
 
+    @ViewBuilder
     private func confirmationBanner(for action: SystemAction) -> some View {
+        if action == .quit {
+            quitConfirmationBanner
+        } else {
+            standardConfirmationBanner(for: action)
+        }
+    }
+
+    private var quitConfirmationBanner: some View {
+        VStack(spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: "power")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+
+                Text("Quit Giva")
+                    .font(.system(size: 11, weight: .semibold))
+
+                Spacer()
+
+                Button(action: { withAnimation(.easeOut(duration: 0.15)) { pendingAction = nil } }) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+
+            Text("The background server can keep running for CLI access, or stop with the app.")
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            HStack(spacing: 8) {
+                Spacer()
+
+                Button("Cancel") {
+                    withAnimation(.easeOut(duration: 0.15)) { pendingAction = nil }
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+
+                Button("Quit & Stop Server") {
+                    withAnimation(.easeOut(duration: 0.15)) { pendingAction = nil }
+                    Task { await viewModel.quitApp(stopServer: true) }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .font(.system(size: 11))
+
+                Button("Quit") {
+                    withAnimation(.easeOut(duration: 0.15)) { pendingAction = nil }
+                    Task { await viewModel.quitApp(stopServer: false) }
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .font(.system(size: 11))
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color.secondary.opacity(0.06))
+        .transition(.move(edge: .top).combined(with: .opacity))
+    }
+
+    private func standardConfirmationBanner(for action: SystemAction) -> some View {
         let isDestructive = action == .reset
         let title: String
         let message: String
@@ -367,6 +434,10 @@ struct MainPanelView: View {
             title = "Reset All Data"
             message = "Deletes emails, events, tasks, goals, profile, and settings. Models are kept."
             confirmLabel = "Erase Everything"
+        case .quit:
+            title = ""
+            message = ""
+            confirmLabel = ""
         }
 
         return VStack(spacing: 6) {
@@ -412,6 +483,7 @@ struct MainPanelView: View {
                         case .restart: await viewModel.triggerRestart()
                         case .upgrade: await viewModel.triggerUpgrade()
                         case .reset: await viewModel.triggerReset()
+                        case .quit: break
                         }
                     }
                 }

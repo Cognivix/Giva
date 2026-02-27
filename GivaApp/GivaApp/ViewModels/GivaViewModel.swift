@@ -180,21 +180,9 @@ class GivaViewModel {
     /// Whether the main window is currently open (tracked for dock icon + menu bar behavior)
     var isMainWindowOpen: Bool = false
 
-    /// Persisted preference: should the menu bar click open the full window or the popover?
-    /// Defaults to `true` (full window on first launch). Only changed by the toggle button.
-    private static let lastUsedFullWindowKey = "lastUsedFullWindow"
-
-    var lastUsedFullWindow: Bool {
-        get {
-            access(keyPath: \.lastUsedFullWindow)
-            return UserDefaults.standard.object(forKey: Self.lastUsedFullWindowKey) as? Bool ?? true
-        }
-        set {
-            withMutation(keyPath: \.lastUsedFullWindow) {
-                UserDefaults.standard.set(newValue, forKey: Self.lastUsedFullWindowKey)
-            }
-        }
-    }
+    /// Bridge for hotkey → window opening. The Option+Space hotkey sets this to true,
+    /// and the MenuBarContent view opens the quick-drop window via onChange.
+    var quickDropRequested: Bool = false
 
     // Agent queue state
     var pendingConfirmation: AgentConfirmation?
@@ -495,6 +483,14 @@ class GivaViewModel {
             // Refresh conversation dates for sidebar
             await loadConversationDates()
         }
+    }
+
+    /// Clear the current conversation and start fresh.
+    func newChat() {
+        cancelStreaming()
+        messages.removeAll()
+        currentInput = ""
+        errorMessage = nil
     }
 
     func cancelStreaming() {
@@ -1056,6 +1052,22 @@ class GivaViewModel {
         } else {
             log.info("Reset: server not ready yet (bootstrap will drive UI)")
         }
+    }
+
+    // MARK: - Quit
+
+    /// Quit the app, optionally stopping the background server daemon.
+    func quitApp(stopServer: Bool) async {
+        if stopServer {
+            log.info("Quit: stopping server daemon")
+            sessionStreamTask?.cancel()
+            sessionStreamTask = nil
+            streamTask?.cancel()
+            streamTask = nil
+            await bootstrapManager?.stopDaemon()
+        }
+        log.info("Quit: terminating app (stopServer=\(stopServer))")
+        NSApplication.shared.terminate(nil)
     }
 
     // MARK: - Model Setup
