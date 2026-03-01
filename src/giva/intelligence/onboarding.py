@@ -90,6 +90,10 @@ def start_onboarding(
     full_text = "".join(full_response)
     visible_full = "".join(visible_text)
 
+    # Clean GPT-style special tokens from saved text
+    from giva.llm.engine import strip_special_tokens
+    visible_full = strip_special_tokens(visible_full)
+
     _parse_and_save(full_text, visible_full, "assistant", store, step=1)
 
     # Initialize onboarding history
@@ -154,6 +158,10 @@ def continue_onboarding(
 
     full_text = "".join(full_response)
     visible_full = "".join(visible_text)
+
+    # Clean GPT-style special tokens from saved text
+    from giva.llm.engine import strip_special_tokens
+    visible_full = strip_special_tokens(visible_full)
 
     # Parse profile update from tags
     update = _parse_and_save(full_text, visible_full, "assistant", store, step=step)

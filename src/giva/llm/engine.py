@@ -13,12 +13,54 @@ instead of loading a separate MLX model.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Generator, Optional
 
 from giva.config import LLMConfig
 
 log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Special token cleanup for non-streaming (accumulated) text
+# ---------------------------------------------------------------------------
+
+_SPECIAL_TOKEN_RE = re.compile(r"<\|[^|]*\|>")
+
+
+def strip_special_tokens(text: str) -> str:
+    """Remove GPT-style ``<|...|>`` special tokens and reasoning channels.
+
+    Converts ``<|channel|>analysis<|message|>...<|channel|>final<|message|>``
+    to ``<think>...</think>`` (so the existing ``<think>`` strip handles it),
+    then strips any remaining ``<|...|>`` tokens and orphaned role words.
+
+    Use this on accumulated (non-streaming) text before saving to the DB or
+    onboarding history.
+    """
+    # Convert GPT-style channels to <think>/</ think> first
+    text = text.replace("<|channel|>analysis<|message|>", "<think>")
+    for variant in (
+        "<|end|><|start|>assistant<|channel|>final<|message|>",
+        "<|end|>assistant<|channel|>final<|message|>",
+        "<|end|><|start|><|channel|>final<|message|>",
+        "<|start|>assistant<|channel|>final<|message|>",
+        "<|end|><|channel|>final<|message|>",
+        "<|channel|>final<|message|>",
+    ):
+        text = text.replace(variant, "</think>")
+
+    # Strip <think>...</think> blocks (reasoning content) and orphan tags
+    text = re.sub(r"<think>.*?</think>\s*", "", text, flags=re.DOTALL)
+    text = text.replace("<think>", "").replace("</think>", "")
+
+    # Strip remaining special tokens + adjacent role words
+    text = re.sub(r"<\|[^|]*\|>\s*(?:assistant|user|system)(?=\s*<\|)", "", text)
+    text = re.sub(r"\b(?:assistant|user|system)\s*<\|[^|]*\|>", "", text)
+    text = _SPECIAL_TOKEN_RE.sub("", text)
+
+    return text
 
 
 def _make_sampler(temp: float = 0.7, top_p: float = 0.9):

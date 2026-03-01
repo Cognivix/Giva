@@ -97,7 +97,8 @@ def handle_query(
         full_response.append(token)
         yield token
 
-    # Save the assistant's response (strip <think>...</think> from conversation history)
+    # Save the assistant's response (strip thinking blocks + special tokens)
     raw = "".join(full_response)
-    clean = re.sub(r"<think>.*?</think>\s*", "", raw, flags=re.DOTALL)
+    from giva.llm.engine import strip_special_tokens
+    clean = strip_special_tokens(raw)
     store.add_message("assistant", clean, goal_id=goal_id, task_id=task_id)

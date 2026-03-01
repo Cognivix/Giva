@@ -444,3 +444,187 @@ class TestThinkParser:
         all_events += parser.flush()
         result = "".join(d for _, d in all_events)
         assert result == "Hello"
+
+
+class TestSpecialTokenFilter:
+    """Tests for _SpecialTokenFilter that normalises GPT-style tokens."""
+
+    @pytest.fixture
+    def filt(self):
+        from giva.server import _SpecialTokenFilter
+        return _SpecialTokenFilter()
+
+    def test_plain_text_passthrough(self, filt):
+        """Text without special tokens passes through unchanged."""
+        assert filt.feed("Hello world") == "Hello world"
+        assert filt.flush() == ""
+
+    def test_strips_simple_special_tokens(self, filt):
+        """Standalone <|...|> tokens are stripped."""
+        result = filt.feed("Hello <|end|> world")
+        assert result.strip() == "Hello  world"
+
+    def test_gpt_analysis_becomes_think(self, filt):
+        """<|channel|>analysis<|message|> is converted to <think>."""
+        text = "<|channel|>analysis<|message|>reasoning text"
+        result = filt.feed(text) + filt.flush()
+        assert "<think>" in result
+        assert "reasoning text" in result
+        assert "<|channel|>" not in result
+
+    def test_gpt_final_becomes_close_think(self, filt):
+        """<|channel|>final<|message|> is converted to </think>."""
+        text = (
+            "<|channel|>analysis<|message|>think here"
+            "<|end|><|start|>assistant<|channel|>final<|message|>"
+            "visible text"
+        )
+        result = filt.feed(text) + filt.flush()
+        assert "<think>" in result
+        assert "</think>" in result
+        assert "visible text" in result
+        assert "<|" not in result
+
+    def test_full_gpt_reasoning_streamed(self, filt):
+        """Simulate GPT-style tokens arriving one at a time."""
+        tokens = [
+            "<|channel|>", "analysis", "<|message|>",
+            "I need to think about this.",
+            "<|end|>", "<|start|>", "assistant",
+            "<|channel|>", "final", "<|message|>",
+            "The answer is 42."
+        ]
+        result = ""
+        for token in tokens:
+            result += filt.feed(token)
+        result += filt.flush()
+        assert "The answer is 42." in result
+        assert "<|" not in result
+
+    def test_combined_with_think_parser(self):
+        """Full pipeline: _SpecialTokenFilter → _ThinkParser."""
+        from giva.server import _SpecialTokenFilter, _ThinkParser
+
+        filt = _SpecialTokenFilter()
+        parser = _ThinkParser()
+
+        tokens = [
+            "<|channel|>", "analysis", "<|message|>",
+            "Internal reasoning here.",
+            "<|end|>", "<|start|>", "assistant",
+            "<|channel|>", "final", "<|message|>",
+            "Hello! How can I help?"
+        ]
+
+        all_events = []
+        for token in tokens:
+            normalised = filt.feed(token)
+            if normalised:
+                all_events += parser.feed(normalised)
+        remaining = filt.flush()
+        if remaining:
+            all_events += parser.feed(remaining)
+        all_events += parser.flush()
+
+        thinking = "".join(d for t, d in all_events if t == "thinking")
+        visible = "".join(d for t, d in all_events if t == "token")
+
+        assert "Internal reasoning here." in thinking
+        assert "Hello! How can I help?" in visible
+        assert "<|" not in visible
+
+    def test_strips_end_of_turn(self, filt):
+        """Common EOS tokens like <|end_of_turn|> are stripped."""
+        result = filt.feed("Hello world<|end_of_turn|>")
+        result += filt.flush()
+        assert result.strip() == "Hello world"
+
+    def test_holds_partial_special_token(self, filt):
+        """Buffer holds incomplete <|...|> at end."""
+        result = filt.feed("Hello <|")
+        assert result == "Hello "
+        result += filt.feed("end|> world")
+        result += filt.flush()
+        assert result.strip() == "Hello  world"
+
+    def test_holds_trailing_channel_token(self, filt):
+        """Buffer holds <|channel|> at end waiting for channel name."""
+        result = filt.feed("text <|channel|>")
+        # Should hold <|channel|> as it could be start of a pattern
+        assert "<|channel|>" not in result
+        result += filt.feed("analysis<|message|>more")
+        result += filt.flush()
+        assert "<think>" in result
+
+    def test_no_special_tokens_no_buffering(self, filt):
+        """Plain text is never buffered unnecessarily."""
+        for word in ["Hello", " ", "world", "!"]:
+            result = filt.feed(word)
+            assert result == word
+
+    def test_close_variant_without_start(self, filt):
+        """<|channel|>final<|message|> alone converts to </think>."""
+        result = filt.feed("<|channel|>final<|message|>visible")
+        result += filt.flush()
+        assert "</think>" in result
+        assert "visible" in result
+
+
+class TestStripSpecialTokens:
+    """Tests for the non-streaming strip_special_tokens() utility."""
+
+    def test_plain_text(self):
+        from giva.llm.engine import strip_special_tokens
+        assert strip_special_tokens("Hello world") == "Hello world"
+
+    def test_strips_think_blocks(self):
+        from giva.llm.engine import strip_special_tokens
+        text = "<think>reasoning</think>The answer is 42."
+        assert strip_special_tokens(text) == "The answer is 42."
+
+    def test_strips_gpt_reasoning_channel(self):
+        from giva.llm.engine import strip_special_tokens
+        text = (
+            "<|channel|>analysis<|message|>"
+            "We need to think about this."
+            "<|end|><|start|>assistant<|channel|>final<|message|>"
+            "Hi! How can I help?"
+        )
+        result = strip_special_tokens(text)
+        assert result == "Hi! How can I help?"
+        assert "<|" not in result
+
+    def test_strips_orphaned_special_tokens(self):
+        from giva.llm.engine import strip_special_tokens
+        text = "Hello <|end|> world <|end_of_turn|>"
+        result = strip_special_tokens(text)
+        assert "<|" not in result
+        assert "Hello" in result
+        assert "world" in result
+
+    def test_strips_role_words_between_tokens(self):
+        from giva.llm.engine import strip_special_tokens
+        text = "<|start|>assistant<|channel|>final<|message|>Hello"
+        result = strip_special_tokens(text)
+        assert result == "Hello"
+
+    def test_real_gpt_onboarding_output(self):
+        """Reproduce the exact output from the user's bug report."""
+        from giva.llm.engine import strip_special_tokens
+        text = (
+            '<|channel|>analysis<|message|>'
+            'We need to introduce ourselves briefly and ask first question, '
+            'referencing observations. Then after user response we will produce '
+            'visible reply and JSON. But now we just need to output the introduction '
+            'and first question. No JSON yet because we haven\'t gotten response. '
+            'So just visible textMake warm but efficient. Reference observation: '
+            'many emails to self and iCloud, and admin meetings. Ask about role, '
+            'job title, company/team. Let\'s do that.'
+            '<|end|><|start|>assistant<|channel|>final<|message|>'
+            'Hi Daniele! I\'m Giva, your AI assistant here to help streamline your '
+            'workflow and keep everything organized.'
+        )
+        result = strip_special_tokens(text)
+        assert result.startswith("Hi Daniele!")
+        assert "We need to introduce" not in result
+        assert "<|" not in result

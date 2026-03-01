@@ -12,6 +12,7 @@ import base64
 import io
 import json
 import logging
+import re
 import threading
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator, Optional
@@ -719,6 +720,128 @@ def _model_starts_in_think() -> bool:
         return "thinking" in model_id.lower()
 
 
+class _SpecialTokenFilter:
+    """Normalizes model-specific special tokens for downstream parsing.
+
+    GPT-style models emit ``<|channel|>analysis<|message|>`` for internal
+    reasoning and ``<|channel|>final<|message|>`` for visible output.
+    This filter converts them to ``<think>``/``</think>`` so the downstream
+    ``_ThinkParser`` handles them uniformly.
+
+    Also strips all remaining ``<|...|>`` special tokens (e.g. ``<|end|>``,
+    ``<|start|>``, ``<|end_of_turn|>``) and orphaned role words (like
+    ``assistant``) that appear between stripped tokens.
+
+    **Streaming safety**: HuggingFace tokenizers decode ``<|...|>`` tokens
+    as complete strings (they are single token IDs).  However the full
+    channel pattern ``<|channel|>analysis<|message|>`` spans three tokens,
+    so the buffer holds partial sequences until enough context arrives.
+    """
+
+    _SPECIAL_RE = re.compile(r"<\|[^|]*\|>")
+
+    # Full open/close patterns to convert.  Longest variants first so
+    # ``str.replace`` matches the most specific pattern.
+    _GPT_OPEN = "<|channel|>analysis<|message|>"
+    _GPT_CLOSE_VARIANTS = (
+        "<|end|><|start|>assistant<|channel|>final<|message|>",
+        "<|end|>assistant<|channel|>final<|message|>",
+        "<|end|><|start|><|channel|>final<|message|>",
+        "<|start|>assistant<|channel|>final<|message|>",
+        "<|end|><|channel|>final<|message|>",
+        "<|channel|>final<|message|>",
+    )
+
+    # Words that appear as role markers between special tokens.
+    _ROLE_WORDS = frozenset({"assistant", "user", "system"})
+
+    # Partial-word prefixes of channel names / role words — used to detect
+    # a partially-arrived pattern at the end of the buffer.
+    _PATTERN_WORDS = ("analysis", "final", "assistant", "user", "system", "message")
+
+    def __init__(self) -> None:
+        self._buf = ""
+
+    def feed(self, text: str) -> str:
+        """Feed a streaming chunk.  Returns normalised text (may be empty
+        while buffering a partial pattern)."""
+        self._buf += text
+
+        # --- Phase 1: replace full GPT channel patterns → <think> / </think>
+        self._buf = self._buf.replace(self._GPT_OPEN, "<think>")
+        for variant in self._GPT_CLOSE_VARIANTS:
+            self._buf = self._buf.replace(variant, "</think>")
+
+        # --- Phase 2: hold back potential partial patterns at the end
+        hold = self._hold_point()
+        if hold is not None:
+            emit = self._buf[:hold]
+            self._buf = self._buf[hold:]
+        else:
+            emit = self._buf
+            self._buf = ""
+
+        # --- Phase 3: strip remaining <|...|> tokens + adjacent role words
+        return self._clean(emit)
+
+    def flush(self) -> str:
+        """Flush remaining buffer at end of stream."""
+        result = self._clean(self._buf)
+        self._buf = ""
+        return result
+
+    # ------------------------------------------------------------------
+
+    def _clean(self, text: str) -> str:
+        """Strip orphan special tokens and role words sandwiched between them."""
+        # <|start|>assistant<|channel|>  →  strip the lot
+        text = re.sub(
+            r"<\|[^|]*\|>\s*(?:assistant|user|system)(?=\s*<\|)", "", text
+        )
+        # assistant<|channel|>  (role word immediately before a token)
+        text = re.sub(
+            r"\b(?:assistant|user|system)\s*<\|[^|]*\|>", "", text
+        )
+        # Strip any remaining <|...|>
+        text = self._SPECIAL_RE.sub("", text)
+        return text
+
+    def _hold_point(self) -> int | None:
+        """Return the buffer index from which to hold text, or ``None``."""
+        buf = self._buf
+
+        # Incomplete ``<|...|>`` at the very end (no closing ``|>``)
+        last_open = buf.rfind("<|")
+        if last_open >= 0 and buf.find("|>", last_open) < 0:
+            return last_open
+
+        # Trailing ``<`` that could start ``<|``
+        if buf.endswith("<"):
+            return len(buf) - 1
+
+        # A complete special token at the tail that might be the start of
+        # a channel pattern — e.g. ``<|channel|>`` without the name yet.
+        for tok in ("<|channel|>", "<|start|>", "<|end|>"):
+            if buf.endswith(tok):
+                return len(buf) - len(tok)
+
+        # Special token followed by a word (partial or complete) that could
+        # be part of a multi-token channel pattern.  Hold both partial
+        # prefixes (e.g. "ana") and complete words (e.g. "analysis") since
+        # the next token (e.g. ``<|message|>``) may complete the pattern.
+        for tok in ("<|channel|>", "<|start|>", "<|end|>"):
+            idx = buf.rfind(tok)
+            if idx >= 0:
+                after = buf[idx + len(tok) :]
+                if after and after.isalpha() and not self._SPECIAL_RE.search(after):
+                    lower = after.lower()
+                    for word in self._PATTERN_WORDS:
+                        if word.startswith(lower):
+                            return idx
+
+        return None
+
+
 class _ThinkParser:
     """Stateful parser that splits streamed LLM output into thinking vs. response.
 
@@ -839,14 +962,23 @@ async def _sync_gen_to_sse(gen_fn, *args, **kwargs) -> AsyncGenerator[dict, None
 
             # Some models (Qwen3-Next-*-Thinking) inject <think> in the prompt
             # template, so the model outputs thinking content without a <think> tag.
+            token_filter = _SpecialTokenFilter()
             parser = _ThinkParser(start_in_think=_model_starts_in_think())
             with _llm_lock:
                 for token in gen_fn(*args, **kwargs):
-                    for event_type, data in parser.feed(token):
+                    normalised = token_filter.feed(token)
+                    if normalised:
+                        for event_type, data in parser.feed(normalised):
+                            loop.call_soon_threadsafe(
+                                queue.put_nowait, {"event": event_type, "data": data}
+                            )
+                # Flush both filters
+                remaining = token_filter.flush()
+                if remaining:
+                    for event_type, data in parser.feed(remaining):
                         loop.call_soon_threadsafe(
                             queue.put_nowait, {"event": event_type, "data": data}
                         )
-                # Flush any remaining buffer
                 for event_type, data in parser.flush():
                     loop.call_soon_threadsafe(
                         queue.put_nowait, {"event": event_type, "data": data}
@@ -919,10 +1051,14 @@ async def _sync_gen_to_sse_with_voice(
         if aq:
             aq.chat_active.set()
         try:
+            token_filter = _SpecialTokenFilter()
             parser = _ThinkParser(start_in_think=_model_starts_in_think())
             with _llm_lock:
                 for token in gen_fn(*args, **kwargs):
-                    for event_type, data in parser.feed(token):
+                    normalised = token_filter.feed(token)
+                    if not normalised:
+                        continue
+                    for event_type, data in parser.feed(normalised):
                         loop.call_soon_threadsafe(
                             queue.put_nowait, {"event": event_type, "data": data}
                         )
@@ -938,7 +1074,15 @@ async def _sync_gen_to_sse_with_voice(
                                         _synth_sentence(sentence)
                                 sentence_buffer = parts[-1]
 
-                # Flush parser
+                # Flush both filters
+                remaining = token_filter.flush()
+                if remaining:
+                    for event_type, data in parser.feed(remaining):
+                        loop.call_soon_threadsafe(
+                            queue.put_nowait, {"event": event_type, "data": data}
+                        )
+                        if event_type == "token":
+                            sentence_buffer += data
                 for event_type, data in parser.flush():
                     loop.call_soon_threadsafe(
                         queue.put_nowait, {"event": event_type, "data": data}
