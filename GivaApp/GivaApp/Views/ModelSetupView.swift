@@ -118,9 +118,12 @@ struct ModelSetupView: View {
 
     private func modelSelectionContent(_ models: AvailableModelsResponse) -> some View {
         VStack(spacing: 16) {
-            recommendationCard(models.recommended, models: models)
+            if viewModel.isDownloadingModels {
+                // Show selected models with live progress
+                downloadingModelsCard
+            } else {
+                recommendationCard(models.recommended, models: models)
 
-            if !viewModel.isDownloadingModels {
                 Button(action: {
                     selectedAssistant = models.recommended.assistant
                     selectedFilter = models.recommended.filter
@@ -137,13 +140,7 @@ struct ModelSetupView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
-            }
 
-            if viewModel.isDownloadingModels {
-                downloadProgressCard
-            }
-
-            if !viewModel.isDownloadingModels {
                 vlmSection(models)
                 customizeSection(models)
             }
@@ -285,76 +282,118 @@ struct ModelSetupView: View {
 
     // MARK: - Download Progress
 
-    private var downloadProgressCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label("Downloading models", systemImage: "arrow.down.circle")
+    /// Card shown during download — replaces the recommendation card.
+    /// Shows the actual selected models with live progress from the server.
+    private var downloadingModelsCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("Downloading selected models", systemImage: "arrow.down.circle")
                 .font(.headline)
 
-            if bootstrap.downloadProgress.isEmpty {
-                // Server hasn't started reporting yet
-                HStack(spacing: 8) {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text("Preparing download...")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            } else {
-                ForEach(
-                    bootstrap.downloadProgress.sorted(by: { $0.key < $1.key }),
-                    id: \.key
-                ) { modelId, progress in
-                    modelDownloadRow(modelId: modelId, progress: progress)
-                }
+            // Show selected models with their roles
+            selectedModelRow(role: "Assistant", modelId: selectedAssistant)
+            selectedModelRow(role: "Filter", modelId: selectedFilter)
+            if !selectedVlm.isEmpty {
+                selectedModelRow(role: "Vision (VLM)", modelId: selectedVlm)
             }
         }
         .padding()
         .background(.fill.tertiary, in: RoundedRectangle(cornerRadius: 10))
     }
 
-    private func modelDownloadRow(modelId: String, progress: BootstrapStepProgress) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(modelId.replacingOccurrences(of: "mlx-community/", with: ""))
-                .font(.caption.bold())
+    /// A single model row showing name, role, and live download progress.
+    private func selectedModelRow(role: String, modelId: String) -> some View {
+        let progress = bootstrap.downloadProgress[modelId]
+        let shortName = modelId.replacingOccurrences(of: "mlx-community/", with: "")
 
-            if progress.percent >= 100 {
-                HStack(spacing: 4) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                        .font(.caption2)
-                    Text("Complete")
-                        .font(.caption)
-                        .foregroundStyle(.green)
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(role)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if let p = progress {
+                    modelStatusBadge(p)
                 }
-            } else if progress.percent < 0 {
-                // Indeterminate — total size unknown
-                HStack(spacing: 8) {
+            }
+
+            Text(shortName)
+                .font(.callout.bold())
+
+            if let p = progress {
+                modelProgressIndicator(p)
+            } else {
+                // Server hasn't reported this model yet
+                HStack(spacing: 6) {
                     ProgressView()
                         .controlSize(.small)
-                    if let dlMb = progress.downloadedMb {
-                        Text(String(format: "%.0f MB downloaded", dlMb))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
+                    Text("Waiting...")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
-            } else {
-                ProgressView(value: progress.percent, total: 100)
-                    .tint(.blue)
+            }
+        }
+        .padding(.vertical, 4)
+    }
 
-                HStack {
-                    Text(String(format: "%.1f%%", progress.percent))
+    @ViewBuilder
+    private func modelStatusBadge(_ progress: BootstrapStepProgress) -> some View {
+        if progress.percent >= 100 {
+            Label("Done", systemImage: "checkmark.circle.fill")
+                .font(.caption2)
+                .foregroundStyle(.green)
+        } else if progress.status == "queued" {
+            Text("Queued")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        } else if progress.status == "preparing" || progress.status == "querying_size" {
+            Text(progress.displayStatus)
+                .font(.caption2)
+                .foregroundStyle(.orange)
+        } else if progress.percent >= 0 {
+            Text(String(format: "%.1f%%", progress.percent))
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.blue)
+        }
+    }
+
+    @ViewBuilder
+    private func modelProgressIndicator(_ progress: BootstrapStepProgress) -> some View {
+        if progress.percent >= 100 {
+            // Complete — no progress bar needed
+            EmptyView()
+        } else if progress.percent >= 0 {
+            // Determinate progress
+            ProgressView(value: progress.percent, total: 100)
+                .tint(.blue)
+
+            HStack {
+                Text(String(format: "%.1f%%", progress.percent))
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if let dlMb = progress.downloadedMb,
+                   let totalMb = progress.totalMb, totalMb > 0 {
+                    Text(String(
+                        format: "%.1f / %.1f GB",
+                        dlMb / 1024, totalMb / 1024
+                    ))
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                }
+            }
+        } else {
+            // Indeterminate — preparing or size unknown
+            HStack(spacing: 6) {
+                ProgressView()
+                    .controlSize(.small)
+                Text(progress.displayStatus)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if let dlMb = progress.downloadedMb, dlMb > 0 {
+                    Text(String(format: "%.0f MB", dlMb))
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(.secondary)
-                    Spacer()
-                    if let dlMb = progress.downloadedMb,
-                       let totalMb = progress.totalMb, totalMb > 0 {
-                        Text(String(
-                            format: "%.1f / %.1f GB",
-                            dlMb / 1024, totalMb / 1024
-                        ))
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                    }
                 }
             }
         }

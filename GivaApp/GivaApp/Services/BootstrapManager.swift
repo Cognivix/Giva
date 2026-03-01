@@ -511,12 +511,13 @@ class BootstrapManager {
             errorMessage = error
         }
 
-        // Extract download progress from the flat progress dict
-        if let progress = status.progress, !progress.isEmpty {
+        // Always update download progress — even empty dict clears stale data
+        if let progress = status.progress {
             downloadProgress = progress
             for (modelId, info) in progress {
                 let short = modelId.replacingOccurrences(of: "mlx-community/", with: "")
-                log.debug("[\(source)] \(short): \(String(format: "%.1f", info.percent))% (\(Int(info.downloadedMb ?? 0)) MB)")
+                let statusStr = info.status ?? "unknown"
+                log.debug("[\(source)] \(short): \(String(format: "%.1f", info.percent))% (\(Int(info.downloadedMb ?? 0)) MB) [\(statusStr)]")
             }
         }
     }

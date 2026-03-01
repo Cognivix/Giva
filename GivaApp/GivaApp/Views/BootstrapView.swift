@@ -142,28 +142,46 @@ struct BootstrapView: View {
                             Text(modelId.replacingOccurrences(of: "mlx-community/", with: ""))
                                 .font(.caption)
                             Spacer()
-                            if progress.percent < 0 {
-                                if let mb = progress.downloadedMb {
-                                    Text("\(Int(mb)) MB")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-                            } else if progress.percent >= 100 {
-                                Text("Done")
+                            if progress.percent >= 100 {
+                                Label("Done", systemImage: "checkmark.circle.fill")
                                     .font(.caption)
+                                    .foregroundStyle(.green)
+                            } else if progress.percent >= 0 {
+                                Text("\(Int(progress.percent))%")
+                                    .font(.caption.monospacedDigit())
                                     .foregroundStyle(.secondary)
                             } else {
-                                Text("\(Int(progress.percent))%")
+                                Text(progress.displayStatus)
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
                         }
-                        if progress.percent < 0 {
-                            ProgressView()
-                                .controlSize(.small)
+                        if progress.percent >= 100 {
+                            // Complete — green bar
+                            ProgressView(value: 100, total: 100)
+                                .tint(.green)
+                        } else if progress.percent >= 0 {
+                            // Determinate progress
+                            ProgressView(value: progress.percent, total: 100)
+                                .tint(.blue)
+                            if let dlMb = progress.downloadedMb,
+                               let totalMb = progress.totalMb, totalMb > 0 {
+                                Text(String(format: "%.1f / %.1f GB",
+                                            dlMb / 1024, totalMb / 1024))
+                                    .font(.caption2.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            }
                         } else {
-                            ProgressView(value: min(progress.percent, 100), total: 100)
-                                .tint(progress.percent >= 100 ? .green : .blue)
+                            // Indeterminate — preparing, querying, or size unknown
+                            HStack(spacing: 6) {
+                                ProgressView()
+                                    .controlSize(.small)
+                                if let dlMb = progress.downloadedMb, dlMb > 0 {
+                                    Text(String(format: "%.0f MB downloaded", dlMb))
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
                         }
                     }
                 }

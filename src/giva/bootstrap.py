@@ -373,7 +373,14 @@ async def run_bootstrap(app) -> None:
     # Step 1: Download default model (filter/bootstrap advisor)
     if not state.past("awaiting_model_selection"):
         state.advance("downloading_default_model")
+        # Seed progress immediately so UI shows the model name
+        state.progress[DEFAULT_MODEL] = {
+            "percent": -1, "downloaded_mb": 0, "total_mb": 0,
+            "status": "queued",
+        }
+        state.save()
         notifier.notify()
+        log.info("Bootstrap step 1: downloading default model %s", DEFAULT_MODEL)
 
         try:
             await _download_model_with_progress(
@@ -467,17 +474,43 @@ async def _download_model_with_progress(
 
     # Skip if already downloaded
     if is_model_downloaded(model_id):
+        log.info("Model %s already downloaded, skipping", model_id)
         state.progress[model_id] = {"percent": 100, "downloaded_mb": 0, "total_mb": 0}
         state.save()
         notifier.notify()
         return
 
+    # Set initial progress immediately so the UI shows this model
+    state.progress[model_id] = {
+        "percent": -1, "downloaded_mb": 0, "total_mb": 0,
+        "status": "preparing",
+    }
+    state.save()
+    notifier.notify()
+    log.info("Download starting for %s — cleaning up stale files", model_id)
+
     # Clean up stale .incomplete files from previous interrupted downloads.
     await loop.run_in_executor(None, _cleanup_stale_incomplete, model_id)
 
-    # Get total size
+    # Update status: querying model size
+    state.progress[model_id]["status"] = "querying_size"
+    state.save()
+    notifier.notify()
+    log.info("Querying model size for %s from HuggingFace...", model_id)
+
+    # Get total size (can be slow — HuggingFace API call)
     total_bytes = await loop.run_in_executor(None, get_model_total_bytes, model_id)
     total_mb = round(total_bytes / (1024 ** 2), 1) if total_bytes else 0
+    log.info("Model %s size: %.1f MB (%.1f GB)", model_id, total_mb, total_mb / 1024)
+
+    # Update status: downloading
+    state.progress[model_id] = {
+        "percent": 0 if total_bytes > 0 else -1,
+        "downloaded_mb": 0, "total_mb": total_mb,
+        "status": "downloading",
+    }
+    state.save()
+    notifier.notify()
 
     # Start download in thread
     done_event = asyncio.Event()
@@ -492,8 +525,10 @@ async def _download_model_with_progress(
             loop.call_soon_threadsafe(done_event.set)
 
     loop.run_in_executor(None, _run)
+    log.info("Download thread started for %s", model_id)
 
     # Poll progress
+    poll_count = 0
     while not done_event.is_set():
         cached = await loop.run_in_executor(
             None, get_cache_size, model_id
@@ -506,9 +541,15 @@ async def _download_model_with_progress(
 
         state.progress[model_id] = {
             "percent": pct, "downloaded_mb": dl_mb, "total_mb": total_mb,
+            "status": "downloading",
         }
         state.save()
         notifier.notify()
+
+        poll_count += 1
+        if poll_count % 5 == 0:  # Log every 10s
+            log.info("Download %s: %.1f%% (%.0f / %.0f MB)",
+                     model_id, pct if pct >= 0 else 0, dl_mb, total_mb)
 
         try:
             await asyncio.wait_for(done_event.wait(), timeout=2.0)
@@ -521,9 +562,11 @@ async def _download_model_with_progress(
     # Final 100%
     state.progress[model_id] = {
         "percent": 100, "downloaded_mb": total_mb, "total_mb": total_mb,
+        "status": "complete",
     }
     state.save()
     notifier.notify()
+    log.info("Download complete for %s", model_id)
 
 
 async def _download_user_models(
@@ -549,7 +592,17 @@ async def _download_user_models(
         models_to_download.add(config.vlm.model)
 
     state.advance("downloading_user_models")
+
+    # Seed progress for all models immediately so the UI knows what to expect
+    for model_id in models_to_download:
+        state.progress[model_id] = {
+            "percent": -1, "downloaded_mb": 0, "total_mb": 0,
+            "status": "queued",
+        }
+    state.save()
     notifier.notify()
+    log.info("Downloading %d user models: %s",
+             len(models_to_download), ", ".join(models_to_download))
 
     for model_id in models_to_download:
         try:

@@ -445,11 +445,27 @@ struct BootstrapStepProgress: Codable {
     let percent: Double
     let downloadedMb: Double?
     let totalMb: Double?
+    let status: String?
 
     enum CodingKeys: String, CodingKey {
-        case percent
+        case percent, status
         case downloadedMb = "downloaded_mb"
         case totalMb = "total_mb"
+    }
+
+    /// Human-readable status label for the UI.
+    var displayStatus: String {
+        switch status {
+        case "queued": return "Queued"
+        case "preparing": return "Preparing..."
+        case "querying_size": return "Querying model info..."
+        case "downloading": return percent < 0 ? "Downloading..." : ""
+        case "complete": return "Complete"
+        default:
+            if percent >= 100 { return "Complete" }
+            if percent < 0 { return "Preparing..." }
+            return ""
+        }
     }
 }
 
