@@ -29,6 +29,35 @@ log = logging.getLogger(__name__)
 _SPECIAL_TOKEN_RE = re.compile(r"<\|[^|]*\|>")
 
 
+_GPT_CLOSE_VARIANTS = (
+    "<|end|><|start|>assistant<|channel|>final<|message|>",
+    "<|end|>assistant<|channel|>final<|message|>",
+    "<|end|><|start|><|channel|>final<|message|>",
+    "<|start|>assistant<|channel|>final<|message|>",
+    "<|end|><|channel|>final<|message|>",
+    "<|channel|>final<|message|>",
+)
+
+
+def _normalise_thinking_tags(text: str) -> str:
+    """Convert GPT-style reasoning channels to ``<think>``/``</think>``."""
+    text = text.replace("<|channel|>analysis<|message|>", "<think>")
+    for variant in _GPT_CLOSE_VARIANTS:
+        text = text.replace(variant, "</think>")
+    # Standalone <|end|> closes an unclosed <think> block (GPT-OSS pattern)
+    if "<think>" in text and "</think>" not in text and "<|end|>" in text:
+        text = text.replace("<|end|>", "</think>", 1)
+    return text
+
+
+def _clean_special_tokens(text: str) -> str:
+    """Strip remaining ``<|...|>`` tokens and adjacent role words."""
+    text = re.sub(r"<\|[^|]*\|>\s*(?:assistant|user|system)(?=\s*<\|)", "", text)
+    text = re.sub(r"\b(?:assistant|user|system)\s*<\|[^|]*\|>", "", text)
+    text = _SPECIAL_TOKEN_RE.sub("", text)
+    return text
+
+
 def strip_special_tokens(text: str) -> str:
     """Remove GPT-style ``<|...|>`` special tokens and reasoning channels.
 
@@ -39,32 +68,39 @@ def strip_special_tokens(text: str) -> str:
     Use this on accumulated (non-streaming) text before saving to the DB or
     onboarding history.
     """
-    # Convert GPT-style channels to <think>/</ think> first
-    text = text.replace("<|channel|>analysis<|message|>", "<think>")
-    for variant in (
-        "<|end|><|start|>assistant<|channel|>final<|message|>",
-        "<|end|>assistant<|channel|>final<|message|>",
-        "<|end|><|start|><|channel|>final<|message|>",
-        "<|start|>assistant<|channel|>final<|message|>",
-        "<|end|><|channel|>final<|message|>",
-        "<|channel|>final<|message|>",
-    ):
-        text = text.replace(variant, "</think>")
-
-    # Standalone <|end|> closes an unclosed <think> block (GPT-OSS pattern)
-    if "<think>" in text and "</think>" not in text and "<|end|>" in text:
-        text = text.replace("<|end|>", "</think>", 1)
+    text = _normalise_thinking_tags(text)
 
     # Strip <think>...</think> blocks (reasoning content) and orphan tags
     text = re.sub(r"<think>.*?</think>\s*", "", text, flags=re.DOTALL)
     text = text.replace("<think>", "").replace("</think>", "")
 
-    # Strip remaining special tokens + adjacent role words
-    text = re.sub(r"<\|[^|]*\|>\s*(?:assistant|user|system)(?=\s*<\|)", "", text)
-    text = re.sub(r"\b(?:assistant|user|system)\s*<\|[^|]*\|>", "", text)
-    text = _SPECIAL_TOKEN_RE.sub("", text)
+    return _clean_special_tokens(text)
 
-    return text
+
+def extract_thinking(text: str) -> tuple[str, str]:
+    """Extract thinking content and clean visible text from raw LLM output.
+
+    Returns ``(visible_text, thinking_text)``.  If no thinking block is
+    found, ``thinking_text`` is empty.
+
+    Used instead of :func:`strip_special_tokens` when the caller wants
+    to *preserve* the thinking content (e.g. for saving to the DB).
+    """
+    text = _normalise_thinking_tags(text)
+
+    # Extract thinking content before stripping
+    thinking_parts = []
+    for match in re.finditer(r"<think>(.*?)</think>", text, flags=re.DOTALL):
+        part = match.group(1).strip()
+        if part:
+            thinking_parts.append(part)
+
+    # Strip thinking blocks to get visible text
+    visible = re.sub(r"<think>.*?</think>\s*", "", text, flags=re.DOTALL)
+    visible = visible.replace("<think>", "").replace("</think>", "")
+
+    visible = _clean_special_tokens(visible)
+    return visible, "\n\n".join(thinking_parts)
 
 
 def _make_sampler(temp: float = 0.7, top_p: float = 0.9):

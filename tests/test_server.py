@@ -569,6 +569,43 @@ class TestSpecialTokenFilter:
         assert "</think>" in result
         assert "visible" in result
 
+    def test_close_pattern_streamed_token_by_token(self):
+        """Close pattern arriving one token at a time must not leak 'assistant'.
+
+        Reproduces the bug where <|start|>assistant<|channel|> was split at
+        the trailing <|channel|>, emitting <|start|>assistant, and _clean()
+        could only strip <|start|> — leaving 'assistant' in visible output.
+        """
+        from giva.server import _SpecialTokenFilter, _ThinkParser
+
+        filt = _SpecialTokenFilter()
+        parser = _ThinkParser()
+
+        # Exact GPT-OSS token sequence: each <|...|> is a single yield
+        tokens = [
+            "<|channel|>", "analysis", "<|message|>",
+            "Internal reasoning.",
+            "<|end|>", "<|start|>", "assistant",
+            "<|channel|>", "final", "<|message|>",
+            "Hello! I'm Giva.",
+        ]
+
+        all_events = []
+        for token in tokens:
+            normalised = filt.feed(token)
+            if normalised:
+                all_events += parser.feed(normalised)
+        remaining = filt.flush()
+        if remaining:
+            all_events += parser.feed(remaining)
+        all_events += parser.flush()
+
+        visible = "".join(d for t, d in all_events if t == "token")
+        assert "assistant" not in visible, (
+            f"'assistant' leaked into visible output: {visible!r}"
+        )
+        assert "Hello! I'm Giva." in visible
+
     def test_standalone_end_closes_analysis(self, filt):
         """When analysis is open and <|end|> arrives without final channel, it closes think."""
         text = "<|channel|>analysis<|message|>reasoning here<|end|>The visible answer."
@@ -687,3 +724,57 @@ class TestStripSpecialTokens:
         assert result.startswith("Hi Daniele!")
         assert "We need to introduce" not in result
         assert "<|" not in result
+
+
+class TestExtractThinking:
+    """Tests for extract_thinking() which preserves thinking content."""
+
+    def test_plain_text_no_thinking(self):
+        from giva.llm.engine import extract_thinking
+        visible, thinking = extract_thinking("Hello world")
+        assert visible == "Hello world"
+        assert thinking == ""
+
+    def test_extracts_think_block(self):
+        from giva.llm.engine import extract_thinking
+        text = "<think>reasoning here</think>The answer is 42."
+        visible, thinking = extract_thinking(text)
+        assert visible == "The answer is 42."
+        assert thinking == "reasoning here"
+
+    def test_extracts_gpt_analysis_channel(self):
+        from giva.llm.engine import extract_thinking
+        text = (
+            "<|channel|>analysis<|message|>"
+            "We need to think about this."
+            "<|end|><|start|>assistant<|channel|>final<|message|>"
+            "Hi! How can I help?"
+        )
+        visible, thinking = extract_thinking(text)
+        assert visible == "Hi! How can I help?"
+        assert "We need to think about this." in thinking
+
+    def test_extracts_standalone_end(self):
+        from giva.llm.engine import extract_thinking
+        text = (
+            "<|channel|>analysis<|message|>"
+            "Internal reasoning."
+            "<|end|>"
+            "The visible response."
+        )
+        visible, thinking = extract_thinking(text)
+        assert visible == "The visible response."
+        assert "Internal reasoning." in thinking
+
+    def test_empty_thinking_block(self):
+        from giva.llm.engine import extract_thinking
+        text = "<think></think>Hello"
+        visible, thinking = extract_thinking(text)
+        assert visible == "Hello"
+        assert thinking == ""
+
+    def test_strip_still_works(self):
+        """strip_special_tokens still works after refactor."""
+        from giva.llm.engine import strip_special_tokens
+        text = "<think>reasoning</think>The answer is 42."
+        assert strip_special_tokens(text) == "The answer is 42."

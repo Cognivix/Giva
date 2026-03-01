@@ -702,9 +702,9 @@ struct ChatHistoryView: View {
             }
             do {
                 let response = try await api.getConversationMessages(date: dateString)
-                messages = response.messages.map { msg in
-                    ChatMessage(role: msg.role, content: msg.content)
-                }
+                messages = ChatMessage.fromHistory(
+                    response.messages.map { (role: $0.role, content: $0.content, type: $0.type) }
+                )
             } catch {
                 // Non-critical
             }

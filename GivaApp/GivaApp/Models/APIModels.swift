@@ -734,11 +734,20 @@ struct TaskChatRequest: Encodable {
 struct GoalMessageItem: Codable {
     let role: String
     let content: String
+    let type: String
     let createdAt: String?
 
     enum CodingKeys: String, CodingKey {
-        case role, content
+        case role, content, type
         case createdAt = "created_at"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        role = try c.decode(String.self, forKey: .role)
+        content = try c.decode(String.self, forKey: .content)
+        type = (try? c.decode(String.self, forKey: .type)) ?? "message"
+        createdAt = try? c.decodeIfPresent(String.self, forKey: .createdAt)
     }
 }
 
@@ -992,11 +1001,20 @@ struct ConversationMessagesResponse: Codable {
 struct ConversationMessageItem: Codable {
     let role: String
     let content: String
+    let type: String
     let createdAt: String?
 
     enum CodingKeys: String, CodingKey {
-        case role, content
+        case role, content, type
         case createdAt = "created_at"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        role = try c.decode(String.self, forKey: .role)
+        content = try c.decode(String.self, forKey: .content)
+        type = (try? c.decode(String.self, forKey: .type)) ?? "message"
+        createdAt = try? c.decodeIfPresent(String.self, forKey: .createdAt)
     }
 }
 
@@ -1148,14 +1166,19 @@ struct ChatMessage: Identifiable, Equatable {
     var isThinking: Bool
     let timestamp: Date
     var isStreaming: Bool
+    var messageType: String  // "message", "thinking", "agent_action"
 
-    init(role: String, content: String, timestamp: Date = Date(), isStreaming: Bool = false) {
+    init(
+        role: String, content: String, timestamp: Date = Date(),
+        isStreaming: Bool = false, messageType: String = "message"
+    ) {
         self.role = role
         self.content = content
         self.thinkingContent = ""
         self.isThinking = false
         self.timestamp = timestamp
         self.isStreaming = isStreaming
+        self.messageType = messageType
     }
 
     static func == (lhs: ChatMessage, rhs: ChatMessage) -> Bool {
@@ -1164,5 +1187,34 @@ struct ChatMessage: Identifiable, Equatable {
         && lhs.thinkingContent == rhs.thinkingContent
         && lhs.isThinking == rhs.isThinking
         && lhs.isStreaming == rhs.isStreaming
+        && lhs.messageType == rhs.messageType
+    }
+
+    /// Reconstruct chat messages from API history, attaching thinking rows
+    /// to the preceding assistant message's ``thinkingContent``.
+    static func fromHistory(
+        _ items: [(role: String, content: String, type: String)]
+    ) -> [ChatMessage] {
+        var result: [ChatMessage] = []
+        for item in items {
+            switch item.type {
+            case "thinking":
+                // Attach to the last assistant message
+                if let idx = result.indices.last,
+                   result[idx].role == "assistant" {
+                    result[idx].thinkingContent = item.content
+                }
+            case "agent_action":
+                result.append(ChatMessage(
+                    role: item.role, content: item.content,
+                    messageType: "agent_action"
+                ))
+            default:
+                result.append(ChatMessage(
+                    role: item.role, content: item.content
+                ))
+            }
+        }
+        return result
     }
 }

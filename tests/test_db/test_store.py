@@ -162,6 +162,78 @@ def test_task_scoped_conversations(tmp_db):
     assert len(recent_task) == 2
 
 
+def test_message_type_default(tmp_db):
+    """Messages default to type='message'."""
+    tmp_db.add_message("user", "Hello")
+    messages = tmp_db.get_recent_messages(limit=10)
+    assert len(messages) == 1
+    assert messages[0]["type"] == "message"
+
+
+def test_message_type_thinking(tmp_db):
+    """Thinking messages are saved and filtered separately."""
+    tmp_db.add_message("assistant", "The answer is 42.")
+    tmp_db.add_message("assistant", "Let me reason...", msg_type="thinking")
+
+    # Default filter (type=message only)
+    messages = tmp_db.get_recent_messages(limit=10)
+    assert len(messages) == 1
+    assert messages[0]["content"] == "The answer is 42."
+
+    # Explicit all-types filter
+    all_msgs = tmp_db.get_recent_messages(
+        limit=10, types=["message", "thinking"]
+    )
+    assert len(all_msgs) == 2
+    assert all_msgs[0]["type"] == "message"
+    assert all_msgs[1]["type"] == "thinking"
+
+
+def test_message_type_agent_action(tmp_db):
+    """Agent action messages use type='agent_action'."""
+    from giva.db.models import Task
+
+    task_id = tmp_db.add_task(
+        Task(title="Test task", source_type="manual", source_id=0)
+    )
+    tmp_db.add_message("user", "Do something", task_id=task_id)
+    tmp_db.add_message("assistant", "Done!", task_id=task_id)
+    tmp_db.add_message(
+        "system", "Agent created task: Follow up",
+        task_id=task_id, msg_type="agent_action",
+    )
+
+    # Default: only type=message
+    msgs = tmp_db.get_task_messages(task_id)
+    assert len(msgs) == 2
+
+    # All types
+    all_msgs = tmp_db.get_task_messages(
+        task_id, types=["message", "thinking", "agent_action"]
+    )
+    assert len(all_msgs) == 3
+    assert all_msgs[2]["type"] == "agent_action"
+
+
+def test_messages_for_date_includes_all_types(tmp_db):
+    """get_messages_for_date returns all types for complete history."""
+    tmp_db.add_message("user", "Hi")
+    tmp_db.add_message("assistant", "Hello!")
+    tmp_db.add_message("assistant", "Reasoning...", msg_type="thinking")
+
+    # SQLite datetime('now') is UTC; read back the actual stored date
+    all_msgs = tmp_db.get_recent_messages(
+        limit=10, types=["message", "thinking"]
+    )
+    stored_date = all_msgs[0]["created_at"][:10]
+
+    msgs = tmp_db.get_messages_for_date(stored_date)
+    assert len(msgs) == 3
+    types = [m["type"] for m in msgs]
+    assert "message" in types
+    assert "thinking" in types
+
+
 def test_stats(tmp_db):
     stats = tmp_db.get_stats()
     assert stats["emails"] == 0

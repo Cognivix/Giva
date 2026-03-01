@@ -834,38 +834,51 @@ class _SpecialTokenFilter:
         text = self._SPECIAL_RE.sub("", text)
         return text
 
-    def _hold_point(self) -> int | None:
-        """Return the buffer index from which to hold text, or ``None``."""
-        buf = self._buf
+    # All patterns to check for partial-prefix matching in _hold_point.
+    _ALL_PATTERNS = (
+        "<|channel|>analysis<|message|>",  # open
+        "<|end|><|start|>assistant<|channel|>final<|message|>",
+        "<|end|>assistant<|channel|>final<|message|>",
+        "<|end|><|start|><|channel|>final<|message|>",
+        "<|start|>assistant<|channel|>final<|message|>",
+        "<|end|><|channel|>final<|message|>",
+        "<|channel|>final<|message|>",
+    )
 
-        # Incomplete ``<|...|>`` at the very end (no closing ``|>``)
-        last_open = buf.rfind("<|")
-        if last_open >= 0 and buf.find("|>", last_open) < 0:
-            return last_open
+    def _hold_point(self) -> int | None:
+        """Return the buffer index from which to hold text, or ``None``.
+
+        Scans from each ``<|`` (or trailing ``<``) and checks whether the
+        remaining buffer suffix is a *prefix* of any known multi-token
+        pattern.  This correctly holds partial close sequences like
+        ``<|start|>assistant<|channel|>`` that span multiple yields.
+        """
+        buf = self._buf
 
         # Trailing ``<`` that could start ``<|``
         if buf.endswith("<"):
             return len(buf) - 1
 
-        # A complete special token at the tail that might be the start of
-        # a channel pattern — e.g. ``<|channel|>`` without the name yet.
-        for tok in ("<|channel|>", "<|start|>", "<|end|>"):
-            if buf.endswith(tok):
-                return len(buf) - len(tok)
+        # Walk every ``<|`` position in the buffer.
+        pos = 0
+        while True:
+            idx = buf.find("<|", pos)
+            if idx < 0:
+                break
+            suffix = buf[idx:]
 
-        # Special token followed by a word (partial or complete) that could
-        # be part of a multi-token channel pattern.  Hold both partial
-        # prefixes (e.g. "ana") and complete words (e.g. "analysis") since
-        # the next token (e.g. ``<|message|>``) may complete the pattern.
-        for tok in ("<|channel|>", "<|start|>", "<|end|>"):
-            idx = buf.rfind(tok)
-            if idx >= 0:
-                after = buf[idx + len(tok) :]
-                if after and after.isalpha() and not self._SPECIAL_RE.search(after):
-                    lower = after.lower()
-                    for word in self._PATTERN_WORDS:
-                        if word.startswith(lower):
-                            return idx
+            # Incomplete ``<|...|>`` (no closing ``|>``)
+            if "|>" not in suffix:
+                return idx
+
+            # Check if suffix is a *proper* prefix of any known pattern.
+            for pattern in self._ALL_PATTERNS:
+                if pattern.startswith(suffix) and suffix != pattern:
+                    return idx
+
+            # Not a prefix of any pattern — skip past this token.
+            end = buf.find("|>", idx)
+            pos = end + 2 if end >= 0 else idx + 2
 
         return None
 
@@ -1731,10 +1744,17 @@ async def task_messages(
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    msgs = store.get_task_messages(task_id, limit=limit)
+    msgs = store.get_task_messages(
+        task_id, limit=limit,
+        types=["message", "thinking", "agent_action"],
+    )
     return {
         "messages": [
-            {"role": m["role"], "content": m["content"], "created_at": m.get("created_at")}
+            {
+                "role": m["role"], "content": m["content"],
+                "type": m.get("type", "message"),
+                "created_at": m.get("created_at"),
+            }
             for m in msgs
         ],
         "count": len(msgs),
@@ -1868,17 +1888,17 @@ async def _run_post_chat(
                 if act_type == "task_created" and act_title:
                     store.add_message(
                         "system", f"Agent created task: {act_title}",
-                        task_id=task_id,
+                        task_id=task_id, msg_type="agent_action",
                     )
                 elif act_type == "task_completed" and act_title:
                     store.add_message(
                         "system", f"Agent completed task: {act_title}",
-                        task_id=task_id,
+                        task_id=task_id, msg_type="agent_action",
                     )
                 elif act_type == "progress" and act.get("note"):
                     store.add_message(
                         "system", f"Progress logged: {act['note']}",
-                        task_id=task_id,
+                        task_id=task_id, msg_type="agent_action",
                     )
 
         # 2. Run conversation compressor if needed (global chat only)
@@ -4098,7 +4118,10 @@ async def goal_messages(
     goal = store.get_goal(goal_id)
     if not goal:
         raise HTTPException(status_code=404, detail="Goal not found")
-    messages = store.get_goal_messages(goal_id, limit=limit)
+    messages = store.get_goal_messages(
+        goal_id, limit=limit,
+        types=["message", "thinking", "agent_action"],
+    )
     return {"messages": messages, "count": len(messages)}
 
 

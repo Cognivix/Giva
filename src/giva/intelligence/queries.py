@@ -97,8 +97,13 @@ def handle_query(
         full_response.append(token)
         yield token
 
-    # Save the assistant's response (strip thinking blocks + special tokens)
+    # Save the assistant's response; preserve thinking in a separate row
     raw = "".join(full_response)
-    from giva.llm.engine import strip_special_tokens
-    clean = strip_special_tokens(raw)
+    from giva.llm.engine import extract_thinking
+    clean, thinking = extract_thinking(raw)
     store.add_message("assistant", clean, goal_id=goal_id, task_id=task_id)
+    if thinking:
+        store.add_message(
+            "assistant", thinking, goal_id=goal_id, task_id=task_id,
+            msg_type="thinking",
+        )

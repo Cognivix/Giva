@@ -24,7 +24,7 @@ from giva.db.models import (
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -164,6 +164,8 @@ CREATE TABLE IF NOT EXISTS conversations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     role TEXT NOT NULL CHECK(role IN ('user', 'assistant', 'system')),
     content TEXT NOT NULL,
+    type TEXT NOT NULL DEFAULT 'message'
+        CHECK(type IN ('message', 'thinking', 'agent_action')),
     goal_id INTEGER REFERENCES goals(id) ON DELETE CASCADE,
     task_id INTEGER REFERENCES tasks(id) ON DELETE CASCADE,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -670,12 +672,13 @@ class Store:
         content: str,
         goal_id: Optional[int] = None,
         task_id: Optional[int] = None,
+        msg_type: str = "message",
     ):
         with self._conn() as conn:
             conn.execute(
-                "INSERT INTO conversations (role, content, goal_id, task_id)"
-                " VALUES (?, ?, ?, ?)",
-                (role, content, goal_id, task_id),
+                "INSERT INTO conversations (role, content, type, goal_id, task_id)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (role, content, msg_type, goal_id, task_id),
             )
 
     def get_recent_messages(
@@ -683,42 +686,60 @@ class Store:
         limit: int = 20,
         goal_id: Optional[int] = None,
         task_id: Optional[int] = None,
+        types: Optional[list[str]] = None,
     ) -> list[dict]:
         """Get recent messages, scoped by goal_id or task_id.
 
         When both are None, returns only global (non-goal, non-task) messages.
         When goal_id is set, returns only messages for that goal.
         When task_id is set, returns only messages for that task.
+
+        ``types`` filters by message type. Defaults to ``["message"]`` so
+        thinking and agent_action rows are excluded from LLM context.
+        Pass ``["message", "thinking", "agent_action"]`` for full history.
         """
+        effective_types = types if types is not None else ["message"]
+        placeholders = ",".join("?" for _ in effective_types)
+        type_clause = f"type IN ({placeholders})"
+
         with self._conn() as conn:
             if task_id is not None:
                 rows = conn.execute(
-                    "SELECT role, content, created_at FROM conversations "
-                    "WHERE task_id = ? ORDER BY id DESC LIMIT ?",
-                    (task_id, limit),
+                    f"SELECT role, content, type, created_at FROM conversations "
+                    f"WHERE task_id = ? AND {type_clause}"
+                    " ORDER BY id DESC LIMIT ?",
+                    (task_id, *effective_types, limit),
                 ).fetchall()
             elif goal_id is not None:
                 rows = conn.execute(
-                    "SELECT role, content, created_at FROM conversations "
-                    "WHERE goal_id = ? ORDER BY id DESC LIMIT ?",
-                    (goal_id, limit),
+                    f"SELECT role, content, type, created_at FROM conversations "
+                    f"WHERE goal_id = ? AND {type_clause}"
+                    " ORDER BY id DESC LIMIT ?",
+                    (goal_id, *effective_types, limit),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT role, content, created_at FROM conversations "
-                    "WHERE goal_id IS NULL AND task_id IS NULL"
+                    f"SELECT role, content, type, created_at FROM conversations "
+                    f"WHERE goal_id IS NULL AND task_id IS NULL"
+                    f" AND {type_clause}"
                     " ORDER BY id DESC LIMIT ?",
-                    (limit,),
+                    (*effective_types, limit),
                 ).fetchall()
             return [dict(r) for r in reversed(rows)]
 
-    def get_goal_messages(self, goal_id: int, limit: int = 50) -> list[dict]:
+    def get_goal_messages(
+        self, goal_id: int, limit: int = 50,
+        types: Optional[list[str]] = None,
+    ) -> list[dict]:
         """Get conversation messages scoped to a specific goal."""
-        return self.get_recent_messages(limit=limit, goal_id=goal_id)
+        return self.get_recent_messages(limit=limit, goal_id=goal_id, types=types)
 
-    def get_task_messages(self, task_id: int, limit: int = 50) -> list[dict]:
+    def get_task_messages(
+        self, task_id: int, limit: int = 50,
+        types: Optional[list[str]] = None,
+    ) -> list[dict]:
         """Get conversation messages scoped to a specific task."""
-        return self.get_recent_messages(limit=limit, task_id=task_id)
+        return self.get_recent_messages(limit=limit, task_id=task_id, types=types)
 
     def get_conversation_dates(self, limit: int = 30) -> list[dict]:
         """Get distinct dates with first user message as preview.
@@ -736,6 +757,7 @@ class Store:
                     COUNT(*) as message_count
                 FROM conversations
                 WHERE goal_id IS NULL AND task_id IS NULL
+                  AND type = 'message'
                 GROUP BY date(created_at)
                 ORDER BY day DESC
                 LIMIT ?
@@ -750,11 +772,13 @@ class Store:
         """Get all global messages for a specific date.
 
         date_str should be in YYYY-MM-DD format.
+        Returns all message types (message, thinking, agent_action) for
+        complete history rendering.
         """
         with self._conn() as conn:
             rows = conn.execute(
                 """
-                SELECT role, content, created_at
+                SELECT role, content, type, created_at
                 FROM conversations
                 WHERE goal_id IS NULL AND task_id IS NULL
                   AND date(created_at) = ?

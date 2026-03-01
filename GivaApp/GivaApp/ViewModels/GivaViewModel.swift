@@ -667,9 +667,9 @@ class GivaViewModel {
         do {
             let history = try await api.getTaskMessages(taskId: taskId)
             guard taskChatTaskId == taskId else { return }
-            taskChatMessages = history.messages.map { msg in
-                ChatMessage(role: msg.role, content: msg.content)
-            }
+            taskChatMessages = ChatMessage.fromHistory(
+                history.messages.map { (role: $0.role, content: $0.content, type: $0.type) }
+            )
         } catch {
             guard taskChatTaskId == taskId else { return }
             taskChatError = error.localizedDescription

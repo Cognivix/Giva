@@ -78,6 +78,7 @@ MIGRATIONS: dict[int, str] = {
     6: "",  # ALTER-only migration; statements in _ALTER_MIGRATIONS[6]
     7: "",  # ALTER-only migration; statements in _ALTER_MIGRATIONS[7]
     8: "",  # ALTER-only migration; statements in _ALTER_MIGRATIONS[8]
+    10: "",  # ALTER-only migration; statements in _ALTER_MIGRATIONS[10]
     9: """
         CREATE TABLE IF NOT EXISTS vlm_task_queue (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -120,6 +121,9 @@ _ALTER_MIGRATIONS: dict[int, list[str]] = {
     8: [
         "ALTER TABLE tasks ADD COLUMN dismissal_reason TEXT DEFAULT ''",
         "ALTER TABLE tasks ADD COLUMN dismissed_at TEXT",
+    ],
+    10: [
+        "ALTER TABLE conversations ADD COLUMN type TEXT NOT NULL DEFAULT 'message'",
     ],
 }
 

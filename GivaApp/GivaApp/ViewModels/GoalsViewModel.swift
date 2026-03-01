@@ -111,9 +111,9 @@ class GoalsViewModel {
 
             let history = try await apiService.getGoalMessages(goalId: goalId)
             guard loadingGoalId == goalId else { return }
-            goalChatMessages = history.messages.map { msg in
-                ChatMessage(role: msg.role, content: msg.content)
-            }
+            goalChatMessages = ChatMessage.fromHistory(
+                history.messages.map { (role: $0.role, content: $0.content, type: $0.type) }
+            )
         } catch is CancellationError {
             return
         } catch {
