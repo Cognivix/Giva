@@ -19,30 +19,20 @@ struct TaskDetailView: View {
 
             Divider()
 
-            // Chat history + input (scrollable)
-            ScrollViewReader { proxy in
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 0) {
-                        // Source link section
-                        if let detail = viewModel.taskDetail, detail.id == taskId {
-                            sourceSection(detail)
-                        }
-
-                        // Chat messages (including agent action logs)
-                        chatSection
-                    }
-                }
-                .frame(maxHeight: .infinity)
-                .onChange(of: viewModel.taskChatMessages.count) { _, _ in
-                    scrollToBottom(proxy)
-                }
-                .onChange(of: viewModel.taskChatMessages.last?.content.count ?? 0) { _, _ in
-                    scrollToBottom(proxy)
-                }
-                .onChange(of: viewModel.taskChatMessages.last?.thinkingContent.count ?? 0) { _, _ in
-                    scrollToBottom(proxy)
-                }
+            // Source link (above chat messages)
+            if let detail = viewModel.taskDetail, detail.id == taskId {
+                sourceSection(detail)
             }
+
+            // Chat messages (including agent action logs)
+            ChatMessageList(
+                messages: viewModel.taskChatMessages,
+                isLoadingModel: viewModel.isLoadingModel,
+                isLoading: viewModel.isLoadingTaskChat,
+                emptyIcon: "sparkles",
+                emptyTitle: "Ask the AI coordinator to help\naccomplish this task.",
+                emptySubtitle: "It can draft emails, create documents,\nand break the task into steps."
+            )
             .layoutPriority(1)
 
             // Error banner
@@ -53,19 +43,18 @@ struct TaskDetailView: View {
             Divider()
 
             // Input field
-            chatInput
+            ChatInputBar(
+                text: $viewModel.taskChatInput,
+                placeholder: "Ask the coordinator...",
+                isDisabled: !viewModel.isChatEnabled || viewModel.isTaskChatStreaming,
+                isStreaming: viewModel.isTaskChatStreaming,
+                onSubmit: { viewModel.sendTaskChat(taskId: taskId) },
+                onStop: { viewModel.cancelTaskChatStreaming() }
+            )
         }
         .task(id: taskId) {
             await viewModel.loadTaskDetail(taskId: taskId)
             await viewModel.loadTaskChat(taskId: taskId, forceReload: true)
-        }
-    }
-
-    private func scrollToBottom(_ proxy: ScrollViewProxy) {
-        if let last = viewModel.taskChatMessages.last {
-            withAnimation(.easeOut(duration: 0.2)) {
-                proxy.scrollTo(last.id, anchor: .bottom)
-            }
         }
     }
 
@@ -247,73 +236,6 @@ struct TaskDetailView: View {
         return String(iso.prefix(10))
     }
 
-    // MARK: - Chat Section
-
-    @ViewBuilder
-    private var chatSection: some View {
-        if viewModel.isLoadingTaskChat {
-            VStack {
-                ProgressView()
-                    .controlSize(.small)
-                Text("Loading conversation...")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.top, 40)
-        } else if viewModel.taskChatMessages.isEmpty {
-            VStack(spacing: 12) {
-                Image(systemName: "sparkles")
-                    .font(.system(size: 28))
-                    .foregroundColor(.purple.opacity(0.5))
-                Text("Ask the AI coordinator to help\naccomplish this task.")
-                    .font(.callout)
-                    .foregroundColor(.secondary)
-                    .multilineTextAlignment(.center)
-                Text("It can draft emails, create documents,\nand break the task into steps.")
-                    .font(.caption)
-                    .foregroundColor(.secondary.opacity(0.7))
-                    .multilineTextAlignment(.center)
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.top, 40)
-        } else {
-            VStack(alignment: .leading, spacing: 8) {
-                ForEach(viewModel.taskChatMessages) { message in
-                    if message.role == "system" {
-                        // Agent action log — compact inline style
-                        agentActionBubble(message)
-                            .id(message.id)
-                    } else {
-                        MessageBubble(
-                            message: message,
-                            isLoadingModel: viewModel.isLoadingModel
-                        )
-                        .id(message.id)
-                    }
-                }
-            }
-            .padding(12)
-        }
-    }
-
-    private func agentActionBubble(_ message: ChatMessage) -> some View {
-        HStack(spacing: 6) {
-            Image(systemName: "gearshape.2")
-                .font(.system(size: 9))
-                .foregroundColor(.secondary)
-            Text(message.content)
-                .font(.system(size: 10))
-                .foregroundColor(.secondary)
-                .italic()
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 4)
-        .background(Color.secondary.opacity(0.06))
-        .cornerRadius(6)
-        .frame(maxWidth: .infinity, alignment: .center)
-    }
-
     // MARK: - Error Banner
 
     private func taskErrorBanner(_ message: String) -> some View {
@@ -336,51 +258,6 @@ struct TaskDetailView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
         .background(Color.yellow.opacity(0.1))
-    }
-
-    // MARK: - Chat Input
-
-    private var chatInput: some View {
-        @Bindable var viewModel = viewModel
-
-        return HStack(spacing: 8) {
-            TextField(
-                "Ask the coordinator...",
-                text: $viewModel.taskChatInput,
-                axis: .vertical
-            )
-            .textFieldStyle(.plain)
-            .font(.system(size: 13))
-            .lineLimit(1...8)
-            .onSubmit {
-                viewModel.sendTaskChat(taskId: taskId)
-            }
-            .disabled(!viewModel.isChatEnabled || viewModel.isTaskChatStreaming)
-
-            if viewModel.isTaskChatStreaming {
-                Button(action: { viewModel.cancelTaskChatStreaming() }) {
-                    Image(systemName: "stop.circle.fill")
-                        .font(.system(size: 18))
-                        .foregroundColor(.red)
-                }
-                .buttonStyle(.plain)
-                .help("Stop generating")
-            } else {
-                Button(action: { viewModel.sendTaskChat(taskId: taskId) }) {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.system(size: 18))
-                        .foregroundColor(.accentColor)
-                }
-                .buttonStyle(.plain)
-                .disabled(
-                    viewModel.taskChatInput
-                        .trimmingCharacters(in: .whitespaces).isEmpty
-                )
-                .help("Send message")
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
     }
 
     // MARK: - Helpers

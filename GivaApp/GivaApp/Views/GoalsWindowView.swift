@@ -15,47 +15,80 @@ struct GoalDetailView: View {
     @Bindable var viewModel: GoalsViewModel
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                // Header
-                goalHeader
+        VStack(spacing: 0) {
+            // Goal details (scrollable top section)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    // Header
+                    goalHeader
 
-                Divider()
+                    Divider()
 
-                // Description
-                if !goal.description.isEmpty {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Description")
-                            .font(.headline)
-                        Text(goal.description)
-                            .foregroundColor(.secondary)
+                    // Description
+                    if !goal.description.isEmpty {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Description")
+                                .font(.headline)
+                            Text(goal.description)
+                                .foregroundColor(.secondary)
+                        }
                     }
+
+                    // Strategy section (for long-term goals)
+                    if goal.tier == "long_term" {
+                        strategySection
+                    }
+
+                    // Tactical plan section (for mid-term goals)
+                    if goal.tier == "mid_term" {
+                        tacticalPlanSection
+                    }
+
+                    // Linked tasks
+                    if !goal.tasks.isEmpty {
+                        tasksSection
+                    }
+
+                    // Progress history
+                    progressSection
                 }
-
-                // Strategy section (for long-term goals)
-                if goal.tier == "long_term" {
-                    strategySection
-                }
-
-                // Tactical plan section (for mid-term goals)
-                if goal.tier == "mid_term" {
-                    tacticalPlanSection
-                }
-
-                // Linked tasks
-                if !goal.tasks.isEmpty {
-                    tasksSection
-                }
-
-                // Progress history
-                progressSection
-
-                Divider()
-
-                // Goal chat
-                goalChatSection
+                .padding()
             }
-            .padding()
+
+            Divider()
+
+            // Goal chat header
+            HStack {
+                Text("Chat with Giva")
+                    .font(.headline)
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+
+            // Goal chat messages
+            ChatMessageList(
+                messages: viewModel.goalChatMessages,
+                emptyIcon: "bubble.left.and.text.bubble.right",
+                emptyTitle: "Chat about this goal with Giva.",
+                emptySubtitle: "Ask questions, brainstorm strategies,\nor discuss progress.",
+                pendingConfirmation: viewModel.pendingConfirmation,
+                onApproveAgent: { jobId in viewModel.approveAgent(jobId: jobId) },
+                onDismissAgent: { jobId in viewModel.dismissAgent(jobId: jobId) }
+            )
+            .layoutPriority(1)
+
+            Divider()
+
+            // Goal chat input
+            ChatInputBar(
+                text: $viewModel.goalChatInput,
+                placeholder: "Ask about this goal...",
+                isDisabled: viewModel.isGoalChatStreaming,
+                isStreaming: viewModel.isGoalChatStreaming,
+                onSubmit: { viewModel.sendGoalChat(goalId: goalId) },
+                onStop: { viewModel.cancelStreaming() }
+            )
         }
     }
 
@@ -162,15 +195,25 @@ struct GoalDetailView: View {
                     .font(.headline)
                 Spacer()
                 if !goal.strategies.isEmpty || viewModel.isStrategyStreaming {
-                    Button {
-                        viewModel.generateStrategy(goalId: goal.id)
+                    Menu {
+                        Button {
+                            viewModel.startStrategyBrainstorm(goalId: goal.id)
+                        } label: {
+                            Label("Brainstorm First",
+                                  systemImage: "bubble.left.and.text.bubble.right")
+                        }
+                        Button {
+                            viewModel.generateStrategy(goalId: goal.id)
+                        } label: {
+                            Label("Regenerate Now", systemImage: "arrow.clockwise")
+                        }
                     } label: {
-                        Label(viewModel.isStrategyStreaming ? "Generating..." : "Regenerate",
+                        Label(viewModel.isStrategyStreaming ? "Generating..." : "Strategy",
                               systemImage: "lightbulb")
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .disabled(viewModel.isStrategyStreaming)
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .disabled(viewModel.isStrategyStreaming || viewModel.isGoalChatStreaming)
                 }
             }
 
@@ -206,19 +249,29 @@ struct GoalDetailView: View {
                     Text("No strategy yet")
                         .font(.callout.bold())
 
-                    Text("Let Giva brainstorm an approach for this goal and suggest mid-term objectives to work toward.")
+                    Text("Start a brainstorm to discuss your approach, then generate a strategy based on the conversation.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: 300)
 
                     Button {
-                        viewModel.generateStrategy(goalId: goal.id)
+                        viewModel.startStrategyBrainstorm(goalId: goal.id)
                     } label: {
-                        Label("Brainstorm Strategy", systemImage: "sparkles")
+                        Label("Start Brainstorm", systemImage: "bubble.left.and.text.bubble.right")
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.regular)
+                    .disabled(viewModel.isGoalChatStreaming)
+
+                    Button {
+                        viewModel.generateStrategy(goalId: goal.id)
+                    } label: {
+                        Label("Generate Without Brainstorm", systemImage: "sparkles")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .foregroundColor(.secondary)
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 16)
@@ -441,73 +494,6 @@ struct GoalDetailView: View {
                         }
                     }
                 }
-            }
-        }
-    }
-
-    // MARK: - Goal Chat
-
-    private var goalChatSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Chat with Giva")
-                .font(.headline)
-
-            if !viewModel.goalChatMessages.isEmpty {
-                ForEach(viewModel.goalChatMessages) { msg in
-                    if msg.role == "system" {
-                        // Check for agent confirmation cards
-                        if msg.content.hasPrefix("[AGENT_CONFIRM:"),
-                           let conf = viewModel.pendingConfirmation,
-                           msg.content.contains(conf.id) {
-                            AgentConfirmationCard(
-                                confirmation: conf,
-                                onApprove: { viewModel.approveAgent(jobId: conf.id) },
-                                onDismiss: { viewModel.dismissAgent(jobId: conf.id) }
-                            )
-                        } else {
-                            // Agent action notifications — compact inline style
-                            Text(msg.content)
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                                .padding(.leading, 28)
-                        }
-                    } else {
-                        HStack(alignment: .top, spacing: 8) {
-                            Image(systemName: msg.role == "user"
-                                  ? "person.circle" : "brain.head.profile")
-                                .foregroundColor(msg.role == "user"
-                                                 ? .accentColor : .secondary)
-                                .font(.body)
-
-                            if msg.role == "user" {
-                                Text(msg.content)
-                                    .font(.callout)
-                            } else {
-                                MarkdownText(msg.content)
-                                    .font(.callout)
-                                    .textSelection(.enabled)
-                            }
-                        }
-                        .padding(.vertical, 2)
-                    }
-                }
-            }
-
-            HStack(spacing: 8) {
-                TextField("Ask about this goal...", text: $viewModel.goalChatInput)
-                    .textFieldStyle(.roundedBorder)
-                    .onSubmit { viewModel.sendGoalChat(goalId: goalId) }
-                    .disabled(viewModel.isGoalChatStreaming)
-
-                Button {
-                    viewModel.sendGoalChat(goalId: goalId)
-                } label: {
-                    Image(systemName: "paperplane.fill")
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-                .disabled(viewModel.goalChatInput.trimmingCharacters(in: .whitespaces).isEmpty
-                          || viewModel.isGoalChatStreaming)
             }
         }
     }

@@ -286,6 +286,47 @@ class GoalsViewModel {
         }
     }
 
+    func startStrategyBrainstorm(goalId: Int) {
+        guard !isGoalChatStreaming else { return }
+
+        let kickoffText = "Help me brainstorm a strategy for this goal."
+        goalChatMessages.append(ChatMessage(role: "user", content: kickoffText))
+        goalChatMessages.append(ChatMessage(role: "assistant", content: "", isStreaming: true))
+        isGoalChatStreaming = true
+
+        streamTask = Task {
+            do {
+                let stream = apiService.streamStrategyBrainstorm(goalId: goalId)
+                for try await event in stream {
+                    if event.event == "token" {
+                        guard !goalChatMessages.isEmpty else { continue }
+                        goalChatMessages[goalChatMessages.count - 1].content += event.data
+                    } else if event.event == "agent_actions" {
+                        handleAgentActions(event.data)
+                    } else if event.event == "agent_confirm" {
+                        handleAgentConfirmation(event.data)
+                    } else if event.event == "agent_queued" {
+                        handleAgentQueued(event.data)
+                    } else if event.event == "error" {
+                        errorMessage = event.data
+                    }
+                }
+            } catch is CancellationError {
+                // cancelled
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+
+            if !goalChatMessages.isEmpty {
+                goalChatMessages[goalChatMessages.count - 1].isStreaming = false
+            }
+            isGoalChatStreaming = false
+
+            await refreshSelectedGoal()
+            await loadGoals()
+        }
+    }
+
     func acceptStrategy(goalId: Int, strategyId: Int) async {
         errorMessage = nil
         do {

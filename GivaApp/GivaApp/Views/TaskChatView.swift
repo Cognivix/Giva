@@ -4,13 +4,14 @@
 // Messages are persisted task-scoped (not mixed with global or goal chat).
 // The coordinator agent helps the user accomplish the task, drafting assets
 // for review and reporting where deliverables are stored.
+//
+// Uses shared ChatMessageList + ChatInputBar components.
 
 import SwiftUI
 
 struct TaskChatView: View {
     let taskId: Int
     @Environment(GivaViewModel.self) private var viewModel
-    @FocusState private var isInputFocused: Bool
 
     var body: some View {
         @Bindable var viewModel = viewModel
@@ -22,104 +23,27 @@ struct TaskChatView: View {
             Divider()
 
             // Message list
-            ScrollViewReader { proxy in
-                ScrollView {
-                    if viewModel.isLoadingTaskChat {
-                        VStack {
-                            ProgressView()
-                                .controlSize(.small)
-                            Text("Loading conversation...")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .padding(.top, 60)
-                    } else if viewModel.taskChatMessages.isEmpty {
-                        VStack(spacing: 12) {
-                            Image(systemName: "sparkles")
-                                .font(.system(size: 32))
-                                .foregroundColor(.purple.opacity(0.5))
-                            Text("Ask the AI coordinator to help\naccomplish this task.")
-                                .font(.callout)
-                                .foregroundColor(.secondary)
-                                .multilineTextAlignment(.center)
-                            Text("It can draft emails, create documents,\nand break the task into steps.")
-                                .font(.caption)
-                                .foregroundColor(.secondary.opacity(0.7))
-                                .multilineTextAlignment(.center)
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .padding(.top, 40)
-                    } else {
-                        VStack(alignment: .leading, spacing: 8) {
-                            ForEach(viewModel.taskChatMessages) { message in
-                                MessageBubble(
-                                    message: message,
-                                    isLoadingModel: viewModel.isLoadingModel
-                                )
-                                .id(message.id)
-                            }
-                        }
-                        .padding(12)
-                    }
-                }
-                .frame(maxHeight: .infinity)
-                .onChange(of: viewModel.taskChatMessages.count) { _, _ in
-                    if let last = viewModel.taskChatMessages.last {
-                        withAnimation(.easeOut(duration: 0.2)) {
-                            proxy.scrollTo(last.id, anchor: .bottom)
-                        }
-                    }
-                }
-                .onChange(of: viewModel.taskChatMessages.last?.content.count ?? 0) { _, _ in
-                    if let last = viewModel.taskChatMessages.last {
-                        proxy.scrollTo(last.id, anchor: .bottom)
-                    }
-                }
-                .onChange(of: viewModel.taskChatMessages.last?.thinkingContent.count ?? 0) { _, _ in
-                    if let last = viewModel.taskChatMessages.last {
-                        proxy.scrollTo(last.id, anchor: .bottom)
-                    }
-                }
-            }
+            ChatMessageList(
+                messages: viewModel.taskChatMessages,
+                isLoadingModel: viewModel.isLoadingModel,
+                isLoading: viewModel.isLoadingTaskChat,
+                emptyIcon: "sparkles",
+                emptyTitle: "Ask the AI coordinator to help\naccomplish this task.",
+                emptySubtitle: "It can draft emails, create documents,\nand break the task into steps."
+            )
             .layoutPriority(1)
 
             Divider()
 
             // Input field
-            HStack(spacing: 8) {
-                GrowingTextInput(
-                    text: $viewModel.taskChatInput,
-                    placeholder: "Ask the coordinator...",
-                    isFocused: $isInputFocused,
-                    isDisabled: !viewModel.isChatEnabled || viewModel.isTaskChatStreaming,
-                    onSubmit: { viewModel.sendTaskChat(taskId: taskId) }
-                )
-
-                if viewModel.isTaskChatStreaming {
-                    Button(action: { viewModel.cancelTaskChatStreaming() }) {
-                        Image(systemName: "stop.circle.fill")
-                            .font(.system(size: 18))
-                            .foregroundColor(.red)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Stop generating")
-                } else {
-                    Button(action: { viewModel.sendTaskChat(taskId: taskId) }) {
-                        Image(systemName: "arrow.up.circle.fill")
-                            .font(.system(size: 18))
-                            .foregroundColor(.accentColor)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(
-                        viewModel.taskChatInput
-                            .trimmingCharacters(in: .whitespaces).isEmpty
-                    )
-                    .help("Send message")
-                }
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
+            ChatInputBar(
+                text: $viewModel.taskChatInput,
+                placeholder: "Ask the coordinator...",
+                isDisabled: !viewModel.isChatEnabled || viewModel.isTaskChatStreaming,
+                isStreaming: viewModel.isTaskChatStreaming,
+                onSubmit: { viewModel.sendTaskChat(taskId: taskId) },
+                onStop: { viewModel.cancelTaskChatStreaming() }
+            )
         }
         .task(id: taskId) {
             await viewModel.loadTaskChat(taskId: taskId)

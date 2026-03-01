@@ -3969,6 +3969,40 @@ async def generate_strategy(goal_id: int, request: Request):
     return EventSourceResponse(event_generator())
 
 
+@app.post("/api/goals/{goal_id}/strategy/brainstorm")
+async def strategy_brainstorm_kickoff(goal_id: int, request: Request):
+    """Start a conversational brainstorm for strategy generation.
+
+    Sends a kickoff message to goal chat that instructs the LLM to ask
+    probing questions rather than immediately proposing a strategy.
+    Returns SSE stream like regular goal chat.
+    """
+    store: Store = request.app.state.store
+    config = request.app.state.config
+
+    goal = store.get_goal(goal_id)
+    if not goal:
+        raise HTTPException(status_code=404, detail="Goal not found")
+
+    from giva.intelligence.goals import build_brainstorm_context
+    from giva.intelligence.queries import handle_query
+
+    brainstorm_prefix = build_brainstorm_context(goal, store)
+    user_query = "Help me brainstorm a strategy for this goal."
+
+    async def event_generator():
+        async for event in _sync_gen_to_sse(
+            handle_query, user_query, store, config,
+            goal_id=goal_id, context_prefix=brainstorm_prefix,
+        ):
+            yield event
+        actions = await _run_post_chat(user_query, store, config, goal_id=goal_id)
+        if actions:
+            yield {"event": "agent_actions", "data": json.dumps(actions)}
+
+    return EventSourceResponse(event_generator())
+
+
 @app.post("/api/goals/{goal_id}/strategy/{strategy_id}/accept")
 async def accept_strategy(
     goal_id: int, strategy_id: int, request: Request

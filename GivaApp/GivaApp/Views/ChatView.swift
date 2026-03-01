@@ -1,5 +1,8 @@
 // ChatView.swift - Message list with streaming text and input field.
 // Assistant messages render Markdown (headers, bold, italic, code, links, lists).
+//
+// Uses shared ChatMessageList for the message area. Manages its own input
+// layout because of voice recording buttons (unique to main chat).
 
 import SwiftUI
 
@@ -12,94 +15,23 @@ struct ChatView: View {
 
         VStack(spacing: 0) {
             // Message list — fill available space so input stays pinned at bottom
-            ScrollViewReader { proxy in
-                ScrollView {
-                    if viewModel.messages.isEmpty {
-                        VStack(spacing: 12) {
-                            if viewModel.serverPhase == .syncing {
-                                ProgressView()
-                                    .controlSize(.large)
-                                    .padding(.bottom, 4)
-                                Text("Syncing your data...\nYou'll be able to chat once setup completes.")
-                                    .font(.callout)
-                                    .foregroundColor(.secondary)
-                                    .multilineTextAlignment(.center)
-                            } else {
-                                Image(systemName: "bubble.left.and.text.bubble.right")
-                                    .font(.system(size: 32))
-                                    .foregroundColor(.secondary.opacity(0.5))
-                                Text("Ask Giva anything about your emails,\ncalendar, or tasks.")
-                                    .font(.callout)
-                                    .foregroundColor(.secondary)
-                                    .multilineTextAlignment(.center)
-                            }
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .padding(.top, 60)
-                    } else {
-                        VStack(alignment: .leading, spacing: 8) {
-                            ForEach(viewModel.messages) { message in
-                                if let jobId = agentConfirmJobId(from: message),
-                                   let confirmation = viewModel.pendingConfirmation,
-                                   confirmation.id == jobId {
-                                    // Render inline agent confirmation card
-                                    AgentConfirmationCard(
-                                        confirmation: confirmation,
-                                        onApprove: { viewModel.approveAgent(jobId: jobId) },
-                                        onDismiss: { viewModel.dismissAgent(jobId: jobId) }
-                                    )
-                                    .id(message.id)
-                                } else if message.role == "system"
-                                            && message.content.hasPrefix("[AGENT_CONFIRM:") {
-                                    // Confirmation already handled — show status
-                                    HStack(spacing: 6) {
-                                        Image(systemName: "checkmark.circle")
-                                            .foregroundColor(.green)
-                                        Text("Agent approved")
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-                                    }
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 4)
-                                    .id(message.id)
-                                } else {
-                                    MessageBubble(
-                                        message: message,
-                                        isLoadingModel: viewModel.isLoadingModel
-                                    )
-                                    .id(message.id)
-                                }
-                            }
-                        }
-                        .padding(12)
-                    }
-                }
-                .frame(maxHeight: .infinity)
-                .onChange(of: viewModel.messages.count) { _, _ in
-                    if let last = viewModel.messages.last {
-                        withAnimation(.easeOut(duration: 0.2)) {
-                            proxy.scrollTo(last.id, anchor: .bottom)
-                        }
-                    }
-                }
-                // Also scroll when streaming content updates
-                .onChange(of: viewModel.messages.last?.content.count ?? 0) { _, _ in
-                    if let last = viewModel.messages.last {
-                        proxy.scrollTo(last.id, anchor: .bottom)
-                    }
-                }
-                // Scroll during thinking too
-                .onChange(of: viewModel.messages.last?.thinkingContent.count ?? 0) { _, _ in
-                    if let last = viewModel.messages.last {
-                        proxy.scrollTo(last.id, anchor: .bottom)
-                    }
-                }
-            }
+            ChatMessageList(
+                messages: viewModel.messages,
+                isLoadingModel: viewModel.isLoadingModel,
+                emptyIcon: viewModel.serverPhase == .syncing
+                    ? "arrow.triangle.2.circlepath" : "bubble.left.and.text.bubble.right",
+                emptyTitle: viewModel.serverPhase == .syncing
+                    ? "Syncing your data...\nYou'll be able to chat once setup completes."
+                    : "Ask Giva anything about your emails,\ncalendar, or tasks.",
+                pendingConfirmation: viewModel.pendingConfirmation,
+                onApproveAgent: { viewModel.approveAgent(jobId: $0) },
+                onDismissAgent: { viewModel.dismissAgent(jobId: $0) }
+            )
             .layoutPriority(1)
 
             Divider()
 
-            // Input field
+            // Input field — custom layout for voice button support
             HStack(spacing: 8) {
                 if viewModel.isRecording, let voice = viewModel.voiceService {
                     // Recording indicator: red dot + animated level bars + transcript
@@ -221,59 +153,6 @@ struct ChatView: View {
     }
 }
 
-// MARK: - Growing Text Input
-
-/// A text input that grows with its content and scrolls beyond a maximum height.
-/// Uses `TextEditor` for proper multiline editing + Enter-to-send / Shift+Enter for newline.
-struct GrowingTextInput: View {
-    @Binding var text: String
-    let placeholder: String
-    var isFocused: FocusState<Bool>.Binding
-    let isDisabled: Bool
-    let onSubmit: () -> Void
-
-    /// Approximate line height for 13pt system font.
-    private let lineHeight: CGFloat = 18
-    /// Minimum input height (single line + padding).
-    private let minHeight: CGFloat = 28
-    /// Maximum input height before scrolling (~10 lines).
-    private let maxHeight: CGFloat = 200
-
-    var body: some View {
-        ZStack(alignment: .topLeading) {
-            // Placeholder
-            if text.isEmpty {
-                Text(placeholder)
-                    .font(.system(size: 13))
-                    .foregroundColor(.secondary.opacity(0.5))
-                    .padding(.horizontal, 5)
-                    .padding(.top, 4)
-                    .allowsHitTesting(false)
-            }
-
-            TextEditor(text: $text)
-                .font(.system(size: 13))
-                .scrollContentBackground(.hidden)
-                .focused(isFocused)
-                .disabled(isDisabled)
-                .frame(
-                    minHeight: minHeight,
-                    maxHeight: maxHeight
-                )
-                .fixedSize(horizontal: false, vertical: true)
-                .onKeyPress(.return, phases: .down) { press in
-                    if press.modifiers.isEmpty {
-                        // Enter alone → send
-                        onSubmit()
-                        return .handled
-                    }
-                    // Shift+Enter, Option+Enter, etc. → insert newline (default)
-                    return .ignored
-                }
-        }
-    }
-}
-
 // MARK: - Audio Level Bar Helper
 
 /// Compute the height of an individual level bar for the recording indicator.
@@ -284,21 +163,6 @@ private func audioBarHeight(index: Int, level: Float) -> CGFloat {
     let offset = Float(index) * 0.15  // stagger bars
     let adjusted = min(1.0, max(0.0, level + offset - 0.1))
     return baseHeight + CGFloat(adjusted) * (maxHeight - baseHeight)
-}
-
-// MARK: - Agent Confirmation Helpers
-
-/// Extract agent job ID from a system message marker like `[AGENT_CONFIRM:uuid]`.
-private func agentConfirmJobId(from message: ChatMessage) -> String? {
-    guard message.role == "system",
-          message.content.hasPrefix("[AGENT_CONFIRM:"),
-          message.content.hasSuffix("]")
-    else { return nil }
-
-    let start = message.content.index(message.content.startIndex, offsetBy: 15)
-    let end = message.content.index(before: message.content.endIndex)
-    guard start < end else { return nil }
-    return String(message.content[start..<end])
 }
 
 // MARK: - Message Bubble

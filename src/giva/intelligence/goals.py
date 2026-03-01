@@ -83,16 +83,49 @@ def infer_goals(store: Store, config: GivaConfig) -> list[dict]:
     return []
 
 
+def build_brainstorm_context(goal: Goal, store: Store) -> str:
+    """Build the context_prefix for a brainstorm kickoff message.
+
+    Returns the brainstorm system instruction with goal details filled in,
+    suitable for passing as ``context_prefix`` to ``handle_query()``.
+    """
+    from giva.llm.prompts import STRATEGY_BRAINSTORM_KICKOFF
+
+    children = store.get_child_goals(goal.id)
+    if children:
+        obj_lines = [f"- {c.title} ({c.status})" for c in children]
+        existing_objectives = "\n".join(obj_lines)
+    else:
+        existing_objectives = "None yet."
+
+    return STRATEGY_BRAINSTORM_KICKOFF.format(
+        goal_title=goal.title,
+        goal_description=goal.description or "N/A",
+        goal_category=goal.category or "general",
+        goal_tier=goal.tier,
+        target_date=goal.target_date.strftime("%Y-%m-%d") if goal.target_date else "Not set",
+        existing_objectives=existing_objectives,
+    )
+
+
 def generate_strategy(
     goal_id: int, store: Store, config: GivaConfig
 ) -> Generator[str, None, None]:
     """Generate a strategy for a goal. Yields streamed tokens.
 
+    Pulls recent goal chat messages (e.g. from a brainstorm session) and
+    includes them as conversation context in the strategy prompt. If no
+    conversation exists, generates a strategy without it.
+
     Also parses the structured output and saves a GoalStrategy row.
     """
     from giva.intelligence.profile import get_profile_summary
     from giva.llm.engine import manager
-    from giva.llm.prompts import STRATEGY_SYSTEM, STRATEGY_USER
+    from giva.llm.prompts import (
+        STRATEGY_SYSTEM,
+        STRATEGY_USER,
+        format_brainstorm_context,
+    )
 
     goal = store.get_goal(goal_id)
     if not goal:
@@ -111,6 +144,10 @@ def generate_strategy(
     else:
         existing_objectives = "None yet."
 
+    # Include recent goal chat as brainstorm context (empty if no chat)
+    recent_chat = store.get_goal_messages(goal_id, limit=20, types=["message"])
+    conversation_context = format_brainstorm_context(recent_chat)
+
     system = STRATEGY_SYSTEM.format(
         now=now_str,
         profile_section=profile_section,
@@ -120,6 +157,7 @@ def generate_strategy(
         goal_tier=goal.tier,
         target_date=goal.target_date.strftime("%Y-%m-%d") if goal.target_date else "Not set",
         existing_objectives=existing_objectives,
+        conversation_context=conversation_context,
     )
 
     messages = [

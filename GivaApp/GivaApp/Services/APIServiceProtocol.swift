@@ -49,6 +49,7 @@ protocol APIServiceProtocol: AnyObject, Sendable {
     func getGoalMessages(goalId: Int, limit: Int) async throws -> GoalMessagesResponse
     func streamInferGoals() -> AsyncThrowingStream<SSEEvent, Error>
     func streamStrategy(goalId: Int) -> AsyncThrowingStream<SSEEvent, Error>
+    func streamStrategyBrainstorm(goalId: Int) -> AsyncThrowingStream<SSEEvent, Error>
     func acceptStrategy(goalId: Int, strategyId: Int) async throws -> [String: Any]
     func streamPlan(goalId: Int) -> AsyncThrowingStream<SSEEvent, Error>
     func acceptPlan(goalId: Int, planJson: String) async throws -> [String: Any]

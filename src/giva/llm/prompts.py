@@ -389,13 +389,16 @@ Goal being analyzed:
 
 Existing objectives under this goal:
 {existing_objectives}
-
+{conversation_context}
 Guidelines:
 - Suggest a concrete, actionable strategy (not motivational platitudes).
 - Break it into 3-5 specific action items with timeframes.
 - If this is a long-term goal, suggest mid-term objectives that would advance it.
 - Consider what the user can realistically do given their role and schedule.
-- Keep suggestions grounded in the user's actual context."""
+- Keep suggestions grounded in the user's actual context.
+- If a brainstorm conversation is included above, reference it heavily — the user has \
+already shared their situation, obstacles, and preferences. Your strategy should directly \
+address what they told you."""
 
 STRATEGY_USER = """Design a strategy for achieving this goal. Consider the user's current situation and suggest concrete next steps.
 
@@ -416,6 +419,57 @@ Respond with ONLY a JSON object:
     }}
   ]
 }} /no_think"""
+
+STRATEGY_BRAINSTORM_KICKOFF = """You are helping the user brainstorm a strategy for their \
+goal. Your role right now is to be a strategic thinking partner — NOT to propose a strategy yet.
+
+Goal being analyzed:
+- Title: {goal_title}
+- Description: {goal_description}
+- Category: {goal_category}
+- Tier: {goal_tier}
+- Target date: {target_date}
+
+Existing objectives under this goal:
+{existing_objectives}
+
+Your task in this message:
+1. Acknowledge the goal briefly (1 sentence).
+2. Ask 2-3 targeted, specific questions to understand the user's situation better. Focus on:
+   - What they have already tried or considered
+   - What specific obstacles or constraints they face
+   - What resources, skills, or connections they can leverage
+   - What "success" looks like to them concretely
+   - Any timeline pressures or dependencies
+3. Keep it conversational and concise — no bullet lists of 10 questions. Pick the 2-3 most \
+important unknowns for THIS specific goal.
+4. Do NOT propose a strategy, objectives, or action items yet. Just ask good questions.
+
+Be direct and specific to this goal — not generic coaching questions."""
+
+
+def format_brainstorm_context(messages: list[dict]) -> str:
+    """Format recent goal chat messages as conversation context for strategy generation.
+
+    Args:
+        messages: List of dicts with 'role' and 'content' keys from
+            ``store.get_goal_messages()``.
+
+    Returns:
+        Formatted string for the ``{conversation_context}`` placeholder,
+        or empty string if no messages.
+    """
+    if not messages:
+        return ""
+    lines = ["\nRecent brainstorm conversation with the user:"]
+    for msg in messages:
+        role = msg.get("role", "unknown")
+        content = msg.get("content", "")
+        if role == "user":
+            lines.append(f"User: {content}")
+        elif role == "assistant":
+            lines.append(f"Giva: {content}")
+    return "\n".join(lines) + "\n"
 
 
 TACTICAL_PLAN_SYSTEM = """You are Giva, creating a concrete tactical plan to advance a mid-term objective. You can suggest tasks, email drafts, calendar blocks, and things to research.

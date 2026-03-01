@@ -423,6 +423,10 @@ final class MockAPIService: APIServiceProtocol, @unchecked Sendable {
         AsyncThrowingStream { $0.finish() }
     }
 
+    func streamStrategyBrainstorm(goalId: Int) -> AsyncThrowingStream<SSEEvent, Error> {
+        AsyncThrowingStream { $0.finish() }
+    }
+
     func acceptStrategy(goalId: Int, strategyId: Int) async throws -> [String: Any] {
         acceptStrategyCallCount += 1
         return try throwOrReturn(acceptStrategyResult)

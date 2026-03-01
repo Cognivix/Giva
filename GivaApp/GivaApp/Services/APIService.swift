@@ -327,6 +327,11 @@ class APIService: APIServiceProtocol {
         return sseStream(url: url, method: "POST")
     }
 
+    func streamStrategyBrainstorm(goalId: Int) -> AsyncThrowingStream<SSEEvent, Error> {
+        let url = baseURL.appendingPathComponent("api/goals/\(goalId)/strategy/brainstorm")
+        return sseStream(url: url, method: "POST")
+    }
+
     func acceptStrategy(goalId: Int, strategyId: Int) async throws -> [String: Any] {
         let url = baseURL.appendingPathComponent("api/goals/\(goalId)/strategy/\(strategyId)/accept")
         var request = URLRequest(url: url)
