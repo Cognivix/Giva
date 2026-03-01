@@ -1,7 +1,7 @@
 // GivaMainWindowView.swift - Full-app window with sidebar navigation.
 //
 // Three-column NavigationSplitView:
-//   Sidebar: Chat, Goals (by tier), Tasks
+//   Sidebar: Chat, Goals (by tier), Tasks (individual items)
 //   Content: Detail view for the selected sidebar item
 //   Inspector: Agent activity panel (when agents are active)
 
@@ -12,8 +12,7 @@ enum SidebarItem: Hashable {
     case chat                   // current/new conversation
     case chatHistory(String)    // past chat by date (YYYY-MM-DD)
     case goal(Int)
-    case tasks
-    case taskChat(Int)          // contextual AI chat for a specific task
+    case task(Int)              // individual task → detail view
 }
 
 /// System actions that require confirmation in the full window.
@@ -61,6 +60,11 @@ struct GivaMainWindowView: View {
             ToolbarItemGroup(placement: .primaryAction) {
                 toolbarButtons
             }
+
+            // Connection status indicator
+            ToolbarItem(placement: .status) {
+                connectionIndicator
+            }
         }
         .sheet(isPresented: goalCreateSheetBinding) {
             if let goalsVM = viewModel.goalsViewModel {
@@ -91,6 +95,7 @@ struct GivaMainWindowView: View {
                 await goalsVM.loadGoals()
                 await goalsVM.checkReviewStatus()
             }
+            await viewModel.loadTasks()
         }
         // Confirmation dialogs for system actions
         .confirmationDialog(
@@ -127,12 +132,33 @@ struct GivaMainWindowView: View {
                 viewModel.goalsViewModel?.pendingSelection = nil
             }
         }
-        // Handle task chat navigation from popover
+        // Handle task selection from popover
         .onChange(of: viewModel.pendingTaskChatId) { _, newId in
             if let id = newId {
-                sidebarSelection = .taskChat(id)
+                sidebarSelection = .task(id)
                 viewModel.pendingTaskChatId = nil
             }
+        }
+    }
+
+    // MARK: - Connection Indicator
+
+    private var connectionIndicator: some View {
+        HStack(spacing: 4) {
+            Circle()
+                .fill(connectionDotColor)
+                .frame(width: 7, height: 7)
+            Text(viewModel.serverManager.connectionState.rawValue)
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
+        }
+    }
+
+    private var connectionDotColor: Color {
+        switch viewModel.serverManager.connectionState {
+        case .connected: return .green
+        case .connecting: return .yellow
+        case .offline: return .red
         }
     }
 
@@ -189,25 +215,19 @@ struct GivaMainWindowView: View {
                 goalsSection(goalsVM)
             }
 
-            // Tasks section
+            // Tasks section — individual tasks in sidebar
             Section("Tasks") {
-                Label {
-                    HStack {
-                        Text("All Tasks")
-                        Spacer()
-                        if !viewModel.tasks.isEmpty {
-                            Text("\(viewModel.tasks.count)")
-                                .font(.caption2)
-                                .foregroundColor(.secondary)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 1)
-                                .background(Capsule().fill(Color.secondary.opacity(0.15)))
-                        }
+                if viewModel.tasks.isEmpty && !viewModel.isLoadingTasks {
+                    Text("No pending tasks")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .padding(.leading, 4)
+                } else {
+                    ForEach(viewModel.tasks) { task in
+                        taskSidebarRow(task)
+                            .tag(SidebarItem.task(task.id))
                     }
-                } icon: {
-                    Image(systemName: "checklist")
                 }
-                .tag(SidebarItem.tasks)
             }
         }
         .listStyle(.sidebar)
@@ -222,6 +242,55 @@ struct GivaMainWindowView: View {
                     .help("Refresh goals")
                 }
             }
+        }
+    }
+
+    private func taskSidebarRow(_ task: TaskItem) -> some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(taskPriorityColor(task.priority))
+                .frame(width: 8, height: 8)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(task.title)
+                    .font(.caption)
+                    .lineLimit(2)
+
+                HStack(spacing: 4) {
+                    if let dueDate = task.formattedDueDate {
+                        Text(dueDate)
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                    Text(task.sourceType.capitalized)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            Spacer()
+        }
+        .contextMenu {
+            Button {
+                Task { await viewModel.updateTaskStatus(taskId: task.id, status: "done") }
+            } label: {
+                Label("Mark as Done", systemImage: "checkmark.circle")
+            }
+
+            Button {
+                Task { await viewModel.updateTaskStatus(taskId: task.id, status: "dismissed") }
+            } label: {
+                Label("Dismiss", systemImage: "xmark.circle")
+            }
+        }
+    }
+
+    private func taskPriorityColor(_ priority: String) -> Color {
+        switch priority {
+        case "high": return .red
+        case "medium": return .orange
+        case "low": return .gray
+        default: return .primary
         }
     }
 
@@ -260,7 +329,7 @@ struct GivaMainWindowView: View {
     private func goalRow(_ goal: GoalItem, viewModel goalsVM: GoalsViewModel) -> some View {
         HStack(spacing: 6) {
             Circle()
-                .fill(priorityColor(goal.priority))
+                .fill(goalPriorityColor(goal.priority))
                 .frame(width: 8, height: 8)
 
             Text(goal.title)
@@ -284,7 +353,7 @@ struct GivaMainWindowView: View {
         }
     }
 
-    private func priorityColor(_ priority: String) -> Color {
+    private func goalPriorityColor(_ priority: String) -> Color {
         switch priority {
         case "high": return .red
         case "medium": return .orange
@@ -304,13 +373,8 @@ struct GivaMainWindowView: View {
             chatHistoryContent(date: dateString)
         case .goal(let goalId):
             goalContent(goalId: goalId)
-        case .tasks:
-            TaskListView(onOpenTaskChat: { taskId in
-                sidebarSelection = .taskChat(taskId)
-            })
-            .environment(viewModel)
-        case .taskChat(let taskId):
-            TaskChatView(taskId: taskId)
+        case .task(let taskId):
+            TaskDetailView(taskId: taskId)
                 .environment(viewModel)
                 .id(taskId)
         case nil:

@@ -133,12 +133,17 @@ class GivaViewModel {
     var dismissedTasks: [DismissedTaskItem] = []
     var showDismissedTasks: Bool = false
 
+    // Task Detail
+    var taskDetail: TaskDetailResponse?
+    var isLoadingTaskDetail: Bool = false
+
     // Task Chat (contextual AI for individual tasks)
     var taskChatTaskId: Int?
     var taskChatMessages: [ChatMessage] = []
     var taskChatInput: String = ""
     var isTaskChatStreaming: Bool = false
     var isLoadingTaskChat: Bool = false
+    var taskChatError: String?
     /// Set by popover to request main window navigate to a task chat.
     var pendingTaskChatId: Int?
 
@@ -628,19 +633,35 @@ class GivaViewModel {
         }
     }
 
+    // MARK: - Task Detail
+
+    func loadTaskDetail(taskId: Int) async {
+        guard let api = apiService else { return }
+
+        isLoadingTaskDetail = true
+        do {
+            taskDetail = try await api.getTaskDetail(taskId: taskId)
+        } catch {
+            log.error("Failed to load task detail: \(error)")
+        }
+        isLoadingTaskDetail = false
+    }
+
     // MARK: - Task Chat
 
     /// Load task chat history when navigating to a task's contextual chat.
-    func loadTaskChat(taskId: Int) async {
+    /// Forces reload when `forceReload` is true (e.g. navigating back to the same task).
+    func loadTaskChat(taskId: Int, forceReload: Bool = false) async {
         guard let api = apiService else { return }
 
-        if taskChatTaskId == taskId, !taskChatMessages.isEmpty {
+        if !forceReload, taskChatTaskId == taskId, !taskChatMessages.isEmpty {
             return  // already loaded
         }
 
         taskChatTaskId = taskId
         taskChatInput = ""
         taskChatMessages = []
+        taskChatError = nil
         isLoadingTaskChat = true
 
         do {
@@ -651,7 +672,7 @@ class GivaViewModel {
             }
         } catch {
             guard taskChatTaskId == taskId else { return }
-            errorMessage = error.localizedDescription
+            taskChatError = error.localizedDescription
         }
         guard taskChatTaskId == taskId else { return }
         isLoadingTaskChat = false
@@ -663,6 +684,7 @@ class GivaViewModel {
         guard !query.isEmpty, !isTaskChatStreaming else { return }
 
         taskChatInput = ""
+        taskChatError = nil
         taskChatMessages.append(ChatMessage(role: "user", content: query))
         taskChatMessages.append(ChatMessage(role: "assistant", content: "", isStreaming: true))
         isTaskChatStreaming = true
@@ -671,6 +693,7 @@ class GivaViewModel {
             guard let api = apiService else {
                 appendTaskChatSystemMessage("Server is not running.")
                 isTaskChatStreaming = false
+                streamTask = nil
                 return
             }
             do {
@@ -690,13 +713,13 @@ class GivaViewModel {
                         handleTaskChatAgentActions(event.data)
                     } else if event.event == "error" {
                         isLoadingModel = false
-                        errorMessage = event.data
+                        taskChatError = event.data
                     }
                 }
             } catch is CancellationError {
                 // cancelled
             } catch {
-                errorMessage = error.localizedDescription
+                taskChatError = error.localizedDescription
             }
 
             isLoadingModel = false
@@ -705,6 +728,7 @@ class GivaViewModel {
                 taskChatMessages[taskChatMessages.count - 1].isThinking = false
             }
             isTaskChatStreaming = false
+            streamTask = nil
 
             // Refresh tasks to pick up any status changes
             await loadTasks()

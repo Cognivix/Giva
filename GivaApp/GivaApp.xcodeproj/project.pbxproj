@@ -33,6 +33,7 @@
 		A100001A /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200001A /* SettingsView.swift */; };
 		A100001B /* TaskChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200001B /* TaskChatView.swift */; };
 		A100001C /* QuickDropView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200001C /* QuickDropView.swift */; };
+		A100001D /* TaskDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200001D /* TaskDetailView.swift */; };
 		B1000001 /* MockAPIService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000001 /* MockAPIService.swift */; };
 		B1000002 /* ServerPhaseTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000002 /* ServerPhaseTests.swift */; };
 		B1000003 /* AgentActionHandlerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000003 /* AgentActionHandlerTests.swift */; };
@@ -81,6 +82,7 @@
 		A200001A /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		A200001B /* TaskChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskChatView.swift; sourceTree = "<group>"; };
 		A200001C /* QuickDropView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickDropView.swift; sourceTree = "<group>"; };
+		A200001D /* TaskDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskDetailView.swift; sourceTree = "<group>"; };
 		B2000001 /* MockAPIService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MockAPIService.swift; sourceTree = "<group>"; };
 		B2000002 /* ServerPhaseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerPhaseTests.swift; sourceTree = "<group>"; };
 		B2000003 /* AgentActionHandlerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentActionHandlerTests.swift; sourceTree = "<group>"; };
@@ -179,6 +181,7 @@
 				A200001C /* QuickDropView.swift */,
 				A200001A /* SettingsView.swift */,
 				A200001B /* TaskChatView.swift */,
+				A200001D /* TaskDetailView.swift */,
 				A2000009 /* TaskListView.swift */,
 			);
 			path = Views;
@@ -331,6 +334,7 @@
 				A100001A /* SettingsView.swift in Sources */,
 				A100001B /* TaskChatView.swift in Sources */,
 				A100001C /* QuickDropView.swift in Sources */,
+				A100001D /* TaskDetailView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

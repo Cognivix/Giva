@@ -4,8 +4,8 @@ import SwiftUI
 
 struct TaskListView: View {
     @Environment(GivaViewModel.self) private var viewModel
-    /// Callback to navigate to task-scoped contextual chat (main window only).
-    var onOpenTaskChat: ((Int) -> Void)? = nil
+    /// Callback when a task is selected (main window sidebar navigation).
+    var onSelectTask: ((Int) -> Void)? = nil
 
     var body: some View {
         Group {
@@ -41,12 +41,11 @@ struct TaskListView: View {
                                 Task {
                                     await viewModel.updateTaskStatus(taskId: task.id, status: status)
                                 }
-                            }, onAIRequest: {
-                                if let openChat = onOpenTaskChat {
-                                    // In main window: navigate to task chat directly
-                                    openChat(task.id)
+                            }, onSelect: {
+                                if let select = onSelectTask {
+                                    select(task.id)
                                 } else {
-                                    // In popover: signal main window to open task chat
+                                    // In popover: open full window with task selected
                                     viewModel.pendingTaskChatId = task.id
                                 }
                             })
@@ -149,13 +148,14 @@ struct DismissedTaskRow: View {
                         .font(.system(size: 10, weight: .medium))
                         .foregroundColor(.accentColor)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.borderless)
                 .help("Restore this task")
                 .transition(.opacity)
             }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
+        .contentShape(Rectangle())
         .background(isHovering ? Color.primary.opacity(0.03) : Color.clear)
         .cornerRadius(4)
         .onHover { hovering in
@@ -171,7 +171,7 @@ struct DismissedTaskRow: View {
 struct TaskRow: View {
     let task: TaskItem
     let onStatusChange: (String) -> Void
-    var onAIRequest: (() -> Void)? = nil
+    var onSelect: (() -> Void)? = nil
 
     @State private var isHovering = false
 
@@ -214,22 +214,12 @@ struct TaskRow: View {
             // Action buttons (visible on hover)
             if isHovering {
                 HStack(spacing: 4) {
-                    if let onAI = onAIRequest {
-                        Button(action: onAI) {
-                            Image(systemName: "sparkles")
-                                .font(.system(size: 14))
-                                .foregroundColor(.purple)
-                        }
-                        .buttonStyle(.plain)
-                        .help("Open task chat")
-                    }
-
                     Button(action: { onStatusChange("done") }) {
                         Image(systemName: "checkmark.circle.fill")
                             .font(.system(size: 16))
                             .foregroundColor(.green)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.borderless)
                     .help("Mark as done")
 
                     Button(action: { onStatusChange("dismissed") }) {
@@ -237,23 +227,32 @@ struct TaskRow: View {
                             .font(.system(size: 16))
                             .foregroundColor(.secondary)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.borderless)
                     .help("Dismiss")
                 }
+                .transition(.opacity)
             }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
-        .background(isHovering ? Color.primary.opacity(0.04) : Color.clear)
-        .cornerRadius(6)
+        .contentShape(Rectangle())
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(isHovering ? Color.primary.opacity(0.04) : Color.clear)
+        )
         .onHover { hovering in
-            isHovering = hovering
+            withAnimation(.easeInOut(duration: 0.15)) {
+                isHovering = hovering
+            }
+        }
+        .onTapGesture {
+            if let select = onSelect { select() }
         }
         .contextMenu {
             Button {
-                if let onAI = onAIRequest { onAI() }
+                if let select = onSelect { select() }
             } label: {
-                Label("Open Task Chat", systemImage: "sparkles")
+                Label("View Details", systemImage: "info.circle")
             }
 
             Divider()

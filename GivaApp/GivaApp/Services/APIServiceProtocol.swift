@@ -25,6 +25,7 @@ protocol APIServiceProtocol: AnyObject, Sendable {
     func confirmAgent(jobId: String) async throws
     func cancelAgent(jobId: String) async throws
     func taskAI(taskId: Int) async throws -> [String: Any]
+    func getTaskDetail(taskId: Int) async throws -> TaskDetailResponse
     func streamTaskChat(taskId: Int, query: String) -> AsyncThrowingStream<SSEEvent, Error>
     func getTaskMessages(taskId: Int, limit: Int) async throws -> GoalMessagesResponse
     func transcribe(audioData: Data, filename: String) async throws -> String
