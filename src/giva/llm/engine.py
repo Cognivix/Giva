@@ -41,6 +41,10 @@ _GPT_CLOSE_VARIANTS = (
 
 def _normalise_thinking_tags(text: str) -> str:
     """Convert GPT-style reasoning channels to ``<think>``/``</think>``."""
+    # Open variants — longest first
+    text = text.replace(
+        "<|start|>assistant<|channel|>analysis<|message|>", "<think>"
+    )
     text = text.replace("<|channel|>analysis<|message|>", "<think>")
     for variant in _GPT_CLOSE_VARIANTS:
         text = text.replace(variant, "</think>")
@@ -55,6 +59,9 @@ def _clean_special_tokens(text: str) -> str:
     text = re.sub(r"<\|[^|]*\|>\s*(?:assistant|user|system)(?=\s*<\|)", "", text)
     text = re.sub(r"\b(?:assistant|user|system)\s*<\|[^|]*\|>", "", text)
     text = _SPECIAL_TOKEN_RE.sub("", text)
+    # Strip standalone role words at the start of visible text (common after
+    # think-block removal when models emit "assistant" as a role marker).
+    text = re.sub(r"^[\s\n]*(?:assistant|user|system)\b[\s\n]*", "", text)
     return text
 
 

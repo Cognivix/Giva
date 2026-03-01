@@ -164,20 +164,14 @@ struct ChatView: View {
                         .help("Send message")
                     }
                 } else {
-                    // Text input field — auto-expands vertically for multiline
-                    TextField(
-                        viewModel.isOnboarding ? "Answer..." : "Ask Giva...",
+                    // Text input — grows with content, scrolls beyond max height
+                    GrowingTextInput(
                         text: $viewModel.currentInput,
-                        axis: .vertical
+                        placeholder: viewModel.isOnboarding ? "Answer..." : "Ask Giva...",
+                        isFocused: $isInputFocused,
+                        isDisabled: !viewModel.isChatEnabled || viewModel.isStreaming,
+                        onSubmit: { viewModel.sendMessage() }
                     )
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 13))
-                    .lineLimit(1...8)
-                    .focused($isInputFocused)
-                    .onSubmit {
-                        viewModel.sendMessage()
-                    }
-                    .disabled(!viewModel.isChatEnabled || viewModel.isStreaming)
 
                     if viewModel.isStreaming {
                         Button(action: { viewModel.cancelStreaming() }) {
@@ -223,6 +217,59 @@ struct ChatView: View {
         }
         .onAppear {
             isInputFocused = true
+        }
+    }
+}
+
+// MARK: - Growing Text Input
+
+/// A text input that grows with its content and scrolls beyond a maximum height.
+/// Uses `TextEditor` for proper multiline editing + Enter-to-send / Shift+Enter for newline.
+struct GrowingTextInput: View {
+    @Binding var text: String
+    let placeholder: String
+    var isFocused: FocusState<Bool>.Binding
+    let isDisabled: Bool
+    let onSubmit: () -> Void
+
+    /// Approximate line height for 13pt system font.
+    private let lineHeight: CGFloat = 18
+    /// Minimum input height (single line + padding).
+    private let minHeight: CGFloat = 28
+    /// Maximum input height before scrolling (~10 lines).
+    private let maxHeight: CGFloat = 200
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            // Placeholder
+            if text.isEmpty {
+                Text(placeholder)
+                    .font(.system(size: 13))
+                    .foregroundColor(.secondary.opacity(0.5))
+                    .padding(.horizontal, 5)
+                    .padding(.top, 4)
+                    .allowsHitTesting(false)
+            }
+
+            TextEditor(text: $text)
+                .font(.system(size: 13))
+                .scrollContentBackground(.hidden)
+                .focused(isFocused)
+                .disabled(isDisabled)
+                .frame(
+                    minHeight: minHeight,
+                    maxHeight: maxHeight
+                )
+                .fixedSize(horizontal: false, vertical: true)
+                .onKeyPress(.return, phases: .down) { press in
+                    if press.modifiers.isEmpty {
+                        // Enter alone → send
+                        onSubmit()
+                        return .handled
+                    }
+                    // Shift+Enter, Option+Enter, etc. → insert newline (default)
+                    return .ignored
+                }
         }
     }
 }

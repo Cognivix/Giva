@@ -652,6 +652,97 @@ class TestSpecialTokenFilter:
         assert "<think>" in result
         assert "</think>" in result
 
+    def test_full_open_pattern_with_start_assistant(self, filt):
+        """<|start|>assistant<|channel|>analysis<|message|> is converted to <think>."""
+        text = "<|start|>assistant<|channel|>analysis<|message|>reasoning"
+        result = filt.feed(text) + filt.flush()
+        assert "<think>" in result
+        assert "reasoning" in result
+        assert "assistant" not in result
+
+    def test_full_open_pattern_streamed(self):
+        """Full open pattern with <|start|>assistant prefix, streamed token by token."""
+        from giva.server import _SpecialTokenFilter, _ThinkParser
+
+        filt = _SpecialTokenFilter()
+        parser = _ThinkParser()
+
+        tokens = [
+            "<|start|>", "assistant",
+            "<|channel|>", "analysis", "<|message|>",
+            "I need to think carefully.",
+            "<|end|>", "<|start|>", "assistant",
+            "<|channel|>", "final", "<|message|>",
+            "The answer is 42."
+        ]
+
+        all_events = []
+        for token in tokens:
+            normalised = filt.feed(token)
+            if normalised:
+                all_events += parser.feed(normalised)
+        remaining = filt.flush()
+        if remaining:
+            all_events += parser.feed(remaining)
+        all_events += parser.flush()
+
+        thinking = "".join(d for t, d in all_events if t == "thinking")
+        visible = "".join(d for t, d in all_events if t == "token")
+
+        assert "I need to think carefully." in thinking
+        assert "The answer is 42." in visible
+        assert "assistant" not in visible
+
+    def test_think_parser_strips_role_word_after_close(self):
+        """ThinkParser strips 'assistant' role word immediately after </think>."""
+        from giva.server import _ThinkParser
+
+        parser = _ThinkParser()
+        events = parser.feed("<think>reasoning</think>assistant\nHello!")
+        events += parser.flush()
+        visible = "".join(d for t, d in events if t == "token")
+        assert "assistant" not in visible
+        assert "Hello!" in visible
+
+    def test_think_parser_strips_role_word_cross_chunk(self):
+        """ThinkParser strips 'assistant' arriving in separate chunk after </think>."""
+        from giva.server import _ThinkParser
+
+        parser = _ThinkParser()
+        all_events = []
+        all_events += parser.feed("<think>reasoning</think>")
+        all_events += parser.feed("assistant")
+        all_events += parser.feed("\nHello!")
+        all_events += parser.flush()
+        visible = "".join(d for t, d in all_events if t == "token")
+        assert "assistant" not in visible
+        assert "Hello!" in visible
+
+    def test_think_parser_strips_orphan_close_tag(self):
+        """ThinkParser strips orphan </think> in visible mode (double-close)."""
+        from giva.server import _ThinkParser
+
+        parser = _ThinkParser()
+        events = parser.feed("<think>reasoning</think></think>Hello!")
+        events += parser.flush()
+        visible = "".join(d for t, d in events if t == "token")
+        assert "</think>" not in visible
+        assert "Hello!" in visible
+
+    def test_think_parser_double_close_with_role_word(self):
+        """ThinkParser handles </think>assistant</think> double-close pattern."""
+        from giva.server import _ThinkParser
+
+        parser = _ThinkParser()
+        events = parser.feed(
+            "<think>reasoning</think>assistant</think>Got it!"
+        )
+        events += parser.flush()
+        visible = "".join(d for t, d in events if t == "token")
+        assert "assistant" not in visible
+        assert "</think>" not in visible
+        assert "Got it!" in visible
+
 
 class TestStripSpecialTokens:
     """Tests for the non-streaming strip_special_tokens() utility."""
@@ -778,3 +869,25 @@ class TestExtractThinking:
         from giva.llm.engine import strip_special_tokens
         text = "<think>reasoning</think>The answer is 42."
         assert strip_special_tokens(text) == "The answer is 42."
+
+    def test_strips_role_word_after_think_block(self):
+        """Batch path strips 'assistant' role word after think block removal."""
+        from giva.llm.engine import extract_thinking
+        text = "<think>reasoning</think>\nassistant\nGot it! Hello."
+        visible, thinking = extract_thinking(text)
+        assert "assistant" not in visible
+        assert "Got it! Hello." in visible
+
+    def test_strips_full_open_variant(self):
+        """Batch path handles <|start|>assistant<|channel|>analysis open pattern."""
+        from giva.llm.engine import extract_thinking
+        text = (
+            "<|start|>assistant<|channel|>analysis<|message|>"
+            "Internal reasoning."
+            "<|end|><|start|>assistant<|channel|>final<|message|>"
+            "Hello! How can I help?"
+        )
+        visible, thinking = extract_thinking(text)
+        assert visible == "Hello! How can I help?"
+        assert "Internal reasoning." in thinking
+        assert "assistant" not in visible

@@ -10,6 +10,7 @@ import SwiftUI
 struct TaskChatView: View {
     let taskId: Int
     @Environment(GivaViewModel.self) private var viewModel
+    @FocusState private var isInputFocused: Bool
 
     var body: some View {
         @Bindable var viewModel = viewModel
@@ -87,18 +88,13 @@ struct TaskChatView: View {
 
             // Input field
             HStack(spacing: 8) {
-                TextField(
-                    "Ask the coordinator...",
+                GrowingTextInput(
                     text: $viewModel.taskChatInput,
-                    axis: .vertical
+                    placeholder: "Ask the coordinator...",
+                    isFocused: $isInputFocused,
+                    isDisabled: !viewModel.isChatEnabled || viewModel.isTaskChatStreaming,
+                    onSubmit: { viewModel.sendTaskChat(taskId: taskId) }
                 )
-                .textFieldStyle(.plain)
-                .font(.system(size: 13))
-                .lineLimit(1...8)
-                .onSubmit {
-                    viewModel.sendTaskChat(taskId: taskId)
-                }
-                .disabled(!viewModel.isChatEnabled || viewModel.isTaskChatStreaming)
 
                 if viewModel.isTaskChatStreaming {
                     Button(action: { viewModel.cancelTaskChatStreaming() }) {

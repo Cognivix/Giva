@@ -742,7 +742,10 @@ class _SpecialTokenFilter:
 
     # Full open/close patterns to convert.  Longest variants first so
     # ``str.replace`` matches the most specific pattern.
-    _GPT_OPEN = "<|channel|>analysis<|message|>"
+    _GPT_OPEN_VARIANTS = (
+        "<|start|>assistant<|channel|>analysis<|message|>",
+        "<|channel|>analysis<|message|>",
+    )
     _GPT_CLOSE_VARIANTS = (
         "<|end|><|start|>assistant<|channel|>final<|message|>",
         "<|end|>assistant<|channel|>final<|message|>",
@@ -770,7 +773,8 @@ class _SpecialTokenFilter:
 
         # --- Phase 1: replace full GPT channel patterns → <think> / </think>
         old_buf = self._buf
-        self._buf = self._buf.replace(self._GPT_OPEN, "<think>")
+        for variant in self._GPT_OPEN_VARIANTS:
+            self._buf = self._buf.replace(variant, "<think>")
         for variant in self._GPT_CLOSE_VARIANTS:
             self._buf = self._buf.replace(variant, "</think>")
         if self._buf != old_buf:
@@ -836,7 +840,8 @@ class _SpecialTokenFilter:
 
     # All patterns to check for partial-prefix matching in _hold_point.
     _ALL_PATTERNS = (
-        "<|channel|>analysis<|message|>",  # open
+        "<|start|>assistant<|channel|>analysis<|message|>",  # open (full)
+        "<|channel|>analysis<|message|>",  # open (short)
         "<|end|><|start|>assistant<|channel|>final<|message|>",
         "<|end|>assistant<|channel|>final<|message|>",
         "<|end|><|start|><|channel|>final<|message|>",
@@ -889,14 +894,23 @@ class _ThinkParser:
     Qwen3 models emit <think>...</think> blocks before the actual answer.
     This parser routes tokens to either "thinking" or "token" SSE events.
     Handles tags split across token boundaries via a small buffer.
+
+    Safety nets:
+    - Strips orphan ``</think>`` tags in visible mode (double-close from
+      models using both native think tags and GPT-OSS channel markers).
+    - Strips role-word markers (``assistant``, ``user``) that some models
+      emit between ``</think>`` and the visible response.
     """
 
     _OPEN = "<think>"
     _CLOSE = "</think>"
+    # Role words that models sometimes emit after </think>.
+    _ROLE_WORD_RE = re.compile(r"^[\s\n]*(?:assistant|user|system)\b[\s\n]*")
 
     def __init__(self, *, start_in_think: bool = False):
         self._in_think = start_in_think
         self._buf = ""  # Buffer for partial tag matching
+        self._eat_role = False  # True right after exiting think mode
 
     def feed(self, text: str) -> list[tuple[str, str]]:
         """Feed a chunk of text, return list of (event_type, text) pairs."""
@@ -905,6 +919,32 @@ class _ThinkParser:
 
         while self._buf:
             if not self._in_think:
+                # --- Safety: eat role-word marker after </think> transition
+                if self._eat_role:
+                    m = self._ROLE_WORD_RE.match(self._buf)
+                    if m:
+                        self._buf = self._buf[m.end():]
+                        self._eat_role = False
+                        continue
+                    # Hold only if the buffer so far looks like it could
+                    # still become a role word (whitespace + prefix of
+                    # "assistant" / "user" / "system").
+                    stripped = self._buf.lstrip()
+                    if stripped and not self._could_be_role_prefix(stripped):
+                        self._eat_role = False
+                    elif not stripped and len(self._buf) < 5:
+                        break  # Only whitespace so far, wait a bit
+                    elif stripped and len(stripped) < 9:
+                        break  # Could still be "assistant" prefix
+                    else:
+                        self._eat_role = False
+
+                # --- Safety: strip orphan </think> in visible mode
+                if self._buf.startswith(self._CLOSE):
+                    self._buf = self._buf[len(self._CLOSE):]
+                    self._buf = self._buf.lstrip("\n")
+                    continue
+
                 # Look for <think> open tag
                 idx = self._buf.find(self._OPEN)
                 if idx >= 0:
@@ -914,10 +954,14 @@ class _ThinkParser:
                         events.append(("token", before))
                     self._buf = self._buf[idx + len(self._OPEN):]
                     self._in_think = True
+                    self._eat_role = False
                     continue
                 # Check if end of buffer could be the start of "<think>"
-                # e.g. buffer ends with "<", "<t", "<th", etc.
-                partial_match = self._partial_tag_len(self._buf, self._OPEN)
+                # or "</think>" (orphan close that arrives in pieces)
+                partial_match = max(
+                    self._partial_tag_len(self._buf, self._OPEN),
+                    self._partial_tag_len(self._buf, self._CLOSE),
+                )
                 if partial_match > 0:
                     # Emit everything except the potential partial tag
                     safe = self._buf[:-partial_match]
@@ -938,6 +982,7 @@ class _ThinkParser:
                         events.append(("thinking", before))
                     self._buf = self._buf[idx + len(self._CLOSE):]
                     self._in_think = False
+                    self._eat_role = True  # Prepare to eat role word
                     # Strip leading whitespace after </think>
                     self._buf = self._buf.lstrip("\n")
                     continue
@@ -958,10 +1003,29 @@ class _ThinkParser:
         """Flush any remaining buffered text at end of stream."""
         if not self._buf:
             return []
+        # Strip role words from remaining buffer if we were eating
+        if self._eat_role:
+            m = self._ROLE_WORD_RE.match(self._buf)
+            if m:
+                self._buf = self._buf[m.end():]
+            self._eat_role = False
+        # Strip orphan </think> at start
+        if self._buf.startswith(self._CLOSE):
+            self._buf = self._buf[len(self._CLOSE):].lstrip("\n")
+        if not self._buf:
+            return []
         event_type = "thinking" if self._in_think else "token"
         remaining = self._buf
         self._buf = ""
         return [(event_type, remaining)]
+
+    _ROLE_WORDS_LIST = ("assistant", "user", "system")
+
+    @classmethod
+    def _could_be_role_prefix(cls, text: str) -> bool:
+        """True if ``text`` is a prefix of any role word."""
+        lower = text.lower()
+        return any(word.startswith(lower) for word in cls._ROLE_WORDS_LIST)
 
     @staticmethod
     def _partial_tag_len(text: str, tag: str) -> int:
@@ -1880,25 +1944,28 @@ async def _run_post_chat(
         except Exception as e:
             log.debug("Post-chat agent error: %s", e)
 
-        # 1b. Persist agent action summaries to task conversation
-        if task_id is not None and actions:
+        # 1b. Persist agent action summaries to conversation (all scopes)
+        if actions:
             for act in actions:
                 act_type = act.get("type", "")
                 act_title = act.get("title", "")
                 if act_type == "task_created" and act_title:
                     store.add_message(
                         "system", f"Agent created task: {act_title}",
-                        task_id=task_id, msg_type="agent_action",
+                        goal_id=goal_id, task_id=task_id,
+                        msg_type="agent_action",
                     )
                 elif act_type == "task_completed" and act_title:
                     store.add_message(
                         "system", f"Agent completed task: {act_title}",
-                        task_id=task_id, msg_type="agent_action",
+                        goal_id=goal_id, task_id=task_id,
+                        msg_type="agent_action",
                     )
                 elif act_type == "progress" and act.get("note"):
                     store.add_message(
                         "system", f"Progress logged: {act['note']}",
-                        task_id=task_id, msg_type="agent_action",
+                        goal_id=goal_id, task_id=task_id,
+                        msg_type="agent_action",
                     )
 
         # 2. Run conversation compressor if needed (global chat only)

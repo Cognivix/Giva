@@ -96,6 +96,9 @@ def start_onboarding(
 
     _parse_and_save(full_text, visible_full, "assistant", store, step=1)
 
+    # Persist to conversations table for history/queryability
+    store.add_message("assistant", visible_full)
+
     # Initialize onboarding history
     store.update_profile_data({
         "onboarding_step": 1,
@@ -126,6 +129,9 @@ def continue_onboarding(
 
     # Append user response to history
     history.append({"role": "user", "content": user_response})
+
+    # Persist user response to conversations table
+    store.add_message("user", user_response)
 
     # Build messages
     observations = _gather_observations(store)
@@ -168,6 +174,9 @@ def continue_onboarding(
 
     # Update history with assistant response
     history.append({"role": "assistant", "content": visible_full})
+
+    # Persist assistant response to conversations table
+    store.add_message("assistant", visible_full)
 
     # Check if interview is complete
     is_complete = False

@@ -795,7 +795,13 @@ class GivaViewModel {
 
         service.onComplete = { [weak self] text in
             guard let self else { return }
-            self.currentInput = text
+            if mode == .dictate && !self.currentInput.isEmpty {
+                // Dictate: insert transcribed text at end of existing input
+                let separator = self.currentInput.hasSuffix(" ") ? "" : " "
+                self.currentInput += separator + text
+            } else {
+                self.currentInput = text
+            }
             self.isRecording = false
             self.voiceService = nil
             if mode == .fullVoice {

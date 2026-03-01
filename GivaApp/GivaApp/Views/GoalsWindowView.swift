@@ -175,12 +175,25 @@ struct GoalDetailView: View {
             }
 
             if viewModel.isStrategyStreaming {
-                Text(viewModel.strategyStreamText)
-                    .font(.body)
-                    .foregroundColor(.secondary)
+                if viewModel.isStrategyThinking && viewModel.strategyStreamText.isEmpty {
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Thinking…")
+                            .font(.callout)
+                            .foregroundColor(.secondary)
+                    }
                     .padding(10)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.05)))
+                } else {
+                    Text(viewModel.strategyStreamText)
+                        .font(.body)
+                        .foregroundColor(.secondary)
+                        .padding(10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.05)))
+                }
             }
 
             // Empty state CTA when no strategies exist
@@ -328,12 +341,25 @@ struct GoalDetailView: View {
             }
 
             if viewModel.isPlanStreaming {
-                Text(viewModel.planStreamText)
-                    .font(.body)
-                    .foregroundColor(.secondary)
+                if viewModel.isPlanThinking && viewModel.planStreamText.isEmpty {
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Thinking…")
+                            .font(.callout)
+                            .foregroundColor(.secondary)
+                    }
                     .padding(10)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.05)))
+                } else {
+                    Text(viewModel.planStreamText)
+                        .font(.body)
+                        .foregroundColor(.secondary)
+                        .padding(10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.05)))
+                }
             }
         }
     }

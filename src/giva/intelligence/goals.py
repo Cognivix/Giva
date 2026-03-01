@@ -134,8 +134,10 @@ def generate_strategy(
         full_response.append(token)
         yield token
 
-    # Parse and save strategy
+    # Parse and save strategy — strip thinking content first
     text = "".join(full_response)
+    from giva.llm.engine import strip_special_tokens
+    text = strip_special_tokens(text)
     result = _parse_json_response(text, StrategyResult)
     if result:
         strategy = GoalStrategy(
@@ -221,8 +223,10 @@ def generate_tactical_plan(
         full_response.append(token)
         yield token
 
-    # Parse plan (saved externally via accept_plan)
+    # Parse plan (saved externally via accept_plan) — strip thinking content first
     text = "".join(full_response)
+    from giva.llm.engine import strip_special_tokens
+    text = strip_special_tokens(text)
     result = _parse_json_response(text, TacticalPlan)
     if result:
         log.info(

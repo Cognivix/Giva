@@ -26,8 +26,10 @@ class GoalsViewModel {
     var isInferring: Bool = false
     var inferStreamText: String = ""
     var isStrategyStreaming: Bool = false
+    var isStrategyThinking: Bool = false
     var strategyStreamText: String = ""
     var isPlanStreaming: Bool = false
+    var isPlanThinking: Bool = false
     var planStreamText: String = ""
     var isPlanReviewStreaming: Bool = false
     var planReviewStreamText: String = ""
@@ -252,6 +254,7 @@ class GoalsViewModel {
     func generateStrategy(goalId: Int) {
         guard !isStrategyStreaming else { return }
         isStrategyStreaming = true
+        isStrategyThinking = false
         strategyStreamText = ""
         errorMessage = nil
 
@@ -259,10 +262,16 @@ class GoalsViewModel {
             do {
                 let stream = apiService.streamStrategy(goalId: goalId)
                 for try await event in stream {
-                    if event.event == "token" {
+                    switch event.event {
+                    case "token":
+                        isStrategyThinking = false
                         strategyStreamText += event.data
-                    } else if event.event == "error" {
+                    case "thinking":
+                        isStrategyThinking = true
+                    case "error":
                         errorMessage = event.data
+                    default:
+                        break
                     }
                 }
             } catch is CancellationError {
@@ -270,7 +279,10 @@ class GoalsViewModel {
             } catch {
                 errorMessage = error.localizedDescription
             }
+            isStrategyThinking = false
             isStrategyStreaming = false
+            // Refresh goal to pick up newly saved strategy from DB
+            await refreshSelectedGoal()
         }
     }
 
@@ -290,6 +302,7 @@ class GoalsViewModel {
     func generatePlan(goalId: Int) {
         guard !isPlanStreaming else { return }
         isPlanStreaming = true
+        isPlanThinking = false
         planStreamText = ""
         errorMessage = nil
 
@@ -297,10 +310,16 @@ class GoalsViewModel {
             do {
                 let stream = apiService.streamPlan(goalId: goalId)
                 for try await event in stream {
-                    if event.event == "token" {
+                    switch event.event {
+                    case "token":
+                        isPlanThinking = false
                         planStreamText += event.data
-                    } else if event.event == "error" {
+                    case "thinking":
+                        isPlanThinking = true
+                    case "error":
                         errorMessage = event.data
+                    default:
+                        break
                     }
                 }
             } catch is CancellationError {
@@ -308,7 +327,9 @@ class GoalsViewModel {
             } catch {
                 errorMessage = error.localizedDescription
             }
+            isPlanThinking = false
             isPlanStreaming = false
+            await refreshSelectedGoal()
         }
     }
 
@@ -537,7 +558,9 @@ class GoalsViewModel {
         streamTask = nil
         isInferring = false
         isStrategyStreaming = false
+        isStrategyThinking = false
         isPlanStreaming = false
+        isPlanThinking = false
         isPlanReviewStreaming = false
         isGoalChatStreaming = false
         isReviewStreaming = false
