@@ -135,15 +135,15 @@ Key environment overrides:
 ```
 src/giva/
 ├── cli.py              # Interactive REPL (prompt-toolkit + rich)
-├── server.py           # FastAPI REST + SSE API on 127.0.0.1:7483
+├── server.py           # FastAPI REST + SSE API, token filter + think parser
 ├── config.py           # TOML config: config.default.toml → user → env
 ├── bootstrap.py        # Server-side bootstrap state machine
 ├── models.py           # HuggingFace model discovery + recommendation
 ├── hardware.py         # Mac hardware detection (chip, RAM, GPU cores)
 ├── benchmarks.py       # Live LLM benchmark fetching
 ├── db/
-│   ├── models.py       # Dataclasses: Email, Event, Task, Goal, VlmTask
-│   ├── store.py        # SQLite + FTS5 data layer (WAL mode, v9)
+│   ├── models.py       # Dataclasses: Email, Event, Task, Goal, GoalStrategy, VlmTask
+│   ├── store.py        # SQLite + FTS5 data layer (WAL mode, v10)
 │   └── migrations.py   # Schema versioning + ALTER migrations
 ├── sync/
 │   ├── mail.py         # Apple Mail sync via JXA + LLM filter
@@ -151,7 +151,7 @@ src/giva/
 │   └── scheduler.py    # Background sync via threading.Timer
 ├── llm/
 │   ├── apple_adapter.py # Apple Foundation Model adapter
-│   ├── engine.py       # MLX dual-model: assistant + filter
+│   ├── engine.py       # MLX dual-model, extract_thinking, strip_special_tokens
 │   ├── prompts.py      # All prompt templates
 │   ├── structured.py   # Pydantic models for structured output
 │   └── vlm.py          # VLM inference placeholder (mlx-vlm)
@@ -238,7 +238,10 @@ docs/                   # Agent architecture + bootstrap design
 - **Post-chat agent pipeline** — intent detection, task creation, progress tracking, and preference learning run automatically after every chat turn using the filter model. Created tasks preserve links to the source email/event from the conversation context
 - **Pluggable agents** — protocol-based discovery with two-stage routing. New agents register by dropping a module into `giva/agents/`. Filter model for classification agents, assistant model for synthesis agents
 - **Power-aware scheduling** — sync defers on low battery (≤50%) or thermal pressure (≥ serious). Models auto-unload after configurable idle timeout
-- **Goal-scoped conversations** — conversations table has nullable `goal_id`; global and goal chat are cleanly separated in the DB and UI
+- **Typed conversation persistence** — conversations table (schema v10) stores messages with a `type` column (`message`, `thinking`, `agent_action`) and optional `goal_id`/`task_id` scoping. LLM reasoning is preserved as `thinking` rows, post-chat agent actions as `agent_action` rows. On history load, `ChatMessage.fromHistory()` reconstructs thinking panes and action logs from typed DB rows
+- **DB-first chat** — all messages (regular chat, onboarding, agent actions) are persisted to the conversations table as the source of truth. Regular chat starts empty on reconnect (user loads manually); onboarding auto-reloads from server session state
+- **Streaming token pipeline** — LLM output passes through `_SpecialTokenFilter` (normalizes model-specific special tokens like GPT-OSS `<|channel|>analysis<|message|>` to `<think>`/`</think>`) then `_ThinkParser` (splits stream into thinking vs. visible events) before reaching SSE. Handles tags split across token boundaries and role-word markers after think transitions
+- **Post-chat agent pipeline** — intent detection, task creation, progress tracking, and preference learning run automatically after every chat turn. Agent actions are persisted to the DB for all conversation scopes (global, goal, task). Created tasks preserve links to the source email/event from conversation context
 - **VLM agent chain decoupling** — WebOrchestratorAgent plans and writes VLM subtasks to SQLite, then returns immediately. Chrome extension polls and drives VLM execution asynchronously. All model operations serialized via a single lock to prevent concurrent loading
 - **VLM model selection** — VLM model discovery uses LLM-powered keyword search and iterative refinement (same multi-phase approach as text models). Recommendations use the assistant model (Settings) or Apple Foundation Model (bootstrap) for intelligent selection. Models are filtered to only show MLX VLM models that fit in remaining memory after text models are loaded
 - **Full window on launch** — The app always opens the full window when the server is ready; the menu bar popover is the "minimized" state. Quick-drop prompt capture (⌥Space) and quit confirmation with server lifecycle choice round out the app UX

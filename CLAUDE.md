@@ -27,7 +27,7 @@ ruff check src/ tests/
 ```
 src/giva/
 ├── cli.py              # Interactive REPL (prompt-toolkit + rich)
-├── server.py           # FastAPI REST + SSE API on 127.0.0.1:7483
+├── server.py           # FastAPI REST + SSE API, _SpecialTokenFilter + _ThinkParser
 ├── config.py           # TOML config: config.default.toml → ~/.config/giva/config.toml → GIVA_* env
 ├── bootstrap.py        # Server-side bootstrap state machine (checkpoint Markov chain)
 ├── models.py           # HuggingFace model discovery, recommendation, download management
@@ -35,7 +35,7 @@ src/giva/
 ├── benchmarks.py       # Live LLM benchmark fetching (Open LLM Leaderboard, LMArena)
 ├── db/
 │   ├── models.py       # Dataclasses: Email, Event, Task, UserProfile, Goal, VlmTask
-│   ├── store.py        # SQLite + FTS5 data layer (WAL mode, schema v9)
+│   ├── store.py        # SQLite + FTS5 data layer (WAL mode, schema v10)
 │   └── migrations.py   # Schema versioning + ALTER migrations
 ├── sync/
 │   ├── mail.py         # Apple Mail sync via JXA, chunked headers + LLM filter
@@ -43,7 +43,7 @@ src/giva/
 │   └── scheduler.py    # Background sync via threading.Timer
 ├── llm/
 │   ├── apple_adapter.py # Apple Foundation Model adapter (on-device ~3B)
-│   ├── engine.py       # MLX ModelManager: dual-model (assistant 30B + filter 8B)
+│   ├── engine.py       # MLX ModelManager: dual-model, extract_thinking, strip_special_tokens
 │   ├── prompts.py      # All prompt templates
 │   ├── structured.py   # Pydantic models for structured LLM output
 │   └── vlm.py          # VLM inference placeholder (mlx-vlm integration)
@@ -169,7 +169,7 @@ The local LLM pipeline: model loading, prompt construction, structured output pa
 | File | Role |
 |---|---|
 | `src/giva/llm/apple_adapter.py` | Apple Foundation Model adapter: on-device ~3B model as filter option |
-| `src/giva/llm/engine.py` | MLX ModelManager: lazy dual-model loading, generate/stream, idle unload |
+| `src/giva/llm/engine.py` | MLX ModelManager: lazy dual-model loading, generate/stream, idle unload, `extract_thinking()`, `strip_special_tokens()` |
 | `src/giva/llm/prompts.py` | Every prompt template (chat, filter, onboarding, agents, goals, etc.) |
 | `src/giva/llm/structured.py` | Pydantic models for typed LLM output (intents, plans, profile updates) |
 | `src/giva/llm/vlm.py` | VLM inference placeholder for mlx-vlm screenshot analysis |
@@ -193,7 +193,7 @@ SQLite storage, schema management, and data type definitions.
 
 | File | Role |
 |---|---|
-| `src/giva/db/store.py` | SQLite + FTS5 data layer (WAL mode, SCHEMA_SQL constant, schema v9) |
+| `src/giva/db/store.py` | SQLite + FTS5 data layer (WAL mode, SCHEMA_SQL constant, schema v10) |
 | `src/giva/db/models.py` | Dataclasses: Email, Event, Task, UserProfile, Goal, GoalStrategy, VlmTask |
 | `src/giva/db/migrations.py` | Schema version detection + ALTER TABLE migrations |
 | `src/giva/config.py` | TOML config loading: default → user → env overlay |
@@ -255,7 +255,7 @@ The FastAPI HTTP layer that bridges the Python backend to the Swift frontend.
 
 | File | Role |
 |---|---|
-| `src/giva/server.py` | FastAPI app: REST endpoints, SSE streaming, LLM/voice locks, lifespan |
+| `src/giva/server.py` | FastAPI app: REST endpoints, SSE streaming, LLM/voice locks, `_SpecialTokenFilter` + `_ThinkParser` pipeline, lifespan |
 | `src/giva/config.py` | Config loading (also served via `GET/PUT /api/config`) |
 | `GivaApp/Services/APIService.swift` | URLSession HTTP client + SSE streaming parser |
 | `GivaApp/Services/APIServiceProtocol.swift` | Protocol for mock injection in tests |
@@ -317,9 +317,9 @@ Test infrastructure across both Python and Swift.
 | File | Role |
 |---|---|
 | `tests/conftest.py` | Shared pytest fixtures: `tmp_db`, `config` (isolated temp dirs) |
-| `tests/test_db/` | Store, config, migrations, models, goals, vlm_tasks (8 files) |
-| `tests/test_intelligence/` | Agents, context, goals, onboarding, profile, queries, tasks, task_review (12 files) |
-| `tests/test_agents/` | Base, registry, router, queue, orchestrator, email_drafter, MCP, web_orchestrator (13 files) |
+| `tests/test_db/` | Store, config, migrations, models, goals, vlm_tasks (7 files) |
+| `tests/test_intelligence/` | Agents, context, goals, onboarding, profile, queries, tasks, task_review, mcp_observations (11 files) |
+| `tests/test_agents/` | Base, registry, router, queue, orchestrator, email_drafter, MCP, web_orchestrator (12 files) |
 | `tests/test_sync/` | Mail sync, calendar, filter, scheduler (5 files) |
 | `tests/test_audio/` | TTS, STT (2 files) |
 | `tests/test_llm/` | Apple adapter, prompts, structured output (3 files) |
@@ -338,7 +338,7 @@ Visual browser task execution via Chrome extension + VLM inference.
 | `src/giva/llm/vlm.py` | VLM inference placeholder (mlx-vlm screenshot → action) |
 | `src/giva/llm/structured.py` (`VlmAction`, `WebPlan*`) | Pydantic models for VLM actions and web plans |
 | `src/giva/db/models.py` (`VlmTask`) | VLM task dataclass with status lifecycle |
-| `src/giva/db/store.py` (`vlm_task_queue`) | SQLite CRUD for VLM task queue (schema v9) |
+| `src/giva/db/store.py` (`vlm_task_queue`) | SQLite CRUD for VLM task queue (schema v10) |
 | `src/giva/agents/web_orchestrator/agent.py` | WebOrchestratorAgent: decomposes web tasks into VLM subtasks |
 | `src/giva/agents/web_orchestrator/prompts.py` | Prompt templates for web task decomposition |
 | `src/giva/server.py` (`/api/vlm/*`) | 5 VLM endpoints: create, list, current, analyze, complete |
@@ -375,6 +375,9 @@ Visual browser task execution via Chrome extension + VLM inference.
 - **Quick-drop panel (Option+Space)**: A lightweight floating text field for fast prompt capture. Registered via `NSEvent.addLocalMonitorForEvents` (works when app/menu bar active) + `addGlobalMonitorForEvents` (works from any app if Accessibility granted). Enter sends the prompt as a background chat message (fire-and-forget), Cmd+Enter opens the full UI with the prompt in the input field. The hotkey sets `viewModel.quickDropRequested`, and `MenuBarContent` bridges it to `openWindow(id: "quick-drop")`.
 - **Quit confirmation with server lifecycle**: The "Quit Giva" gear menu item shows a confirmation with two options: "Quit" (keeps the daemon running for CLI access) and "Quit & Stop Server" (bootouts the launchd daemon before terminating). Uses the established inline confirmation banner pattern in the popover and `.confirmationDialog` in the full window.
 - **Task detail as sidebar + content**: Individual tasks are listed in the sidebar (like goals). Clicking a task shows `TaskDetailView` in the content pane — a vertical stack: title/metadata header, description, source deep link (email/event/chat), then a full chat history + input field. The chat history includes agent action logs (persisted as `system` role messages). In the menu bar popover, clicking a task opens the full window with that task selected. `GET /api/tasks/{task_id}` returns enriched task info including source summary (email subject/sender or event summary).
+- **Typed conversation persistence (schema v10)**: The `conversations` table has a `type` column with values `message`, `thinking`, and `agent_action`. User and assistant text are `message`; LLM reasoning blocks extracted by `extract_thinking()` are saved as `thinking`; post-chat agent actions (task created, completed, progress logged) are saved as `agent_action`. The `type` column enables: (1) filtering thinking/actions out of LLM context (`get_recent_messages` defaults to `types=["message"]`), (2) reconstructing thinking panes from history via `ChatMessage.fromHistory()`, (3) showing agent action logs in task/goal chat. `get_messages_for_date()` returns all types for complete history rendering.
+- **DB-first chat persistence**: All chat messages are persisted to the conversations table as the source of truth. Regular chat saves user + assistant + thinking rows during `handle_query()`. Onboarding messages are saved to both `profile_data` JSON (for auto-reload during bootstrap) and the conversations table (for history/queryability). Agent actions are persisted for all scopes — global (`goal_id IS NULL, task_id IS NULL`), goal (`goal_id = ?`), and task (`task_id = ?`). On app reconnect, regular chat starts empty (user loads manually via conversation history sidebar); onboarding chat auto-reloads from `/api/session`.
+- **Streaming token pipeline — `_SpecialTokenFilter` + `_ThinkParser`**: LLM output passes through a two-stage pipeline in `server.py` before reaching SSE. **Stage 1** (`_SpecialTokenFilter`): normalizes model-specific special tokens — converts GPT-OSS `<|start|>assistant<|channel|>analysis<|message|>` to `<think>`, converts close patterns to `</think>`, strips remaining `<|...|>` tokens. Uses a hold-point buffer for partial multi-token pattern matching. **Stage 2** (`_ThinkParser`): stateful parser that splits the normalized stream into `("thinking", text)` and `("token", text)` event pairs. Handles `<think>`/`</think>` tags split across chunk boundaries, eats role-word markers (`assistant`, `user`, `system`) after think transitions, and strips orphan `</think>` tags. The parser can start in think mode (`start_in_think=True`) for models whose chat template injects `<think>` in the generation prompt. The batch-path equivalent is `extract_thinking()` in `engine.py`, which uses `_normalise_thinking_tags()` + `_clean_special_tokens()` to separate thinking from visible text in non-streaming contexts.
 
 ## Agent Architecture
 
