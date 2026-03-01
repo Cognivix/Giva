@@ -118,6 +118,74 @@ struct TaskItem: Codable, Identifiable {
     }
 }
 
+struct TaskSourceInfo: Codable {
+    let sourceType: String
+    let sourceId: Int
+    let title: String
+    let subtitle: String
+    let date: String?
+
+    enum CodingKeys: String, CodingKey {
+        case title, subtitle, date
+        case sourceType = "source_type"
+        case sourceId = "source_id"
+    }
+}
+
+struct TaskDetailResponse: Codable, Identifiable {
+    let id: Int
+    let title: String
+    let description: String
+    let sourceType: String
+    let sourceId: Int
+    let priority: String
+    let dueDate: String?
+    let status: String
+    let classification: String?
+    let dismissalReason: String?
+    let dismissedAt: String?
+    let createdAt: String?
+    let goalId: Int?
+    let goalTitle: String?
+    let source: TaskSourceInfo?
+
+    enum CodingKeys: String, CodingKey {
+        case id, title, description, priority, status, classification, source
+        case sourceType = "source_type"
+        case sourceId = "source_id"
+        case dueDate = "due_date"
+        case dismissalReason = "dismissal_reason"
+        case dismissedAt = "dismissed_at"
+        case createdAt = "created_at"
+        case goalId = "goal_id"
+        case goalTitle = "goal_title"
+    }
+
+    var formattedDueDate: String? {
+        guard let dueDate = dueDate else { return nil }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withFullDate]
+        if let date = formatter.date(from: String(dueDate.prefix(10))) {
+            let display = DateFormatter()
+            display.dateFormat = "MMM d"
+            return display.string(from: date)
+        }
+        return String(dueDate.prefix(10))
+    }
+
+    var formattedCreatedDate: String? {
+        guard let createdAt = createdAt else { return nil }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: createdAt) {
+            let display = DateFormatter()
+            display.dateFormat = "MMM d, yyyy"
+            return display.string(from: date)
+        }
+        return String(createdAt.prefix(10))
+    }
+}
+
 struct TaskListResponse: Codable {
     let tasks: [TaskItem]
     let count: Int
@@ -377,11 +445,27 @@ struct BootstrapStepProgress: Codable {
     let percent: Double
     let downloadedMb: Double?
     let totalMb: Double?
+    let status: String?
 
     enum CodingKeys: String, CodingKey {
-        case percent
+        case percent, status
         case downloadedMb = "downloaded_mb"
         case totalMb = "total_mb"
+    }
+
+    /// Human-readable status label for the UI.
+    var displayStatus: String {
+        switch status {
+        case "queued": return "Queued"
+        case "preparing": return "Preparing..."
+        case "querying_size": return "Querying model info..."
+        case "downloading": return percent < 0 ? "Downloading..." : ""
+        case "complete": return "Complete"
+        default:
+            if percent >= 100 { return "Complete" }
+            if percent < 0 { return "Preparing..." }
+            return ""
+        }
     }
 }
 

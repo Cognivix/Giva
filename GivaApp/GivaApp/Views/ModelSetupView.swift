@@ -118,9 +118,14 @@ struct ModelSetupView: View {
 
     private func modelSelectionContent(_ models: AvailableModelsResponse) -> some View {
         VStack(spacing: 16) {
-            recommendationCard(models.recommended, models: models)
+            if viewModel.isDownloadingModels {
+                // Brief transition state — BootstrapView takes over once
+                // the server phase changes from awaiting_model_selection to
+                // downloading_user_models (within ~2s via SSE).
+                downloadTransitionCard
+            } else {
+                recommendationCard(models.recommended, models: models)
 
-            if !viewModel.isDownloadingModels {
                 Button(action: {
                     selectedAssistant = models.recommended.assistant
                     selectedFilter = models.recommended.filter
@@ -137,13 +142,7 @@ struct ModelSetupView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
-            }
 
-            if viewModel.isDownloadingModels {
-                downloadProgressCard
-            }
-
-            if !viewModel.isDownloadingModels {
                 vlmSection(models)
                 customizeSection(models)
             }
@@ -285,78 +284,37 @@ struct ModelSetupView: View {
 
     // MARK: - Download Progress
 
-    private var downloadProgressCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label("Downloading models", systemImage: "arrow.down.circle")
+    /// Brief transition card shown between clicking "Use Recommended" and
+    /// the server advancing to downloading_user_models phase.  BootstrapView
+    /// takes over once the SSE event arrives (~2s).
+    private var downloadTransitionCard: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+                .controlSize(.regular)
+
+            Text("Starting download...")
                 .font(.headline)
 
-            if bootstrap.downloadProgress.isEmpty {
-                // Server hasn't started reporting yet
-                HStack(spacing: 8) {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text("Preparing download...")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            } else {
-                ForEach(
-                    bootstrap.downloadProgress.sorted(by: { $0.key < $1.key }),
-                    id: \.key
-                ) { modelId, progress in
-                    modelDownloadRow(modelId: modelId, progress: progress)
+            VStack(alignment: .leading, spacing: 4) {
+                modelLabel(role: "Assistant", modelId: selectedAssistant)
+                modelLabel(role: "Filter", modelId: selectedFilter)
+                if !selectedVlm.isEmpty {
+                    modelLabel(role: "Vision", modelId: selectedVlm)
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding()
         .background(.fill.tertiary, in: RoundedRectangle(cornerRadius: 10))
     }
 
-    private func modelDownloadRow(modelId: String, progress: BootstrapStepProgress) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+    private func modelLabel(role: String, modelId: String) -> some View {
+        HStack(spacing: 4) {
+            Text(role + ":")
+                .font(.caption)
+                .foregroundStyle(.secondary)
             Text(modelId.replacingOccurrences(of: "mlx-community/", with: ""))
                 .font(.caption.bold())
-
-            if progress.percent >= 100 {
-                HStack(spacing: 4) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                        .font(.caption2)
-                    Text("Complete")
-                        .font(.caption)
-                        .foregroundStyle(.green)
-                }
-            } else if progress.percent < 0 {
-                // Indeterminate — total size unknown
-                HStack(spacing: 8) {
-                    ProgressView()
-                        .controlSize(.small)
-                    if let dlMb = progress.downloadedMb {
-                        Text(String(format: "%.0f MB downloaded", dlMb))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            } else {
-                ProgressView(value: progress.percent, total: 100)
-                    .tint(.blue)
-
-                HStack {
-                    Text(String(format: "%.1f%%", progress.percent))
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    if let dlMb = progress.downloadedMb,
-                       let totalMb = progress.totalMb, totalMb > 0 {
-                        Text(String(
-                            format: "%.1f / %.1f GB",
-                            dlMb / 1024, totalMb / 1024
-                        ))
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                    }
-                }
-            }
         }
     }
 

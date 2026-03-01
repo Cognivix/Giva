@@ -210,6 +210,7 @@ GivaApp/                        # SwiftUI macOS app (Xcode project)
 │   ├── ChatView.swift          # Chat + Markdown rendering
 │   ├── TaskListView.swift      # Task list + priority indicators
 │   ├── TaskChatView.swift      # Task-scoped AI chat
+│   ├── TaskDetailView.swift    # Task detail: title, desc, source, chat
 │   ├── GoalsWindowView.swift   # Goals detail window
 │   ├── SettingsView.swift      # Settings (⌘,): tabbed layout
 │   ├── QuickActionsView.swift  # Bottom action bar

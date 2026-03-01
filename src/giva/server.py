@@ -181,6 +181,34 @@ class DismissedTaskListResponse(BaseModel):
     count: int
 
 
+class TaskSourceInfo(BaseModel):
+    """Summary of the source email or event linked to a task."""
+    source_type: str  # email, event, chat
+    source_id: int
+    title: str = ""
+    subtitle: str = ""
+    date: Optional[str] = None
+
+
+class TaskDetailResponse(BaseModel):
+    """Extended task info including source summary and goal link."""
+    id: int
+    title: str
+    description: str
+    source_type: str
+    source_id: int
+    priority: str
+    due_date: Optional[str] = None
+    status: str
+    classification: Optional[str] = None
+    dismissal_reason: str = ""
+    dismissed_at: Optional[str] = None
+    created_at: Optional[str] = None
+    goal_id: Optional[int] = None
+    goal_title: Optional[str] = None
+    source: Optional[TaskSourceInfo] = None
+
+
 class TaskCreateRequest(BaseModel):
     title: str = Field(..., min_length=1, max_length=200)
     description: str = ""
@@ -1156,6 +1184,70 @@ async def get_tasks(
     return TaskListResponse(tasks=task_list, count=len(task_list))
 
 
+@app.get("/api/tasks/{task_id}")
+async def get_task_detail(task_id: int, request: Request) -> TaskDetailResponse:
+    """Get detailed info for a single task, including source summary."""
+    store: Store = request.app.state.store
+
+    task = store.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    # Build source info
+    source_info = None
+    if task.source_type == "email" and task.source_id:
+        email = store.get_email_by_id(task.source_id)
+        if email:
+            source_info = TaskSourceInfo(
+                source_type="email",
+                source_id=task.source_id,
+                title=email.subject,
+                subtitle=f"From: {email.from_name or email.from_addr}",
+                date=email.date_sent.isoformat() if email.date_sent else None,
+            )
+    elif task.source_type == "event" and task.source_id:
+        event = store.get_event_by_id(task.source_id)
+        if event:
+            source_info = TaskSourceInfo(
+                source_type="event",
+                source_id=task.source_id,
+                title=event.summary,
+                subtitle=f"Calendar: {event.calendar_name}" if event.calendar_name else "",
+                date=event.dtstart.isoformat() if event.dtstart else None,
+            )
+    elif task.source_type == "chat":
+        source_info = TaskSourceInfo(
+            source_type="chat",
+            source_id=task.source_id,
+            title="Created from chat",
+        )
+
+    # Build goal info
+    goal_title = None
+    if task.goal_id:
+        goal = store.get_goal(task.goal_id)
+        if goal:
+            goal_title = goal.title
+
+    return TaskDetailResponse(
+        id=task.id,
+        title=task.title,
+        description=task.description,
+        source_type=task.source_type,
+        source_id=task.source_id,
+        priority=task.priority,
+        due_date=task.due_date.isoformat() if task.due_date else None,
+        status=task.status,
+        classification=task.classification,
+        dismissal_reason=task.dismissal_reason or "",
+        dismissed_at=task.dismissed_at.isoformat() if task.dismissed_at else None,
+        created_at=task.created_at.isoformat() if task.created_at else None,
+        goal_id=task.goal_id,
+        goal_title=goal_title,
+        source=source_info,
+    )
+
+
 @app.post("/api/tasks/{task_id}/status")
 async def update_task_status(
     task_id: int,
@@ -1171,6 +1263,12 @@ async def update_task_status(
         success = store.update_task_status(task_id, req.status)
     if not success:
         raise HTTPException(status_code=404, detail="Task not found")
+
+    # Log status change to task conversation
+    if req.status == "done":
+        store.add_message("system", "Task marked as done.", task_id=task_id)
+    elif req.status == "dismissed":
+        store.add_message("system", "Task dismissed by user.", task_id=task_id)
 
     # Auto-aggregate progress on linked goal when a task is completed
     if req.status == "done":
@@ -1589,6 +1687,27 @@ async def _run_post_chat(
                 )
         except Exception as e:
             log.debug("Post-chat agent error: %s", e)
+
+        # 1b. Persist agent action summaries to task conversation
+        if task_id is not None and actions:
+            for act in actions:
+                act_type = act.get("type", "")
+                act_title = act.get("title", "")
+                if act_type == "task_created" and act_title:
+                    store.add_message(
+                        "system", f"Agent created task: {act_title}",
+                        task_id=task_id,
+                    )
+                elif act_type == "task_completed" and act_title:
+                    store.add_message(
+                        "system", f"Agent completed task: {act_title}",
+                        task_id=task_id,
+                    )
+                elif act_type == "progress" and act.get("note"):
+                    store.add_message(
+                        "system", f"Progress logged: {act['note']}",
+                        task_id=task_id,
+                    )
 
         # 2. Run conversation compressor if needed (global chat only)
         if goal_id is None and task_id is None:

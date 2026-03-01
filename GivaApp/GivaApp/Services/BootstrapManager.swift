@@ -502,6 +502,12 @@ class BootstrapManager {
 
     // MARK: - Phase 4+5: Observe Server Bootstrap
 
+    /// Public entry point for ViewModel to push a bootstrap status update
+    /// (e.g., after proactive REST poll following model selection).
+    func applyServerStatusFromViewModel(_ status: BootstrapStatusResponse) {
+        applyServerStatus(status, source: "ViewModel-poll")
+    }
+
     private func applyServerStatus(_ status: BootstrapStatusResponse, source: String = "unknown") {
         serverStatus = status
         isReady = status.ready
@@ -511,12 +517,13 @@ class BootstrapManager {
             errorMessage = error
         }
 
-        // Extract download progress from the flat progress dict
-        if let progress = status.progress, !progress.isEmpty {
+        // Always update download progress — even empty dict clears stale data
+        if let progress = status.progress {
             downloadProgress = progress
             for (modelId, info) in progress {
                 let short = modelId.replacingOccurrences(of: "mlx-community/", with: "")
-                log.debug("[\(source)] \(short): \(String(format: "%.1f", info.percent))% (\(Int(info.downloadedMb ?? 0)) MB)")
+                let statusStr = info.status ?? "unknown"
+                log.debug("[\(source)] \(short): \(String(format: "%.1f", info.percent))% (\(Int(info.downloadedMb ?? 0)) MB) [\(statusStr)]")
             }
         }
     }

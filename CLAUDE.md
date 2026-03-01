@@ -114,6 +114,7 @@ GivaApp/                        # SwiftUI macOS app (Xcode project)
 │   ├── ChatView.swift          # Chat messages + input + MarkdownText renderer
 │   ├── TaskListView.swift      # Task list with priority indicators
 │   ├── TaskChatView.swift      # Task-scoped contextual AI chat
+│   ├── TaskDetailView.swift    # Task detail: title, desc, source, chat
 │   ├── GoalsWindowView.swift   # Goals detail window (strategy, objectives, goal chat)
 │   ├── SettingsView.swift      # Settings window (⌘,): Models, Sync, General, Goals, Profile
 │   ├── QuickActionsView.swift  # Bottom action bar
@@ -304,6 +305,7 @@ The macOS frontend: menu bar panel, full window, and all UI views.
 | `GivaApp/Views/ChatView.swift` | Chat messages + input + Markdown renderer |
 | `GivaApp/Views/TaskListView.swift` | Task list with priority indicators |
 | `GivaApp/Views/TaskChatView.swift` | Task-scoped contextual AI chat |
+| `GivaApp/Views/TaskDetailView.swift` | Task detail: title, desc, source link, chat history |
 | `GivaApp/Views/GoalsWindowView.swift` | Goals: strategy, objectives, goal-scoped chat |
 | `GivaApp/Views/SettingsView.swift` | Settings window (⌘,): Models, Sync, General, Goals, Profile tabs |
 | `GivaApp/Views/QuickActionsView.swift` | Bottom action bar (sync, voice, reset) |
@@ -372,6 +374,7 @@ Visual browser task execution via Chrome extension + VLM inference.
 - **Full window on launch**: The app always opens the full window when the server becomes ready, not just the menu bar popover. The menu bar popover is the "minimized" state — an active user choice (via the "Minimize to Menu Bar" toolbar button). The `FullWindowLauncherView` / `lastUsedFullWindow` preference are removed; `GivaApp.swift` now uses `MenuBarContent` (a dedicated View struct with `@Environment(\.openWindow)`) that auto-opens the main window in `onChange(of: bootstrap.isReady)`.
 - **Quick-drop panel (Option+Space)**: A lightweight floating text field for fast prompt capture. Registered via `NSEvent.addLocalMonitorForEvents` (works when app/menu bar active) + `addGlobalMonitorForEvents` (works from any app if Accessibility granted). Enter sends the prompt as a background chat message (fire-and-forget), Cmd+Enter opens the full UI with the prompt in the input field. The hotkey sets `viewModel.quickDropRequested`, and `MenuBarContent` bridges it to `openWindow(id: "quick-drop")`.
 - **Quit confirmation with server lifecycle**: The "Quit Giva" gear menu item shows a confirmation with two options: "Quit" (keeps the daemon running for CLI access) and "Quit & Stop Server" (bootouts the launchd daemon before terminating). Uses the established inline confirmation banner pattern in the popover and `.confirmationDialog` in the full window.
+- **Task detail as sidebar + content**: Individual tasks are listed in the sidebar (like goals). Clicking a task shows `TaskDetailView` in the content pane — a vertical stack: title/metadata header, description, source deep link (email/event/chat), then a full chat history + input field. The chat history includes agent action logs (persisted as `system` role messages). In the menu bar popover, clicking a task opens the full window with that task selected. `GET /api/tasks/{task_id}` returns enriched task info including source summary (email subject/sender or event summary).
 
 ## Agent Architecture
 
@@ -451,6 +454,7 @@ Uses the **Swift Testing** framework (`@Test`, `#expect`, `@Suite`). Test target
 - **`APIServiceProtocol`**: All ViewModels reference `any APIServiceProtocol`, never concrete `APIService`. This enables mock injection for testing. Default parameter values are provided via protocol extension.
 - **`AgentActionHandler`**: Shared agent action parsing (actions, confirmations, queued agent names) lives in `AgentActionHandler.swift`. Both `GivaViewModel` and `GoalsViewModel` use it — never duplicate parsing logic.
 - **No system dialogs in menu bar apps**: `.confirmationDialog`, `.alert`, and `.sheet` do not work reliably inside `MenuBarExtra(.window)` popovers — they appear behind the popover, fail to dismiss, or never show at all. **Always use inline confirmation banners** embedded in the view hierarchy instead. See `MainPanelView.confirmationBanner(for:)` for the pattern.
+- **List row hover UX**: In all list/row views (tasks, goals, sidebar items), the **entire row** must be hoverable and clickable — not just the text content. Always apply `.contentShape(Rectangle())` to the row's outermost container (after `Spacer()` and before `.onHover`/`.onTapGesture`). Use `.buttonStyle(.borderless)` (not `.plain`) on individual action buttons inside rows to allow independent tap targets. Wrap `.onHover` state changes in `withAnimation(.easeInOut(duration: 0.15))` for smooth visual feedback. Always provide `.contextMenu` as a right-click fallback for all row actions. See `TaskRow` in `TaskListView.swift` for the canonical pattern.
 - **Xcode project file**: When adding or removing `.swift` files outside of Xcode, you **must** manually update `GivaApp.xcodeproj/project.pbxproj`. Each new file requires entries in four places: (1) `PBXBuildFile` — a build reference pointing to the file reference, (2) `PBXFileReference` — the file's identity and type, (3) `PBXGroup` — add the file reference to its parent group's `children` list, (4) `PBXSourcesBuildPhase` — add the build reference to the `files` list. App source files use `A1xxxxxx`/`A2xxxxxx` IDs; test files use `B1xxxxxx`/`B2xxxxxx`. Forgetting any of these causes "Cannot find X in scope" build errors.
 - **Keyboard shortcuts**: `⌘N` = new chat, `⌘,` = settings, `⌥Space` = quick-drop prompt capture, `⌘⏎` in quick-drop = open in full chat, `⏎` in quick-drop = send in background, `Esc` = dismiss quick-drop. Shortcuts are registered as SwiftUI `.keyboardShortcut` modifiers (for in-app) and `NSEvent` monitors (for Option+Space global hotkey).
 

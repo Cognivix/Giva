@@ -302,6 +302,17 @@ final class MockAPIService: APIServiceProtocol, @unchecked Sendable {
         return try throwOrReturn(taskAIResult)
     }
 
+    var getTaskDetailCallCount = 0
+    var getTaskDetailResult: Result<TaskDetailResponse, Error>?
+    func getTaskDetail(taskId: Int) async throws -> TaskDetailResponse {
+        getTaskDetailCallCount += 1
+        if let result = getTaskDetailResult {
+            return try throwOrReturn(result)
+        }
+        throw NSError(domain: "MockAPIService", code: -1,
+                       userInfo: [NSLocalizedDescriptionKey: "No task detail result configured"])
+    }
+
     func streamTaskChat(taskId: Int, query: String) -> AsyncThrowingStream<SSEEvent, Error> {
         AsyncThrowingStream { $0.finish() }
     }

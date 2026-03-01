@@ -482,13 +482,19 @@ class APIService: APIServiceProtocol {
         return json
     }
 
+    func getTaskDetail(taskId: Int) async throws -> TaskDetailResponse {
+        return try await get("api/tasks/\(taskId)")
+    }
+
     func streamTaskChat(taskId: Int, query: String) -> AsyncThrowingStream<SSEEvent, Error> {
         let url = baseURL.appendingPathComponent("api/tasks/\(taskId)/chat")
         return sseStream(url: url, method: "POST", body: TaskChatRequest(query: query))
     }
 
     func getTaskMessages(taskId: Int, limit: Int = 50) async throws -> GoalMessagesResponse {
-        return try await get("/api/tasks/\(taskId)/messages?limit=\(limit)")
+        var components = URLComponents(url: baseURL.appendingPathComponent("api/tasks/\(taskId)/messages"), resolvingAgainstBaseURL: false)!
+        components.queryItems = [URLQueryItem(name: "limit", value: String(limit))]
+        return try await getURL(components.url!)
     }
 
     func goalBrainstorm(goalId: Int) async throws -> [String: Any] {

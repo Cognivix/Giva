@@ -114,6 +114,15 @@ private struct MenuBarContent: View {
                 }
             }
         }
+        // Bridge: popover task tap → open main window with task selected
+        .onChange(of: viewModel.pendingTaskChatId) { _, taskId in
+            if taskId != nil {
+                openWindow(id: "main-window")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    NSApp.activate(ignoringOtherApps: true)
+                }
+            }
+        }
         // Bridge: hotkey sets quickDropRequested, we open the window here
         // (openWindow is an environment action, only usable in view body/handlers)
         .onChange(of: viewModel.quickDropRequested) { _, requested in
