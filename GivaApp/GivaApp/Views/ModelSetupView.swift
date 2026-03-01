@@ -119,8 +119,10 @@ struct ModelSetupView: View {
     private func modelSelectionContent(_ models: AvailableModelsResponse) -> some View {
         VStack(spacing: 16) {
             if viewModel.isDownloadingModels {
-                // Show selected models with live progress
-                downloadingModelsCard
+                // Brief transition state — BootstrapView takes over once
+                // the server phase changes from awaiting_model_selection to
+                // downloading_user_models (within ~2s via SSE).
+                downloadTransitionCard
             } else {
                 recommendationCard(models.recommended, models: models)
 
@@ -282,120 +284,37 @@ struct ModelSetupView: View {
 
     // MARK: - Download Progress
 
-    /// Card shown during download — replaces the recommendation card.
-    /// Shows the actual selected models with live progress from the server.
-    private var downloadingModelsCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Label("Downloading selected models", systemImage: "arrow.down.circle")
+    /// Brief transition card shown between clicking "Use Recommended" and
+    /// the server advancing to downloading_user_models phase.  BootstrapView
+    /// takes over once the SSE event arrives (~2s).
+    private var downloadTransitionCard: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+                .controlSize(.regular)
+
+            Text("Starting download...")
                 .font(.headline)
 
-            // Show selected models with their roles
-            selectedModelRow(role: "Assistant", modelId: selectedAssistant)
-            selectedModelRow(role: "Filter", modelId: selectedFilter)
-            if !selectedVlm.isEmpty {
-                selectedModelRow(role: "Vision (VLM)", modelId: selectedVlm)
+            VStack(alignment: .leading, spacing: 4) {
+                modelLabel(role: "Assistant", modelId: selectedAssistant)
+                modelLabel(role: "Filter", modelId: selectedFilter)
+                if !selectedVlm.isEmpty {
+                    modelLabel(role: "Vision", modelId: selectedVlm)
+                }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding()
         .background(.fill.tertiary, in: RoundedRectangle(cornerRadius: 10))
     }
 
-    /// A single model row showing name, role, and live download progress.
-    private func selectedModelRow(role: String, modelId: String) -> some View {
-        let progress = bootstrap.downloadProgress[modelId]
-        let shortName = modelId.replacingOccurrences(of: "mlx-community/", with: "")
-
-        return VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text(role)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                if let p = progress {
-                    modelStatusBadge(p)
-                }
-            }
-
-            Text(shortName)
-                .font(.callout.bold())
-
-            if let p = progress {
-                modelProgressIndicator(p)
-            } else {
-                // Server hasn't reported this model yet
-                HStack(spacing: 6) {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text("Waiting...")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-        }
-        .padding(.vertical, 4)
-    }
-
-    @ViewBuilder
-    private func modelStatusBadge(_ progress: BootstrapStepProgress) -> some View {
-        if progress.percent >= 100 {
-            Label("Done", systemImage: "checkmark.circle.fill")
-                .font(.caption2)
-                .foregroundStyle(.green)
-        } else if progress.status == "queued" {
-            Text("Queued")
-                .font(.caption2)
+    private func modelLabel(role: String, modelId: String) -> some View {
+        HStack(spacing: 4) {
+            Text(role + ":")
+                .font(.caption)
                 .foregroundStyle(.secondary)
-        } else if progress.status == "preparing" || progress.status == "querying_size" {
-            Text(progress.displayStatus)
-                .font(.caption2)
-                .foregroundStyle(.orange)
-        } else if progress.percent >= 0 {
-            Text(String(format: "%.1f%%", progress.percent))
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.blue)
-        }
-    }
-
-    @ViewBuilder
-    private func modelProgressIndicator(_ progress: BootstrapStepProgress) -> some View {
-        if progress.percent >= 100 {
-            // Complete — no progress bar needed
-            EmptyView()
-        } else if progress.percent >= 0 {
-            // Determinate progress
-            ProgressView(value: progress.percent, total: 100)
-                .tint(.blue)
-
-            HStack {
-                Text(String(format: "%.1f%%", progress.percent))
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                Spacer()
-                if let dlMb = progress.downloadedMb,
-                   let totalMb = progress.totalMb, totalMb > 0 {
-                    Text(String(
-                        format: "%.1f / %.1f GB",
-                        dlMb / 1024, totalMb / 1024
-                    ))
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                }
-            }
-        } else {
-            // Indeterminate — preparing or size unknown
-            HStack(spacing: 6) {
-                ProgressView()
-                    .controlSize(.small)
-                Text(progress.displayStatus)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                if let dlMb = progress.downloadedMb, dlMb > 0 {
-                    Text(String(format: "%.0f MB", dlMb))
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                }
-            }
+            Text(modelId.replacingOccurrences(of: "mlx-community/", with: ""))
+                .font(.caption.bold())
         }
     }
 

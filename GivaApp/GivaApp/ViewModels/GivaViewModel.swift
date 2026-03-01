@@ -1119,8 +1119,16 @@ class GivaViewModel {
         Task {
             do {
                 _ = try await api.selectModels(assistant: assistant, filter: filter, vlm: vlm)
-                // Bootstrap SSE stream will report download progress.
-                // The BootstrapManager observes it and updates isReady.
+                // Proactively poll bootstrap status to speed up the view
+                // transition from ModelSetupView → BootstrapView.  The SSE
+                // stream will also deliver updates, but polling catches
+                // the phase change faster.
+                if let bm = bootstrapManager {
+                    try? await Task.sleep(nanoseconds: 500_000_000)  // 0.5s
+                    if let status = try? await api.getBootstrapStatus() {
+                        bm.applyServerStatusFromViewModel(status)
+                    }
+                }
             } catch {
                 modelSetupError = "Failed to save model selection: \(error.localizedDescription)"
                 isDownloadingModels = false

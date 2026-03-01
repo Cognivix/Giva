@@ -502,6 +502,12 @@ class BootstrapManager {
 
     // MARK: - Phase 4+5: Observe Server Bootstrap
 
+    /// Public entry point for ViewModel to push a bootstrap status update
+    /// (e.g., after proactive REST poll following model selection).
+    func applyServerStatusFromViewModel(_ status: BootstrapStatusResponse) {
+        applyServerStatus(status, source: "ViewModel-poll")
+    }
+
     private func applyServerStatus(_ status: BootstrapStatusResponse, source: String = "unknown") {
         serverStatus = status
         isReady = status.ready
