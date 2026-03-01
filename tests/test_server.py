@@ -569,6 +569,52 @@ class TestSpecialTokenFilter:
         assert "</think>" in result
         assert "visible" in result
 
+    def test_standalone_end_closes_analysis(self, filt):
+        """When analysis is open and <|end|> arrives without final channel, it closes think."""
+        text = "<|channel|>analysis<|message|>reasoning here<|end|>The visible answer."
+        result = filt.feed(text) + filt.flush()
+        assert "<think>" in result
+        assert "</think>" in result
+        assert "The visible answer." in result
+
+    def test_standalone_end_streamed_pipeline(self):
+        """Full pipeline: GPT-OSS model closes analysis with just <|end|> (no final channel)."""
+        from giva.server import _SpecialTokenFilter, _ThinkParser
+
+        filt = _SpecialTokenFilter()
+        parser = _ThinkParser()
+
+        tokens = [
+            "<|channel|>", "analysis", "<|message|>",
+            "Let me think about this carefully.",
+            "<|end|>",
+            "Here is my answer to your question."
+        ]
+
+        all_events = []
+        for token in tokens:
+            normalised = filt.feed(token)
+            if normalised:
+                all_events += parser.feed(normalised)
+        remaining = filt.flush()
+        if remaining:
+            all_events += parser.feed(remaining)
+        all_events += parser.flush()
+
+        thinking = "".join(d for t, d in all_events if t == "thinking")
+        visible = "".join(d for t, d in all_events if t == "token")
+
+        assert "Let me think about this carefully." in thinking
+        assert "Here is my answer to your question." in visible
+        assert "<|" not in visible
+
+    def test_flush_closes_unclosed_analysis(self, filt):
+        """If stream ends while still in analysis, flush emits </think>."""
+        result = filt.feed("<|channel|>analysis<|message|>partial reasoning")
+        result += filt.flush()
+        assert "<think>" in result
+        assert "</think>" in result
+
 
 class TestStripSpecialTokens:
     """Tests for the non-streaming strip_special_tokens() utility."""
@@ -607,6 +653,19 @@ class TestStripSpecialTokens:
         text = "<|start|>assistant<|channel|>final<|message|>Hello"
         result = strip_special_tokens(text)
         assert result == "Hello"
+
+    def test_standalone_end_without_final_channel(self):
+        """GPT-OSS sometimes closes analysis with just <|end|>, no final channel."""
+        from giva.llm.engine import strip_special_tokens
+        text = (
+            "<|channel|>analysis<|message|>"
+            "Internal reasoning here."
+            "<|end|>"
+            "The visible response."
+        )
+        result = strip_special_tokens(text)
+        assert result == "The visible response."
+        assert "<|" not in result
 
     def test_real_gpt_onboarding_output(self):
         """Reproduce the exact output from the user's bug report."""

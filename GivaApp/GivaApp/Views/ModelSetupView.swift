@@ -39,9 +39,6 @@ struct ModelSetupView: View {
             }
 
             Divider()
-
-            footer
-                .padding()
         }
         .frame(width: 420, height: 580)
         .task {
@@ -419,16 +416,4 @@ struct ModelSetupView: View {
         return (aStatus, fStatus, vStatus)
     }
 
-    // MARK: - Footer
-
-    private var footer: some View {
-        HStack {
-            Button("Skip for now") {
-                viewModel.skipModelSetup()
-            }
-            .foregroundStyle(.secondary)
-
-            Spacer()
-        }
-    }
 }

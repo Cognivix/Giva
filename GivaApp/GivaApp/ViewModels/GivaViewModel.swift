@@ -1136,11 +1136,6 @@ class GivaViewModel {
         }
     }
 
-    func skipModelSetup() {
-        isModelSetupNeeded = false
-        Task { await triggerSync() }
-    }
-
     // MARK: - Upgrade (pip install + daemon restart, data preserved)
 
     func triggerUpgrade() async {

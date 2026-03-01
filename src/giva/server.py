@@ -761,6 +761,7 @@ class _SpecialTokenFilter:
 
     def __init__(self) -> None:
         self._buf = ""
+        self._in_analysis = False  # True after <think> emitted from analysis open
 
     def feed(self, text: str) -> str:
         """Feed a streaming chunk.  Returns normalised text (may be empty
@@ -768,9 +769,12 @@ class _SpecialTokenFilter:
         self._buf += text
 
         # --- Phase 1: replace full GPT channel patterns → <think> / </think>
+        old_buf = self._buf
         self._buf = self._buf.replace(self._GPT_OPEN, "<think>")
         for variant in self._GPT_CLOSE_VARIANTS:
             self._buf = self._buf.replace(variant, "</think>")
+        if self._buf != old_buf:
+            log.debug("SpecialTokenFilter: normalised %r → %r", old_buf, self._buf)
 
         # --- Phase 2: hold back potential partial patterns at the end
         hold = self._hold_point()
@@ -781,11 +785,35 @@ class _SpecialTokenFilter:
             emit = self._buf
             self._buf = ""
 
+        # --- Phase 2b: standalone <|end|> closes analysis if no close pattern matched.
+        # Some GPT models transition out of the analysis channel with just <|end|>
+        # (no <|channel|>final<|message|>).  This only runs on *emitted* text (not
+        # held text), so it won't interfere with a close pattern still assembling.
+        if self._in_analysis and "<|end|>" in emit and "</think>" not in emit:
+            emit = emit.replace("<|end|>", "</think>", 1)
+            log.debug("SpecialTokenFilter: <|end|> → </think> (standalone close)")
+
         # --- Phase 3: strip remaining <|...|> tokens + adjacent role words
-        return self._clean(emit)
+        result = self._clean(emit)
+
+        # --- Phase 4: track analysis state
+        if "<think>" in result:
+            self._in_analysis = True
+        if "</think>" in result:
+            self._in_analysis = False
+
+        if result != text and (text.startswith("<|") or result != emit):
+            log.debug("SpecialTokenFilter: feed(%r) → %r (held=%r)", text, result, self._buf)
+        return result
 
     def flush(self) -> str:
         """Flush remaining buffer at end of stream."""
+        if self._buf:
+            log.debug("SpecialTokenFilter: flush buf=%r", self._buf)
+        # If we're still in analysis mode at end of stream, close it
+        if self._in_analysis and "</think>" not in self._buf:
+            self._buf = "</think>" + self._buf
+            self._in_analysis = False
         result = self._clean(self._buf)
         self._buf = ""
         return result

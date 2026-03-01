@@ -51,6 +51,10 @@ def strip_special_tokens(text: str) -> str:
     ):
         text = text.replace(variant, "</think>")
 
+    # Standalone <|end|> closes an unclosed <think> block (GPT-OSS pattern)
+    if "<think>" in text and "</think>" not in text and "<|end|>" in text:
+        text = text.replace("<|end|>", "</think>", 1)
+
     # Strip <think>...</think> blocks (reasoning content) and orphan tags
     text = re.sub(r"<think>.*?</think>\s*", "", text, flags=re.DOTALL)
     text = text.replace("<think>", "").replace("</think>", "")
