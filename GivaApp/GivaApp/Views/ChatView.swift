@@ -301,6 +301,7 @@ struct MarkdownText: View {
         case numberedItem(number: String, text: String)
         case codeBlock(lines: [String])
         case blockquote(text: String)
+        case table(headers: [String], rows: [[String]])
         case divider
     }
 
@@ -354,6 +355,42 @@ struct MarkdownText: View {
             }
             .padding(.leading, 4)
 
+        case .table(let headers, let rows):
+            VStack(alignment: .leading, spacing: 0) {
+                // Header row
+                HStack(spacing: 0) {
+                    ForEach(Array(headers.enumerated()), id: \.offset) { _, header in
+                        Self.inlineMarkdown(header)
+                            .font(.system(size: 12, weight: .semibold))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 4)
+                    }
+                }
+                .background(Color.secondary.opacity(0.08))
+
+                Divider()
+
+                // Data rows
+                ForEach(Array(rows.enumerated()), id: \.offset) { rowIdx, row in
+                    HStack(spacing: 0) {
+                        ForEach(Array(row.enumerated()), id: \.offset) { _, cell in
+                            Self.inlineMarkdown(cell)
+                                .font(.system(size: 12))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 3)
+                        }
+                    }
+                    if rowIdx < rows.count - 1 {
+                        Divider().opacity(0.5)
+                    }
+                }
+            }
+            .background(Color(nsColor: .textBackgroundColor).opacity(0.3))
+            .cornerRadius(6)
+            .padding(.vertical, 2)
+
         case .divider:
             Divider()
                 .padding(.vertical, 2)
@@ -381,6 +418,26 @@ struct MarkdownText: View {
         }
     }
 
+    // MARK: - Table Helpers
+
+    private static func isTableSeparator(_ line: String) -> Bool {
+        let stripped = line.replacingOccurrences(of: " ", with: "")
+        guard stripped.contains("|"), stripped.contains("-") else { return false }
+        let cells = stripped.split(separator: "|", omittingEmptySubsequences: true)
+        return !cells.isEmpty && cells.allSatisfy { cell in
+            cell.allSatisfy { $0 == "-" || $0 == ":" }
+        }
+    }
+
+    private static func parseTableRow(_ line: String) -> [String] {
+        let parts = line.split(separator: "|", omittingEmptySubsequences: false)
+            .map { String($0).trimmingCharacters(in: .whitespaces) }
+        var result = Array(parts)
+        if result.first?.isEmpty == true { result.removeFirst() }
+        if result.last?.isEmpty == true { result.removeLast() }
+        return result
+    }
+
     // MARK: - Block Parser
 
     /// Parse markdown source into an array of typed blocks.
@@ -390,7 +447,11 @@ struct MarkdownText: View {
     /// and paragraph text. Consecutive non-block lines merge into a single paragraph.
     private static func parseBlocks(_ text: String) -> [Block] {
         var blocks: [Block] = []
-        let lines = text.components(separatedBy: "\n")
+        // Pre-process: convert common HTML tags to markdown equivalents
+        let cleaned = text
+            .replacingOccurrences(of: "<br\\s*/?>", with: "\n", options: .regularExpression)
+            .replacingOccurrences(of: "</?p>", with: "\n", options: .regularExpression)
+        let lines = cleaned.components(separatedBy: "\n")
         var index = 0
         var paragraphBuffer: [String] = []
 
@@ -440,6 +501,31 @@ struct MarkdownText: View {
                 blocks.append(.divider)
                 index += 1
                 continue
+            }
+
+            // Markdown table (header row + separator row + data rows)
+            if trimmed.contains("|") {
+                let nextIndex = index + 1
+                if nextIndex < lines.count {
+                    let nextTrimmed = lines[nextIndex]
+                        .trimmingCharacters(in: .whitespaces)
+                    if Self.isTableSeparator(nextTrimmed) {
+                        flushParagraph()
+                        let headers = Self.parseTableRow(trimmed)
+                        var dataRows: [[String]] = []
+                        var rowIndex = nextIndex + 1
+                        while rowIndex < lines.count {
+                            let rowLine = lines[rowIndex]
+                                .trimmingCharacters(in: .whitespaces)
+                            guard rowLine.contains("|"), !rowLine.isEmpty else { break }
+                            dataRows.append(Self.parseTableRow(rowLine))
+                            rowIndex += 1
+                        }
+                        blocks.append(.table(headers: headers, rows: dataRows))
+                        index = rowIndex
+                        continue
+                    }
+                }
             }
 
             // Headings

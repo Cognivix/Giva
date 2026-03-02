@@ -110,7 +110,13 @@ Guidelines:
 - After each user response, FIRST write your visible reply (the next question or wrap-up message), \
 THEN at the very end output a <profile_update> JSON block with any fields you can now fill. \
 The visible text MUST come before the <profile_update> tag — never start with the tag.
-- When you have enough information (after 3-5 questions), set "interview_complete": true in the JSON block.
+- When you have enough information (after 3-5 questions), write a brief wrap-up message \
+(2-3 sentences, no questions) and set "interview_complete": true in the JSON block.
+- NEVER set "interview_complete": true if your visible text contains a question. \
+If you are still asking a question, set "continue_interview": true and "interview_complete": false.
+- The wrap-up message should be a short, friendly confirmation of what you learned. \
+Do NOT include strategy overviews, action items, markdown tables, HTML tags, or <br> tags. \
+Keep it concise — the user will see detailed suggestions in the Goals section.
 
 Profile update JSON schema (include only fields you have information for):
 <profile_update>
@@ -139,7 +145,9 @@ Profile update JSON schema (include only fields you have information for):
   "continue_interview": true,
   "interview_complete": false
 }}
-</profile_update>"""
+</profile_update>
+
+"continue_interview" and "interview_complete" are mutually exclusive — set exactly one to true."""
 
 ONBOARDING_START_USER = (
     "This is the start of the onboarding interview. "
@@ -149,7 +157,8 @@ ONBOARDING_START_USER = (
 
 ONBOARDING_CONTINUE_USER = (
     "The user responded. First write your visible reply (acknowledge their answer "
-    "and ask the next question, or wrap up if done), then at the end output "
+    "and ask the next question, or write a brief 2-3 sentence wrap-up if done — "
+    "no tables or lengthy overviews), then at the end output "
     "the <profile_update> JSON block. Your visible text must come BEFORE the tag. /no_think"
 )
 

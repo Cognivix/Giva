@@ -296,32 +296,39 @@ struct GivaMainWindowView: View {
 
     @ViewBuilder
     private func goalsSection(_ goalsVM: GoalsViewModel) -> some View {
-        Section("Goals") {
-            goalTierSection("Long-term", goals: goalsVM.longTermGoals, icon: "mountain.2",
-                            viewModel: goalsVM)
-            goalTierSection("Mid-term", goals: goalsVM.midTermGoals, icon: "flag",
-                            viewModel: goalsVM)
-            goalTierSection("Short-term", goals: goalsVM.shortTermGoals, icon: "checkmark.circle",
-                            viewModel: goalsVM)
+        if !goalsVM.longTermGoals.isEmpty {
+            Section("Long-term Goals") {
+                ForEach(goalsVM.longTermGoals) { goal in
+                    goalRow(goal, viewModel: goalsVM)
+                        .tag(SidebarItem.goal(goal.id))
+                }
+            }
+        }
 
-            if goalsVM.goals.isEmpty && !goalsVM.isLoading {
+        if !goalsVM.midTermGoals.isEmpty {
+            Section("Mid-term Goals") {
+                ForEach(goalsVM.midTermGoals) { goal in
+                    goalRow(goal, viewModel: goalsVM)
+                        .tag(SidebarItem.goal(goal.id))
+                }
+            }
+        }
+
+        if !goalsVM.shortTermGoals.isEmpty {
+            Section("Short-term Goals") {
+                ForEach(goalsVM.shortTermGoals) { goal in
+                    goalRow(goal, viewModel: goalsVM)
+                        .tag(SidebarItem.goal(goal.id))
+                }
+            }
+        }
+
+        if goalsVM.goals.isEmpty && !goalsVM.isLoading {
+            Section("Goals") {
                 Text("No goals yet")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .padding(.leading, 4)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func goalTierSection(_ title: String, goals: [GoalItem], icon: String,
-                                  viewModel goalsVM: GoalsViewModel) -> some View {
-        if !goals.isEmpty {
-            DisclosureGroup(title) {
-                ForEach(goals) { goal in
-                    goalRow(goal, viewModel: goalsVM)
-                        .tag(SidebarItem.goal(goal.id))
-                }
             }
         }
     }

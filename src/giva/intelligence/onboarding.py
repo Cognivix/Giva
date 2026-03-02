@@ -178,10 +178,8 @@ def continue_onboarding(
     # Persist assistant response to conversations table
     store.add_message("assistant", visible_full)
 
-    # Check if interview is complete
-    is_complete = False
-    if update and update.get("interview_complete"):
-        is_complete = True
+    # Check if interview is complete (with validation safeguards)
+    is_complete = _validate_completion(update, visible_full, step)
 
     store.update_profile_data({
         "onboarding_step": step,
@@ -205,6 +203,41 @@ def continue_onboarding(
 
 
 # --- Internal helpers ---
+
+# Minimum number of exchanges before onboarding can complete
+_MIN_COMPLETION_STEP = 3
+
+
+def _validate_completion(
+    update: Optional[dict], visible_text: str, step: int
+) -> bool:
+    """Validate that the LLM's interview_complete flag is legitimate.
+
+    Returns True only if:
+    1. The update dict has interview_complete=True
+    2. At least _MIN_COMPLETION_STEP exchanges have occurred
+    3. The visible text does NOT end with a question mark
+    """
+    if not update or not update.get("interview_complete"):
+        return False
+
+    if step < _MIN_COMPLETION_STEP:
+        log.warning(
+            "Onboarding: LLM tried to complete at step %d (min %d), overriding",
+            step,
+            _MIN_COMPLETION_STEP,
+        )
+        return False
+
+    stripped = visible_text.strip()
+    if stripped.endswith("?"):
+        log.warning(
+            "Onboarding: LLM set interview_complete but visible text ends "
+            "with '?' — overriding to continue"
+        )
+        return False
+
+    return True
 
 
 def _gather_observations(store: Store) -> str:
@@ -403,15 +436,17 @@ def _parse_and_save(
         log.warning("Could not parse onboarding profile update JSON")
         return None
 
-    # Remove transient fields before saving to profile_data
-    update.pop("continue_interview", None)
+    # Separate transient signaling fields from persistent profile data
+    _TRANSIENT_FIELDS = ("continue_interview", "interview_complete")
+    raw_update = dict(update)  # preserve for caller (flow control)
+    save_update = {k: v for k, v in update.items() if k not in _TRANSIENT_FIELDS}
 
     # Merge into profile_data (preserving existing keys)
     # Handle nested dicts (priority_rules, work_schedule) with merge
     profile = store.get_profile()
     pd = profile.profile_data if profile else {}
 
-    for key, value in update.items():
+    for key, value in save_update.items():
         if value is None:
             continue
         if isinstance(value, dict) and isinstance(pd.get(key), dict):
@@ -420,8 +455,8 @@ def _parse_and_save(
             pd[key] = value
 
     store.update_profile_data(pd)
-    log.info("Onboarding step %d: merged %d fields into profile_data", step, len(update))
-    return update
+    log.info("Onboarding step %d: merged %d fields into profile_data", step, len(save_update))
+    return raw_update
 
 
 def _parse_json(text: str) -> Optional[dict]:

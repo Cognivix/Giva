@@ -7,6 +7,7 @@ from giva.intelligence.onboarding import (
     _filter_visible_token,
     _gather_observations,
     _parse_json,
+    _validate_completion,
     is_onboarding_needed,
 )
 
@@ -105,6 +106,39 @@ def test_gather_observations_includes_events(tmp_db):
 
     obs = _gather_observations(tmp_db)
     assert "Team standup" in obs
+
+
+# --- _validate_completion ---
+
+
+def test_validate_completion_rejects_early_step():
+    """Should reject completion before step 3."""
+    update = {"interview_complete": True}
+    assert _validate_completion(update, "Great, I have everything!", 2) is False
+
+
+def test_validate_completion_rejects_question():
+    """Should reject completion when visible text ends with a question."""
+    update = {"interview_complete": True}
+    assert _validate_completion(update, "What tools do you use?", 4) is False
+
+
+def test_validate_completion_accepts_valid():
+    """Should accept completion at step 3+ with non-question text."""
+    update = {"interview_complete": True}
+    assert _validate_completion(update, "Thanks, I have a good picture now.", 3) is True
+
+
+def test_validate_completion_no_flag():
+    """Should return False when interview_complete is not set."""
+    assert _validate_completion({"role": "engineer"}, "text", 5) is False
+    assert _validate_completion(None, "text", 5) is False
+
+
+def test_validate_completion_rejects_question_with_whitespace():
+    """Should handle trailing whitespace before question mark."""
+    update = {"interview_complete": True}
+    assert _validate_completion(update, "What do you think?  ", 4) is False
 
 
 # --- _filter_visible_token ---

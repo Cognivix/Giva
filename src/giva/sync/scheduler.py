@@ -231,15 +231,18 @@ class SyncScheduler:
 
         self._broadcast({"event": "sync_started", "data": ""})
 
-        # Mail sync uses LLM (filter model for email classification)
+        # Mail sync uses LLM (filter model for email classification).
+        # The lock is passed down so it's held only during the brief LLM
+        # classify call — JXA I/O runs outside the lock to avoid blocking
+        # interactive requests (chat, brainstorm).
         try:
-            with self._acquire_llm():
-                mail_synced, _ = sync_mail_jxa(
-                    self.store,
-                    self.config.mail.mailboxes,
-                    self.config.mail.batch_size,
-                    config=self.config,
-                )
+            mail_synced, _ = sync_mail_jxa(
+                self.store,
+                self.config.mail.mailboxes,
+                self.config.mail.batch_size,
+                config=self.config,
+                llm_lock=self._llm_lock,
+            )
         except Exception as e:
             log.error("Background mail sync error: %s", e)
 

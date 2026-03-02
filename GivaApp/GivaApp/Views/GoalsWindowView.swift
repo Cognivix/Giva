@@ -54,6 +54,8 @@ struct GoalDetailView: View {
                 }
                 .padding()
             }
+            .frame(minHeight: 200)
+            .layoutPriority(1)
 
             Divider()
 
@@ -69,6 +71,7 @@ struct GoalDetailView: View {
             // Goal chat messages
             ChatMessageList(
                 messages: viewModel.goalChatMessages,
+                isLoadingModel: viewModel.isGoalChatLoadingModel,
                 emptyIcon: "bubble.left.and.text.bubble.right",
                 emptyTitle: "Chat about this goal with Giva.",
                 emptySubtitle: "Ask questions, brainstorm strategies,\nor discuss progress.",
@@ -76,7 +79,6 @@ struct GoalDetailView: View {
                 onApproveAgent: { jobId in viewModel.approveAgent(jobId: jobId) },
                 onDismissAgent: { jobId in viewModel.dismissAgent(jobId: jobId) }
             )
-            .layoutPriority(1)
 
             Divider()
 
@@ -239,8 +241,31 @@ struct GoalDetailView: View {
                 }
             }
 
+            // Brainstorm in progress indicator
+            if viewModel.isBrainstorming {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Brainstorm in progress")
+                            .font(.callout.bold())
+                        Text("See the chat below for the conversation.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    Spacer()
+                }
+                .padding(10)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color.purple.opacity(0.08))
+                        .strokeBorder(Color.purple.opacity(0.2), lineWidth: 1)
+                )
+            }
+
             // Empty state CTA when no strategies exist
-            if goal.strategies.isEmpty && !viewModel.isStrategyStreaming {
+            if goal.strategies.isEmpty && !viewModel.isStrategyStreaming
+                && !viewModel.isBrainstorming {
                 VStack(spacing: 10) {
                     Image(systemName: "lightbulb.max")
                         .font(.largeTitle)

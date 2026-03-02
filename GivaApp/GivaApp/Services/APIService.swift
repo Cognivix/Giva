@@ -368,7 +368,13 @@ class APIService: APIServiceProtocol {
     }
 
     func getGoalMessages(goalId: Int, limit: Int = 50) async throws -> GoalMessagesResponse {
-        return try await get("/api/goals/\(goalId)/messages?limit=\(limit)")
+        var components = URLComponents(
+            url: baseURL.appendingPathComponent("api/goals/\(goalId)/messages"),
+            resolvingAgainstBaseURL: false
+        )!
+        components.queryItems = [URLQueryItem(name: "limit", value: String(limit))]
+        guard let url = components.url else { throw APIError.networkError(URLError(.badURL)) }
+        return try await getURL(url)
     }
 
     // MARK: - Daily Review

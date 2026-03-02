@@ -38,6 +38,8 @@ class GoalsViewModel {
     var goalChatMessages: [ChatMessage] = []
     var isGoalChatStreaming: Bool = false
     var goalChatInput: String = ""
+    var isGoalChatLoadingModel: Bool = false
+    var isBrainstorming: Bool = false
 
     // Create/Edit sheet
     var showCreateSheet: Bool = false
@@ -289,6 +291,7 @@ class GoalsViewModel {
     func startStrategyBrainstorm(goalId: Int) {
         guard !isGoalChatStreaming else { return }
 
+        isBrainstorming = true
         let kickoffText = "Help me brainstorm a strategy for this goal."
         goalChatMessages.append(ChatMessage(role: "user", content: kickoffText))
         goalChatMessages.append(ChatMessage(role: "assistant", content: "", isStreaming: true))
@@ -298,8 +301,19 @@ class GoalsViewModel {
             do {
                 let stream = apiService.streamStrategyBrainstorm(goalId: goalId)
                 for try await event in stream {
-                    if event.event == "token" {
+                    if event.event == "model_loading" {
+                        isGoalChatLoadingModel = true
+                    } else if event.event == "thinking" {
+                        isGoalChatLoadingModel = false
                         guard !goalChatMessages.isEmpty else { continue }
+                        goalChatMessages[goalChatMessages.count - 1].isThinking = true
+                        goalChatMessages[goalChatMessages.count - 1].thinkingContent += event.data
+                    } else if event.event == "token" {
+                        isGoalChatLoadingModel = false
+                        guard !goalChatMessages.isEmpty else { continue }
+                        if goalChatMessages[goalChatMessages.count - 1].isThinking {
+                            goalChatMessages[goalChatMessages.count - 1].isThinking = false
+                        }
                         goalChatMessages[goalChatMessages.count - 1].content += event.data
                     } else if event.event == "agent_actions" {
                         handleAgentActions(event.data)
@@ -308,6 +322,7 @@ class GoalsViewModel {
                     } else if event.event == "agent_queued" {
                         handleAgentQueued(event.data)
                     } else if event.event == "error" {
+                        isGoalChatLoadingModel = false
                         errorMessage = event.data
                     }
                 }
@@ -321,6 +336,8 @@ class GoalsViewModel {
                 goalChatMessages[goalChatMessages.count - 1].isStreaming = false
             }
             isGoalChatStreaming = false
+            isGoalChatLoadingModel = false
+            isBrainstorming = false
 
             await refreshSelectedGoal()
             await loadGoals()
@@ -426,8 +443,19 @@ class GoalsViewModel {
             do {
                 let stream = apiService.streamGoalChat(goalId: goalId, query: query)
                 for try await event in stream {
-                    if event.event == "token" {
+                    if event.event == "model_loading" {
+                        isGoalChatLoadingModel = true
+                    } else if event.event == "thinking" {
+                        isGoalChatLoadingModel = false
                         guard !goalChatMessages.isEmpty else { continue }
+                        goalChatMessages[goalChatMessages.count - 1].isThinking = true
+                        goalChatMessages[goalChatMessages.count - 1].thinkingContent += event.data
+                    } else if event.event == "token" {
+                        isGoalChatLoadingModel = false
+                        guard !goalChatMessages.isEmpty else { continue }
+                        if goalChatMessages[goalChatMessages.count - 1].isThinking {
+                            goalChatMessages[goalChatMessages.count - 1].isThinking = false
+                        }
                         goalChatMessages[goalChatMessages.count - 1].content += event.data
                     } else if event.event == "agent_actions" {
                         handleAgentActions(event.data)
@@ -436,6 +464,7 @@ class GoalsViewModel {
                     } else if event.event == "agent_queued" {
                         handleAgentQueued(event.data)
                     } else if event.event == "error" {
+                        isGoalChatLoadingModel = false
                         errorMessage = event.data
                     }
                 }
@@ -449,6 +478,7 @@ class GoalsViewModel {
                 goalChatMessages[goalChatMessages.count - 1].isStreaming = false
             }
             isGoalChatStreaming = false
+            isGoalChatLoadingModel = false
 
             // Refresh goal + sidebar to pick up new tasks/objectives/progress
             await refreshSelectedGoal()
@@ -604,6 +634,8 @@ class GoalsViewModel {
         isPlanThinking = false
         isPlanReviewStreaming = false
         isGoalChatStreaming = false
+        isGoalChatLoadingModel = false
+        isBrainstorming = false
         isReviewStreaming = false
     }
 

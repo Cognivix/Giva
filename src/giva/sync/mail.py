@@ -13,6 +13,7 @@ import hashlib
 import json
 import logging
 import re
+import threading
 from datetime import datetime
 from typing import Optional
 
@@ -90,12 +91,23 @@ def _mailbox_accessor(mailbox_name: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _classify_chunk(messages: list[dict], config: GivaConfig, store: Store) -> list[dict]:
+def _classify_chunk(
+    messages: list[dict],
+    config: GivaConfig,
+    store: Store,
+    llm_lock: threading.Lock | None = None,
+) -> list[dict]:
     """Classify a chunk of email headers using the filter LLM.
 
     Returns only the messages classified as KEEP.
     On any LLM error, defaults to keeping all messages (fail-safe).
     Uses a personalized filter prompt when the user has completed onboarding.
+
+    When *llm_lock* is provided, the lock is held only for the duration of
+    the actual LLM generate call — not for the prompt-building or
+    response-parsing I/O.  This keeps the lock free for interactive
+    user-initiated requests (brainstorm, chat) that would otherwise block
+    behind a long sync cycle.
     """
     from giva.llm.engine import manager
     from giva.llm.prompts import EMAIL_FILTER_USER, build_filter_prompt
@@ -123,13 +135,23 @@ def _classify_chunk(messages: list[dict], config: GivaConfig, store: Store) -> l
     ]
 
     try:
-        response = manager.generate(
-            config.llm.filter_model,
-            prompt_messages,
-            max_tokens=256,
-            temp=0.1,  # Low temperature for deterministic classification
-            top_p=0.95,
-        )
+        if llm_lock is not None:
+            with llm_lock:
+                response = manager.generate(
+                    config.llm.filter_model,
+                    prompt_messages,
+                    max_tokens=256,
+                    temp=0.1,
+                    top_p=0.95,
+                )
+        else:
+            response = manager.generate(
+                config.llm.filter_model,
+                prompt_messages,
+                max_tokens=256,
+                temp=0.1,  # Low temperature for deterministic classification
+                top_p=0.95,
+            )
         verdicts = _parse_filter_response(response, len(messages))
         kept = [msg for msg, verdict in zip(messages, verdicts) if verdict]
         skipped = len(messages) - len(kept)
@@ -188,18 +210,25 @@ def sync_mail_jxa(
     batch_size: int = 50,
     on_progress: Optional[callable] = None,
     config: Optional[GivaConfig] = None,
+    llm_lock: threading.Lock | None = None,
 ) -> tuple[int, int]:
     """Sync emails from Apple Mail via JXA.
 
     Returns (synced_count, filtered_count).
     Uses chunked header-only fetching with LLM classification.
+
+    When *llm_lock* is provided it is passed down to ``_classify_chunk``
+    which acquires/releases it only for the brief LLM generate call.
+    JXA I/O (header fetching, body fetching) runs **outside** the lock
+    so interactive user requests (chat, brainstorm) are not blocked.
     """
     total_synced = 0
     total_filtered = 0
     for mailbox_name in mailboxes:
         try:
             synced, filtered = _sync_mailbox_headers(
-                store, mailbox_name, batch_size, on_progress, config
+                store, mailbox_name, batch_size, on_progress, config,
+                llm_lock=llm_lock,
             )
             total_synced += synced
             total_filtered += filtered
@@ -220,6 +249,7 @@ def _sync_mailbox_headers(
     total_count: int,
     on_progress: Optional[callable] = None,
     config: Optional[GivaConfig] = None,
+    llm_lock: threading.Lock | None = None,
 ) -> tuple[int, int]:
     """Sync headers from a mailbox in small chunks with LLM filtering.
 
@@ -243,7 +273,7 @@ def _sync_mailbox_headers(
 
         # LLM-based filtering (if config provided)
         if config is not None:
-            kept = _classify_chunk(messages, config, store)
+            kept = _classify_chunk(messages, config, store, llm_lock=llm_lock)
             filtered += len(messages) - len(kept)
         else:
             kept = messages

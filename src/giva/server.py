@@ -1104,8 +1104,10 @@ async def _sync_gen_to_sse(gen_fn, *args, **kwargs) -> AsyncGenerator[dict, None
 
     while True:
         item = await queue.get()
+        if item["event"] == "done":
+            break  # Don't yield — caller yields done after post-stream work
         yield item
-        if item["event"] in ("done", "error"):
+        if item["event"] == "error":
             break
 
     await future
@@ -1216,8 +1218,10 @@ async def _sync_gen_to_sse_with_voice(
 
     while True:
         item = await queue.get()
+        if item["event"] == "done":
+            break  # Don't yield — caller yields done after post-stream work
         yield item
-        if item["event"] in ("done", "error"):
+        if item["event"] == "error":
             break
 
     await future
@@ -1791,6 +1795,7 @@ async def task_chat(task_id: int, req: TaskChatRequest, request: Request):
                 "event": "agent_actions",
                 "data": json.dumps(actions),
             }
+        yield {"event": "done", "data": ""}
 
     return EventSourceResponse(event_generator())
 
@@ -1836,10 +1841,10 @@ async def sync(request: Request) -> SyncResponse:
         from giva.sync.calendar import sync_calendar
         from giva.sync.mail import sync_mail_jxa
 
-        with _llm_lock:
-            mail_synced, mail_filtered = sync_mail_jxa(
-                store, config.mail.mailboxes, config.mail.batch_size, config=config
-            )
+        mail_synced, mail_filtered = sync_mail_jxa(
+            store, config.mail.mailboxes, config.mail.batch_size,
+            config=config, llm_lock=_llm_lock,
+        )
 
         events_synced = sync_calendar(
             store, config.calendar.sync_window_past_days, config.calendar.sync_window_future_days
@@ -2161,6 +2166,7 @@ async def chat(req: ChatRequest, request: Request):
             # Agent routing check (after response is complete)
             async for event in _check_agent_routing(query_text, store, config):
                 yield event
+            yield {"event": "done", "data": ""}
     else:
         async def event_generator():
             async for event in _sync_gen_to_sse(handle_query, req.query, store, config):
@@ -2175,6 +2181,7 @@ async def chat(req: ChatRequest, request: Request):
             # Agent routing check (after response is complete)
             async for event in _check_agent_routing(query_text, store, config):
                 yield event
+            yield {"event": "done", "data": ""}
 
     return EventSourceResponse(event_generator())
 
@@ -2190,6 +2197,7 @@ async def suggest(request: Request):
     async def event_generator():
         async for event in _sync_gen_to_sse(get_suggestions, store, config):
             yield event
+        yield {"event": "done", "data": ""}
 
     return EventSourceResponse(event_generator())
 
@@ -2606,6 +2614,7 @@ async def onboarding_start(request: Request):
     async def event_generator():
         async for event in _sync_gen_to_sse(start_onboarding, store, config):
             yield event
+        yield {"event": "done", "data": ""}
 
     return EventSourceResponse(event_generator())
 
@@ -2626,6 +2635,7 @@ async def onboarding_respond(req: OnboardingRequest, request: Request):
             continue_onboarding, req.response, store, config
         ):
             yield event
+        yield {"event": "done", "data": ""}
 
     return EventSourceResponse(event_generator())
 
@@ -3629,10 +3639,9 @@ async def session_stream(request: Request):
                                         "event": "onboarding_thinking",
                                         "data": event["data"],
                                     }
-                                elif event["event"] == "done":
-                                    yield {"event": "onboarding_done", "data": ""}
                                 elif event["event"] == "error":
                                     yield {"event": "error", "data": event["data"]}
+                            yield {"event": "onboarding_done", "data": ""}
                         # else: history exists — UI replays from /api/session.
                         # User responses come via /api/session/respond.
                         # Don't mark operational here — respond endpoint will.
@@ -3739,14 +3748,15 @@ async def session_respond(req: OnboardingRequest, request: Request):
             elif etype == "model_loading":
                 yield {"event": "model_loading", "data": event["data"]}
                 _broadcast({"event": "model_loading", "data": event["data"]})
-            elif etype == "done":
-                log.info("session/respond: done (%d tokens)", token_count)
-                yield {"event": "onboarding_done", "data": ""}
-                _broadcast({"event": "onboarding_done", "data": ""})
             elif etype == "error":
                 log.error("session/respond: error=%s", event["data"])
                 yield {"event": "error", "data": event["data"]}
                 _broadcast({"event": "error", "data": event["data"]})
+
+        # Stream finished — emit onboarding_done
+        log.info("session/respond: done (%d tokens)", token_count)
+        yield {"event": "onboarding_done", "data": ""}
+        _broadcast({"event": "onboarding_done", "data": ""})
 
         # Check if onboarding just completed
         profile = store.get_profile()
@@ -3965,6 +3975,7 @@ async def generate_strategy(goal_id: int, request: Request):
     async def event_generator():
         async for event in _sync_gen_to_sse(_gen_strategy, goal_id, store, config):
             yield event
+        yield {"event": "done", "data": ""}
 
     return EventSourceResponse(event_generator())
 
@@ -3999,6 +4010,7 @@ async def strategy_brainstorm_kickoff(goal_id: int, request: Request):
         actions = await _run_post_chat(user_query, store, config, goal_id=goal_id)
         if actions:
             yield {"event": "agent_actions", "data": json.dumps(actions)}
+        yield {"event": "done", "data": ""}
 
     return EventSourceResponse(event_generator())
 
@@ -4066,6 +4078,7 @@ async def generate_plan(goal_id: int, request: Request):
             generate_tactical_plan, goal_id, store, config
         ):
             yield event
+        yield {"event": "done", "data": ""}
 
     return EventSourceResponse(event_generator())
 
@@ -4092,6 +4105,7 @@ async def review_plans(request: Request):
     async def event_generator():
         async for event in _sync_gen_to_sse(review_tactical_plans, store, config):
             yield event
+        yield {"event": "done", "data": ""}
 
     return EventSourceResponse(event_generator())
 
@@ -4204,6 +4218,7 @@ async def goal_chat(goal_id: int, req: GoalChatRequest, request: Request):
             original_query, store, config, goal_id=goal_id,
         ):
             yield event
+        yield {"event": "done", "data": ""}
 
     return EventSourceResponse(event_generator())
 
@@ -4283,6 +4298,7 @@ async def review_start(request: Request):
     async def event_generator():
         async for event in _sync_gen_to_sse(generate_review, store, config):
             yield event
+        yield {"event": "done", "data": ""}
 
     return EventSourceResponse(event_generator())
 
@@ -4355,6 +4371,7 @@ async def reflection_start(request: Request):
             generate_weekly_reflection, store, config
         ):
             yield event
+        yield {"event": "done", "data": ""}
 
     return EventSourceResponse(event_generator())
 
